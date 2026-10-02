@@ -1478,6 +1478,16 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(unlinkRes.isError, undefined)
 	const unlinkData = JSON.parse(unlinkRes.content[0].text)
 	assert.equal(unlinkData.unlinked, true)
+
+	const disconnectRes = await executeTool('admin', {
+		action: 'disconnect_app',
+		appId: stripeAppId,
+		revoke: false
+	}, adminSession.token)
+	assert.equal(disconnectRes.isError, undefined)
+	const disconnectData = JSON.parse(disconnectRes.content[0].text)
+	assert.equal(disconnectData.disconnected, true)
+	assert.equal(db.tokens.get(stripeAppId), null)
 })
 
 test('multi-account disambiguation in google_api tool', async () => {
@@ -1606,7 +1616,7 @@ test('rest api /api/apps and /api/links endpoints', async () => {
 	const deleteLinkData = await deleteLinkRes.json()
 	assert.equal(deleteLinkData.unlinked, true)
 
-	const deleteAppRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${newAppId}`, {
+	const deleteAppRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${newAppId}?revoke=false`, {
 		method: 'DELETE',
 		headers: { authorization: `Bearer ${adminSession.token}` }
 	})

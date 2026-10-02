@@ -324,7 +324,8 @@ async function connectApp (token, opts = {}) {
 	}
 }
 
-async function disconnectApp (token, { appId } = {}) {
+async function disconnectApp (token, opts = {}) {
+	const { appId, revoke = true } = opts
 	const appUrl = process.env.APP_URL || 'http://localhost:8080'
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
@@ -343,7 +344,8 @@ async function disconnectApp (token, { appId } = {}) {
 		error.status = 404
 		throw error
 	}
-	if (targetApp.provider === 'google') {
+	const shouldRevoke = revoke !== false && revoke !== 'false' && revoke !== 0
+	if (shouldRevoke && targetApp.provider === 'google') {
 		const upstream = targetApp.credentials?.refreshToken || targetApp.credentials?.accessToken
 		if (upstream) await revokeGoogleToken(upstream)
 	}

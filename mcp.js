@@ -47,6 +47,7 @@ const adminTool = {
 			apiKey: { type: 'string', description: 'API Key (for static key apps).' },
 			policy: { type: 'array', description: 'Granular policy JSON rules for a link.' },
 			admin: { type: 'boolean', description: 'Grant admin permissions to a new session.' },
+			revoke: { type: 'boolean', description: 'When action is disconnect_app, set to false to remove locally without upstream revocation (defaults to true).' },
 			allOthers: { type: 'boolean', description: 'When action is revoke, set to true to revoke all other sessions.' }
 		}
 	}

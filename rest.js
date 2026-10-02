@@ -139,7 +139,8 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 	if (pathname.startsWith('/api/apps/')) {
 		const appId = pathname.slice('/api/apps/'.length)
 		if (req.method === 'DELETE') {
-			const result = await api.auth.disconnectApp(token, { appId })
+			const revoke = query?.revoke !== 'false' && query?.revoke !== '0'
+			const result = await api.auth.disconnectApp(token, { appId, revoke })
 			sendJson(res, result)
 			return
 		}
