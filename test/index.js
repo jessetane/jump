@@ -145,7 +145,7 @@ test('mcp initialize & tools/list', async () => {
 	assert.equal(listRes.status, 200)
 	const listData = await listRes.json()
 	const toolNames = listData.result.tools.map(t => t.name)
-	assert.deepEqual(toolNames, ['google_api'])
+	assert.deepEqual(toolNames, [])
 })
 
 test('mcp auth tool without auth', async () => {

@@ -178,16 +178,16 @@ async function executeTool (name, args = {}, token) {
 }
 
 function getAvailableTools (token) {
-	if (!token) return [googleApiTool]
+	if (!token) return []
 	db.tokens.touchByToken(token)
 	const session = db.tokens.getByToken(token)
-	if (!session) return [googleApiTool]
+	if (!session) return []
 	const links = db.links.listBySessionId(session.id)
 	const list = []
 	if (session.admin) {
 		list.push(authTool)
 	}
-	if (links.some(l => l.app?.provider === 'google') || links.length === 0) {
+	if (links.some(l => l.app?.provider === 'google')) {
 		list.push(googleApiTool)
 	}
 	return list
