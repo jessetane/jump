@@ -1,10 +1,10 @@
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { createHash, timingSafeEqual, randomBytes } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as db from './db/index.js'
-import { getUserInfo, revokeGoogleToken, baseScopes, services, buildScopesFromSelection } from './google.js'
-import { getBody } from './util.js'
+import { getUserInfo, revokeGoogleToken, baseScopes, services, buildScopesFromSelection } from './providers/google.js'
+import { getBody, sendMail } from './util.js'
 import { validatePolicy } from './policy.js'
 
 export {
@@ -12,6 +12,7 @@ export {
 	handleAuthorize,
 	handleAuthorizeConsent,
 	handleCallback,
+	handleVerify,
 	handleToken,
 	handleRevoke,
 	handleProtectedResourceMetadata,
@@ -135,8 +136,10 @@ function redirectToGoogle (res, req, opts = {}) {
 		state = null,
 		codeChallenge = null,
 		codeChallengeMethod = null,
+		sessionName = null,
 		policy = null,
 		admin = 0,
+		reauthAppId = null,
 		scopes = baseScopes.join(' ')
 	} = opts
 	const callbackUrl = `${appUrl.replace(/\/$/, '')}/oauth/callback`
@@ -146,8 +149,10 @@ function redirectToGoogle (res, req, opts = {}) {
 		clientState: state,
 		codeChallenge,
 		codeChallengeMethod,
+		sessionName,
 		policy,
 		admin,
+		reauthAppId,
 		ip
 	})
 	const u = new URL('https://accounts.google.com/o/oauth2/v2/auth')
@@ -201,8 +206,10 @@ async function handleAuthorizeConsent (req, res) {
 	const query = {}
 	const serviceIdsRead = []
 	const serviceIdsWrite = []
+	let sessionName = null
 	let policy = null
 	let admin = 0
+	let reauthAppId = null
 
 	for (const [key, value] of params.entries()) {
 		if (key === 'services') {
@@ -215,6 +222,10 @@ async function handleAuthorizeConsent (req, res) {
 				const s = v.trim()
 				if (s) serviceIdsWrite.push(s)
 			}
+		} else if (key === 'session_name') {
+			sessionName = value.trim() || null
+		} else if (key === 'reauth_app_id') {
+			reauthAppId = value.trim() || null
 		} else if (key === 'policy') {
 			const trimmed = value.trim()
 			if (trimmed) {
@@ -254,8 +265,10 @@ async function handleAuthorizeConsent (req, res) {
 		state: query.state || null,
 		codeChallenge,
 		codeChallengeMethod,
+		sessionName,
 		policy,
 		admin,
+		reauthAppId,
 		scopes
 	})
 }
@@ -311,17 +324,103 @@ async function handleCallback (req, res, query) {
 	})
 	const ip = getClientIp(req)
 	const ua = req.headers['user-agent'] || null
-	const session = db.sessions.create({
+
+	if (oauthState.reauthAppId) {
+		const existingApp = db.tokens.get(oauthState.reauthAppId)
+		if (existingApp && existingApp.userId === user.id) {
+			const updatedCreds = {
+				...existingApp.credentials,
+				accessToken: tokenData.access_token,
+				refreshToken: tokenData.refresh_token || existingApp.credentials?.refreshToken
+			}
+			db.tokens.updateCredentials(existingApp.id, {
+				credentials: updatedCreds,
+				expiresAt: Date.now() + ((tokenData.expires_in || 3600) * 1000),
+				scopes: tokenData.scope || existingApp.scopes
+			})
+			if (oauthState.clientRedirectUri) {
+				const linkedSessions = db.links.listByAppId(existingApp.id)
+				const primarySessionId = linkedSessions[0]?.sessionTokenId
+				if (primarySessionId) {
+					const authCode = db.oauthCodes.create({
+						sessionId: primarySessionId,
+						clientRedirectUri: oauthState.clientRedirectUri,
+						codeChallenge: oauthState.codeChallenge,
+						codeChallengeMethod: oauthState.codeChallengeMethod
+					})
+					const target = new URL(oauthState.clientRedirectUri)
+					target.searchParams.set('code', authCode)
+					if (oauthState.clientState) target.searchParams.set('state', oauthState.clientState)
+					res.statusCode = 302
+					res.setHeader('location', target.toString())
+					res.end()
+					return
+				}
+			}
+			res.statusCode = 200
+			res.setHeader('content-type', 'text/html; charset=utf-8')
+			res.end('<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center;"><h2>App Re-authenticated</h2><p>Google app credentials have been successfully updated in place. Linked agent sessions will resume automatically.</p></body></html>')
+			return
+		}
+	}
+
+	const appToken = db.tokens.create({
 		userId: user.id,
-		refreshToken: tokenData.refresh_token || null,
-		accessToken: tokenData.access_token,
+		provider: 'google',
+		type: 'oauth',
+		name: `${user.name || email} Google`,
+		credentials: {
+			accessToken: tokenData.access_token,
+			refreshToken: tokenData.refresh_token || null
+		},
 		expiresAt: Date.now() + ((tokenData.expires_in || 3600) * 1000),
-		scope: tokenData.scope || null,
-		policy: oauthState.policy || null,
-		admin: oauthState.admin ? 1 : 0,
+		scopes: tokenData.scope || null
+	})
+
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		type: 'bearer',
+		name: oauthState.sessionName || (oauthState.admin ? 'Admin Session' : 'Default Session'),
+		admin: 0,
 		ip,
 		ua
 	})
+
+	db.links.create({
+		sessionTokenId: session.id,
+		appTokenId: appToken.id,
+		policy: oauthState.policy || null
+	})
+
+	if (oauthState.admin) {
+		const magicCode = randomBytes(24).toString('base64url')
+		const magicExpiresAt = Date.now() + (15 * 60 * 1000)
+		db.oauthStates.create({
+			userId: user.id,
+			sessionName: session.id,
+			clientRedirectUri: oauthState.clientRedirectUri,
+			clientState: oauthState.clientState,
+			codeChallenge: oauthState.codeChallenge,
+			codeChallengeMethod: oauthState.codeChallengeMethod,
+			admin: 1,
+			magicCode,
+			magicExpiresAt,
+			ip
+		})
+		const verifyUrl = `${appUrl.replace(/\/$/, '')}/oauth/verify?code=${magicCode}`
+		await sendMail({
+			to: email,
+			subject: 'Verify your MCP Admin Session',
+			text: `Click the link below to verify your admin session:\n\n${verifyUrl}\n\nThis link expires in 15 minutes.`,
+			html: `<p>Click the link below to verify your admin session:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p>This link expires in 15 minutes.</p>`
+		})
+		res.statusCode = 200
+		res.setHeader('content-type', 'text/html; charset=utf-8')
+		res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;"><h2>Admin Verification Required</h2><p>A verification email has been sent to <strong>${email}</strong>.</p><p>Click the link in your email to activate admin privileges for this session.</p></body></html>`)
+		return
+	}
+
 	if (oauthState.clientRedirectUri) {
 		const authCode = db.oauthCodes.create({
 			sessionId: session.id,
@@ -337,9 +436,54 @@ async function handleCallback (req, res, query) {
 		res.end()
 		return
 	}
+
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/plain; charset=utf-8')
 	res.end(`user: ${email}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
+}
+
+async function handleVerify (req, res, query) {
+	const code = query.code
+	if (!code) {
+		res.statusCode = 400
+		res.setHeader('content-type', 'text/plain')
+		res.end('Missing verification code.')
+		return
+	}
+	const state = db.oauthStates.consumeMagicCode(code)
+	if (!state) {
+		res.statusCode = 403
+		res.setHeader('content-type', 'text/plain')
+		res.end('Invalid or expired verification link.')
+		return
+	}
+	const sessionId = state.sessionName
+	const session = db.tokens.get(sessionId)
+	if (!session) {
+		res.statusCode = 404
+		res.setHeader('content-type', 'text/plain')
+		res.end('Session not found.')
+		return
+	}
+	db.tokens.setAdmin(session.id, true)
+	if (state.clientRedirectUri) {
+		const authCode = db.oauthCodes.create({
+			sessionId: session.id,
+			clientRedirectUri: state.clientRedirectUri,
+			codeChallenge: state.codeChallenge,
+			codeChallengeMethod: state.codeChallengeMethod
+		})
+		const target = new URL(state.clientRedirectUri)
+		target.searchParams.set('code', authCode)
+		if (state.clientState) target.searchParams.set('state', state.clientState)
+		res.statusCode = 302
+		res.setHeader('location', target.toString())
+		res.end()
+		return
+	}
+	res.statusCode = 200
+	res.setHeader('content-type', 'text/plain; charset=utf-8')
+	res.end(`Admin verified!\nuser: ${session.email}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
 }
 
 async function handleToken (req, res) {
@@ -399,7 +543,7 @@ async function handleToken (req, res) {
 			return
 		}
 	}
-	const session = db.sessions.get(authCode.sessionId)
+	const session = db.tokens.get(authCode.sessionId)
 	if (!session) {
 		console.warn('[oauth] Token exchange failed: Session not found')
 		res.statusCode = 400
@@ -412,7 +556,7 @@ async function handleToken (req, res) {
 	res.end(JSON.stringify({
 		access_token: session.token,
 		token_type: 'Bearer',
-		expires_in: 60 * 24 * 60 * 60
+		expires_in: 30 * 24 * 60 * 60
 	}))
 }
 
@@ -438,13 +582,16 @@ async function handleRevoke (req, res) {
 		res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Missing token parameter' }))
 		return
 	}
-	const session = db.sessions.getByToken(token)
+	const session = db.tokens.getByToken(token)
 	if (session) {
-		const upstreamToken = session.refreshToken || session.accessToken
-		if (upstreamToken) {
-			await revokeGoogleToken(upstreamToken)
+		const links = db.links.listBySessionId(session.id)
+		for (const link of links) {
+			if (link.app?.provider === 'google') {
+				const upstreamToken = link.app.credentials?.refreshToken || link.app.credentials?.accessToken
+				if (upstreamToken) await revokeGoogleToken(upstreamToken)
+			}
 		}
-		db.sessions.remove(session.id)
+		db.tokens.remove(session.id)
 	}
 	res.statusCode = 200
 	res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -457,6 +604,7 @@ const routes = {
 	'/oauth/authorize': (req, res, { query }) => handleAuthorize(req, res, query),
 	'/oauth/authorize/consent': (req, res) => handleAuthorizeConsent(req, res),
 	'/oauth/callback': (req, res, { query }) => handleCallback(req, res, query),
+	'/oauth/verify': (req, res, { query }) => handleVerify(req, res, query),
 	'/oauth/token': (req, res) => handleToken(req, res),
 	'/oauth/revoke': (req, res) => handleRevoke(req, res)
 }

@@ -49,7 +49,27 @@
 				line-height: 1.4;
 				text-align: center;
 				margin: 0;
-				margin-bottom: 0.75rem;
+				margin-bottom: 1.25rem;
+			}
+
+			.form-group {
+				margin-bottom: 1.25rem;
+			}
+
+			.form-group label {
+				display: block;
+				font-size: 0.9rem;
+				font-weight: bold;
+				margin-bottom: 0.35rem;
+				color: #333;
+			}
+
+			.form-group input[type=text] {
+				width: 100%;
+				padding: 9px 12px;
+				font-size: 0.95rem;
+				border: 1px solid #ccc;
+				border-radius: 4px;
 			}
 
 			.table {
@@ -166,10 +186,14 @@
 	</head>
 	<body class=column>
 		<div class="view column">
-			<h1>google-mcp</h1>
-			<p class="subtitle">Configure API services access</p>
+			<h1 id="page-title">google-mcp</h1>
+			<p class="subtitle" id="page-subtitle">Configure API services access</p>
 			<form id="consent-form" method="POST" action="/oauth/authorize/consent">
 				<div id="hidden-inputs"></div>
+				<div class="form-group" id="session-name-group">
+					<label for="session_name">Session Name</label>
+					<input type="text" name="session_name" id="session_name" placeholder="e.g. Chef Assistant, Personal Mac, Work Agent">
+				</div>
 				<table class="table">
 					<thead>
 						<tr>
@@ -204,14 +228,14 @@
 ]'></textarea>
 					<div class="policy-hint">Optional. Define sequential URL path and method match rules (first matching rule wins). If left blank, full access granted by selected scopes is allowed.</div>
 				</details>
-				<div class="admin-section">
+				<div class="admin-section" id="admin-group">
 					<label class="admin-label">
 						<input type="checkbox" name="admin" id="admin" value="true">
 						<span>Allow session administration (auth tool)</span>
 					</label>
-					<div class="admin-hint">Grant permission to inspect, list, and revoke other sessions. Leave unchecked for restricted or untrusted agents.</div>
+					<div class="admin-hint">Requires out-of-band email verification. Grants permissions to inspect, list, and manage sessions/apps.</div>
 				</div>
-				<button type="submit">Sign in with Google</button>
+				<button type="submit" id="submit-btn">Sign in with Google</button>
 			</form>
 		</div>
 		<script>
@@ -256,6 +280,22 @@
 
 			function init () {
 				const params = initData.params || {}
+				if (params.reauth_app_id) {
+					const titleEl = document.getElementById('page-title')
+					const subtitleEl = document.getElementById('page-subtitle')
+					const submitEl = document.getElementById('submit-btn')
+					if (titleEl) titleEl.textContent = 'Re-authenticate App'
+					if (subtitleEl) subtitleEl.textContent = 'Renew upstream Google OAuth credentials'
+					if (submitEl) submitEl.textContent = 'Re-authenticate with Google'
+					const sessGroup = document.getElementById('session-name-group')
+					if (sessGroup) sessGroup.style.display = 'none'
+					const adminGroup = document.getElementById('admin-group')
+					if (adminGroup) adminGroup.style.display = 'none'
+				}
+				if (params.session_name) {
+					const nameEl = document.getElementById('session_name')
+					if (nameEl) nameEl.value = params.session_name
+				}
 				const policyVal = params.policy
 				if (policyVal) {
 					const policyEl = document.getElementById('policy')
@@ -283,7 +323,7 @@
 				}
 				const hiddenContainer = document.getElementById('hidden-inputs')
 				for (const [key, value] of Object.entries(params)) {
-					if (key === 'policy' || key === 'services' || key === 'write' || key === 'admin') continue
+					if (key === 'policy' || key === 'services' || key === 'write' || key === 'admin' || key === 'session_name') continue
 					const input = document.createElement('input')
 					input.type = 'hidden'
 					input.name = key
