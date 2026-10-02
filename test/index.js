@@ -437,6 +437,7 @@ test('oauth consent html page and post consent flow', async () => {
 	assert.match(html, /"state":"client-state-123"/)
 
 	const consentBody = new URLSearchParams({
+		email: 'agent@example.com',
 		redirect_uri: 'https://chatgpt.com/callback',
 		state: 'client-state-123',
 		code_challenge: challenge,
@@ -450,18 +451,25 @@ test('oauth consent html page and post consent flow', async () => {
 		body: consentBody.toString(),
 		redirect: 'manual'
 	})
-	assert.equal(consentRes.status, 302)
-	const location = consentRes.headers.get('location')
-	assert.ok(location)
+	assert.equal(consentRes.status, 200)
+	const consentText = await consentRes.text()
+	assert.match(consentText, /Check your email/)
+
+	const row = db.sqlite.prepare('SELECT * FROM oauth_states WHERE email = ?').get('agent@example.com')
+	assert.ok(row)
+	assert.equal(row.client_redirect_uri, 'https://chatgpt.com/callback')
+	assert.equal(row.session_name, 'Coding Agent')
+
+	const verifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${row.magic_code}`, {
+		redirect: 'manual'
+	})
+	assert.equal(verifyRes.status, 302)
+	const location = verifyRes.headers.get('location')
 	const targetUrl = new URL(location)
-	assert.match(targetUrl.searchParams.get('scope'), /drive/)
-	assert.match(targetUrl.searchParams.get('scope'), /calendar/)
-	const stateParam = targetUrl.searchParams.get('state')
-	assert.ok(stateParam)
-	const stateRow = db.oauthStates.consume(stateParam)
-	assert.equal(stateRow.clientRedirectUri, 'https://chatgpt.com/callback')
-	assert.equal(stateRow.clientState, 'client-state-123')
-	assert.equal(stateRow.sessionName, 'Coding Agent')
+	assert.equal(targetUrl.hostname, 'chatgpt.com')
+	assert.equal(targetUrl.searchParams.get('state'), 'client-state-123')
+	const code = targetUrl.searchParams.get('code')
+	assert.ok(code)
 })
 
 test('direct browser authorize without redirect_uri', async () => {
@@ -472,7 +480,9 @@ test('direct browser authorize without redirect_uri', async () => {
 	const html = await pageRes.text()
 	assert.match(html, /Generate Bearer Token/)
 	assert.match(html, /action="\/oauth\/authorize\/consent"/)
+
 	const consentBody = new URLSearchParams({
+		email: 'browser@example.com',
 		session_name: 'Browser Session'
 	})
 	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
@@ -481,14 +491,55 @@ test('direct browser authorize without redirect_uri', async () => {
 		body: consentBody.toString(),
 		redirect: 'manual'
 	})
+	assert.equal(consentRes.status, 200)
+	const consentText = await consentRes.text()
+	assert.match(consentText, /Check your email/)
+
+	const row = db.sqlite.prepare('SELECT * FROM oauth_states WHERE email = ?').get('browser@example.com')
+	assert.ok(row)
+	assert.equal(row.session_name, 'Browser Session')
+
+	const verifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${row.magic_code}`)
+	assert.equal(verifyRes.status, 200)
+	const verifyText = await verifyRes.text()
+	assert.match(verifyText, /user: browser@example.com/)
+	assert.match(verifyText, /Authorization: Bearer/)
+})
+
+test('google provider connect screen and consent flow', async () => {
+	const addr = server.address()
+	const connectRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?session_id=sess_123`)
+	assert.equal(connectRes.status, 200)
+	const connectHtml = await connectRes.text()
+	assert.match(connectHtml, /Connect Google Account/)
+	assert.match(connectHtml, /action="\/providers\/google\/consent"/)
+
+	const consentBody = new URLSearchParams({
+		session_id: 'sess_123'
+	})
+	consentBody.append('services', 'drive')
+	consentBody.append('services', 'calendar')
+	consentBody.append('write', 'calendar')
+
+	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: consentBody.toString(),
+		redirect: 'manual'
+	})
 	assert.equal(consentRes.status, 302)
 	const location = consentRes.headers.get('location')
-	assert.ok(location)
 	const targetUrl = new URL(location)
-	const stateRow = db.oauthStates.consume(targetUrl.searchParams.get('state'))
-	assert.equal(stateRow.clientRedirectUri, null)
-	assert.equal(stateRow.codeChallenge, null)
-	assert.equal(stateRow.sessionName, 'Browser Session')
+	assert.equal(targetUrl.hostname, 'accounts.google.com')
+	assert.match(targetUrl.searchParams.get('scope'), /drive\.readonly/)
+	assert.match(targetUrl.searchParams.get('scope'), /calendar\b/)
+	assert.doesNotMatch(targetUrl.searchParams.get('scope'), /gmail/)
+
+	const stateParam = targetUrl.searchParams.get('state')
+	assert.ok(stateParam)
+	const stateRow = db.oauthStates.consume(stateParam)
+	assert.equal(stateRow.sessionId, 'sess_123')
+	assert.equal(stateRow.provider, 'google')
 })
 
 test('authorize page with policy and service query params', async () => {
@@ -895,40 +946,36 @@ test('oauth consent flow with policy', async () => {
 		{ action: 'allow', path: '/calendar/v3/calendars/my-cal/**' }
 	])
 	const consentBody = new URLSearchParams({
+		email: 'policy-test@example.com',
 		redirect_uri: 'https://chatgpt.com/callback',
 		state: 'client-state-policy',
 		code_challenge: challenge,
 		code_challenge_method: 'S256',
 		policy: policyStr
 	})
-	consentBody.append('services', 'calendar')
-	consentBody.append('write', 'calendar')
 	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: consentBody.toString(),
 		redirect: 'manual'
 	})
-	assert.equal(consentRes.status, 302)
-	const location = consentRes.headers.get('location')
-	const targetUrl = new URL(location)
-	const stateParam = targetUrl.searchParams.get('state')
-	assert.ok(stateParam)
-	const stateRow = db.oauthStates.consume(stateParam)
-	assert.equal(stateRow.policy, policyStr)
+	assert.equal(consentRes.status, 200)
+	const row = db.sqlite.prepare('SELECT * FROM oauth_states WHERE email = ?').get('policy-test@example.com')
+	assert.ok(row)
+	assert.equal(row.policy, policyStr)
 })
 
 test('oauth consent flow rejects invalid json policy', async () => {
 	const addr = server.address()
 	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
 	const consentBody = new URLSearchParams({
+		email: 'policy-invalid@example.com',
 		redirect_uri: 'https://chatgpt.com/callback',
 		state: 'client-state-policy',
 		code_challenge: challenge,
 		code_challenge_method: 'S256',
 		policy: '{ invalid-json'
 	})
-	consentBody.append('services', 'calendar')
 
 	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 		method: 'POST',
@@ -994,13 +1041,13 @@ test('oauth consent flow rejects invalid schema policy', async () => {
 	const addr = server.address()
 	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
 	const consentBody = new URLSearchParams({
+		email: 'policy-schema-invalid@example.com',
 		redirect_uri: 'https://chatgpt.com/callback',
 		state: 'client-state-policy-invalid',
 		code_challenge: challenge,
 		code_challenge_method: 'S256',
 		policy: JSON.stringify([{ action: 'allow', method: 'GET' }])
 	})
-	consentBody.append('services', 'calendar')
 
 	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 		method: 'POST',
@@ -1231,57 +1278,50 @@ test('oauth consent flow with admin parameter', async () => {
 	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
 
 	const consentAdmin = new URLSearchParams({
+		email: 'admin-param@example.com',
 		redirect_uri: 'https://chatgpt.com/callback',
 		state: 'client-state-admin',
 		code_challenge: challenge,
 		code_challenge_method: 'S256',
 		admin: 'true'
 	})
-	consentAdmin.append('services', 'drive')
 	const consentAdminRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: consentAdmin.toString(),
 		redirect: 'manual'
 	})
-	assert.equal(consentAdminRes.status, 302)
-	const locationAdmin = consentAdminRes.headers.get('location')
-	const stateTokenAdmin = new URL(locationAdmin).searchParams.get('state')
-	const oauthStateAdmin = db.oauthStates.consume(stateTokenAdmin)
-	assert.equal(oauthStateAdmin.admin, true)
+	assert.equal(consentAdminRes.status, 200)
+	const rowAdmin = db.sqlite.prepare('SELECT * FROM oauth_states WHERE email = ?').get('admin-param@example.com')
+	assert.ok(rowAdmin)
+	assert.equal(rowAdmin.admin, 1)
 
 	const consentNoAdmin = new URLSearchParams({
+		email: 'no-admin-param@example.com',
 		redirect_uri: 'https://chatgpt.com/callback',
 		state: 'client-state-no-admin',
 		code_challenge: challenge,
 		code_challenge_method: 'S256'
 	})
-	consentNoAdmin.append('services', 'drive')
 	const consentNoAdminRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: consentNoAdmin.toString(),
 		redirect: 'manual'
 	})
-	assert.equal(consentNoAdminRes.status, 302)
-	const locationNoAdmin = consentNoAdminRes.headers.get('location')
-	const stateTokenNoAdmin = new URL(locationNoAdmin).searchParams.get('state')
-	const oauthStateNoAdmin = db.oauthStates.consume(stateTokenNoAdmin)
-	assert.equal(oauthStateNoAdmin.admin, false)
+	assert.equal(consentNoAdminRes.status, 200)
+	const rowNoAdmin = db.sqlite.prepare('SELECT * FROM oauth_states WHERE email = ?').get('no-admin-param@example.com')
+	assert.ok(rowNoAdmin)
+	assert.equal(rowNoAdmin.admin, 0)
 })
 
 test('magic link admin verification flow (/oauth/verify)', async () => {
 	const addr = server.address()
-	const user = db.users.upsert({ email: 'magic@example.com' })
-	const session = db.tokens.create({
-		userId: user.id,
-		provider: 'self',
-		admin: 0
-	})
 	const magicCode = 'test-magic-code-123'
 	db.oauthStates.create({
-		userId: user.id,
-		sessionName: session.id,
+		email: 'magic-admin@example.com',
+		sessionName: 'Admin Magic Session',
+		admin: 1,
 		clientRedirectUri: 'https://chatgpt.com/callback',
 		clientState: 'magic-state-abc',
 		magicCode,
@@ -1300,9 +1340,6 @@ test('magic link admin verification flow (/oauth/verify)', async () => {
 	const authCode = targetUrl.searchParams.get('code')
 	assert.ok(authCode)
 
-	const updatedSession = db.tokens.get(session.id)
-	assert.equal(updatedSession.admin, true)
-
 	const tokenRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -1314,7 +1351,11 @@ test('magic link admin verification flow (/oauth/verify)', async () => {
 	})
 	assert.equal(tokenRes.status, 200)
 	const tokenData = await tokenRes.json()
-	assert.equal(tokenData.access_token, session.token)
+	assert.ok(tokenData.access_token)
+
+	const createdSession = db.tokens.getByToken(tokenData.access_token)
+	assert.equal(createdSession.admin, true)
+	assert.equal(createdSession.name, 'Admin Magic Session')
 })
 
 test('30-day dormancy pruning scopes only provider = self', () => {

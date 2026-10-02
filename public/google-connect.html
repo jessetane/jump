@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset=utf-8>
+		<meta name="viewport" content="width=device-width,initial-scale=1">
+		<title>Connect Google Account - google-mcp</title>
+		<style>
+			* {
+				box-sizing: border-box;
+			}
+
+			html {
+				height: 100%;
+			}
+
+			body {
+				margin: 0;
+				height: 100%;
+				font-family: sans-serif;
+			}
+
+			.column {
+				display: flex;
+				flex-direction: column;
+			}
+
+			.view {
+				margin: auto;
+				width: 100%;
+				padding: 24px;
+			}
+
+			@media (min-width: 520px) {
+				.view {
+					max-width: 480px;
+				}
+			}
+
+			h1 {
+				font-size: 1.5rem;
+				text-align: center;
+				margin-top: 0.85rem;
+				margin-bottom: 0.5rem;
+			}
+
+			.subtitle {
+				color: #555;
+				font-size: 0.95rem;
+				line-height: 1.4;
+				text-align: center;
+				margin: 0 0 1.5rem;
+			}
+
+			table {
+				width: 100%;
+				border-collapse: collapse;
+				margin-bottom: 1.5rem;
+			}
+
+			th, td {
+				padding: 8px 10px;
+				text-align: left;
+				border-bottom: 1px solid #e2e8f0;
+				font-size: 0.9rem;
+			}
+
+			th {
+				font-weight: 600;
+				color: #475569;
+				background: #f8fafc;
+			}
+
+			.col-check {
+				text-align: center;
+				width: 70px;
+			}
+
+			.col-check input {
+				cursor: pointer;
+			}
+
+			.col-svc {
+				display: flex;
+				align-items: center;
+				gap: 6px;
+			}
+
+			.actions {
+				margin-top: 0.5rem;
+			}
+
+			button[type=submit] {
+				width: 100%;
+				padding: 12px 16px;
+				background: #000;
+				color: #fff;
+				border: none;
+				border-radius: 6px;
+				font-size: 1rem;
+				cursor: pointer;
+				font-weight: 500;
+			}
+
+			button[type=submit]:hover {
+				opacity: 0.85;
+			}
+		</style>
+	</head>
+	<body class=column>
+		<div class="view column">
+			<h1 id="page-title">Connect Google Account</h1>
+			<p class="subtitle" id="page-subtitle">Select Google services to grant to your MCP gateway</p>
+			<form id="google-connect-form" method="POST" action="/providers/google/consent">
+				<div id="hidden-inputs"></div>
+				<table id="services-table">
+					<thead>
+						<tr>
+							<th>Service</th>
+							<th class="col-check">
+								<label title="Select all read-only">
+									<input type="checkbox" id="all-read"> Read
+								</label>
+							</th>
+							<th class="col-check">
+								<label title="Select all read & write">
+									<input type="checkbox" id="all-write"> Write
+								</label>
+							</th>
+						</tr>
+					</thead>
+					<tbody id="services-body"></tbody>
+				</table>
+				<div class="actions">
+					<button type="submit" id="submit-btn">Connect Google Account</button>
+				</div>
+			</form>
+		</div>
+		<script>
+			const initData = {{INIT_DATA}}
+
+			const serviceList = [
+				{ id: 'drive', name: 'Google Drive' },
+				{ id: 'docs', name: 'Google Docs' },
+				{ id: 'sheets', name: 'Google Sheets' },
+				{ id: 'slides', name: 'Google Slides' },
+				{ id: 'forms', name: 'Google Forms' },
+				{ id: 'calendar', name: 'Google Calendar' },
+				{ id: 'tasks', name: 'Google Tasks' },
+				{ id: 'contacts', name: 'Google Contacts' },
+				{ id: 'youtube', name: 'YouTube' },
+				{ id: 'gmail', name: 'Gmail' },
+				{ id: 'photos', name: 'Google Photos' },
+				{ id: 'meet', name: 'Google Meet' },
+				{ id: 'chat', name: 'Google Chat' },
+				{ id: 'keep', name: 'Google Keep' }
+			]
+
+			function updateRowState () {
+				const allRead = document.getElementById('all-read')
+				const allWrite = document.getElementById('all-write')
+				const readInputs = document.querySelectorAll('input[name="services"]')
+				const writeInputs = document.querySelectorAll('input[name="write"]')
+				let allReadChecked = true
+				let allWriteChecked = true
+				for (const r of readInputs) {
+					if (!r.checked) allReadChecked = false
+				}
+				for (const w of writeInputs) {
+					if (!w.checked || w.disabled) allWriteChecked = false
+				}
+				if (allRead) allRead.checked = allReadChecked
+				if (allWrite) allWrite.checked = allWriteChecked
+			}
+
+			function onServiceToggle (id) {
+				const r = document.getElementById('svc_' + id)
+				const w = document.getElementById('wr_' + id)
+				if (!r || !w) return
+				w.disabled = !r.checked
+				if (!r.checked) w.checked = false
+				updateRowState()
+			}
+
+			function init () {
+				const params = initData.params || {}
+				const tbody = document.getElementById('services-body')
+				if (params.reauth_app_id) {
+					const titleEl = document.getElementById('page-title')
+					const subtitleEl = document.getElementById('page-subtitle')
+					const submitEl = document.getElementById('submit-btn')
+					if (titleEl) titleEl.textContent = 'Re-authenticate Google App'
+					if (subtitleEl) subtitleEl.textContent = 'Renew upstream Google OAuth credentials'
+					if (submitEl) submitEl.textContent = 'Re-authenticate Google Account'
+				}
+				for (const s of serviceList) {
+					const tr = document.createElement('tr')
+					const tdSvc = document.createElement('td')
+					tdSvc.textContent = s.name
+					const tdRead = document.createElement('td')
+					tdRead.className = 'col-check'
+					const inputRead = document.createElement('input')
+					inputRead.type = 'checkbox'
+					inputRead.name = 'services'
+					inputRead.id = 'svc_' + s.id
+					inputRead.value = s.id
+					inputRead.checked = true
+					inputRead.addEventListener('change', function () {
+						onServiceToggle(s.id)
+					})
+					tdRead.appendChild(inputRead)
+					const tdWrite = document.createElement('td')
+					tdWrite.className = 'col-check'
+					const inputWrite = document.createElement('input')
+					inputWrite.type = 'checkbox'
+					inputWrite.name = 'write'
+					inputWrite.id = 'wr_' + s.id
+					inputWrite.value = s.id
+					inputWrite.checked = true
+					inputWrite.addEventListener('change', function () {
+						updateRowState()
+					})
+					tdWrite.appendChild(inputWrite)
+					tr.appendChild(tdSvc)
+					tr.appendChild(tdRead)
+					tr.appendChild(tdWrite)
+					tbody.appendChild(tr)
+				}
+				const allRead = document.getElementById('all-read')
+				const allWrite = document.getElementById('all-write')
+				if (allRead) {
+					allRead.checked = true
+					allRead.addEventListener('click', function () {
+						const checked = allRead.checked
+						const readInputs = document.querySelectorAll('input[name="services"]')
+						for (const r of readInputs) {
+							r.checked = checked
+							const w = document.getElementById('wr_' + r.value)
+							if (w) {
+								w.disabled = !checked
+								if (!checked) w.checked = false
+							}
+						}
+						updateRowState()
+					})
+				}
+				if (allWrite) {
+					allWrite.checked = true
+					allWrite.addEventListener('click', function () {
+						const checked = allWrite.checked
+						const readInputs = document.querySelectorAll('input[name="services"]')
+						for (const r of readInputs) {
+							const w = document.getElementById('wr_' + r.value)
+							if (w && r.checked) w.checked = checked
+						}
+						updateRowState()
+					})
+				}
+				const hiddenContainer = document.getElementById('hidden-inputs')
+				for (const [key, value] of Object.entries(params)) {
+					if (key === 'services' || key === 'write') continue
+					const input = document.createElement('input')
+					input.type = 'hidden'
+					input.name = key
+					input.value = value
+					hiddenContainer.appendChild(input)
+				}
+				updateRowState()
+			}
+
+			init()
+		</script>
+	</body>
+</html>

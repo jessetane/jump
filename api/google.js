@@ -47,7 +47,7 @@ async function request ({ url, method = 'GET', body, headers, appId } = {}, toke
 	try {
 		freshInfo = await googleProvider.getFreshToken(targetLink.app)
 	} catch (err) {
-		const reauthUrl = `${appUrl.replace(/\/$/, '')}/oauth/authorize?reauth_app_id=${targetLink.app.id}`
+		const reauthUrl = `${appUrl.replace(/\/$/, '')}/providers/google/connect?reauth_app_id=${targetLink.app.id}`
 		const error = new Error(`Failed to refresh Google access token: ${err.message}. Re-authenticate: ${reauthUrl}`)
 		error.status = 401
 		throw error

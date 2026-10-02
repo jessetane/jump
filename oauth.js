@@ -11,8 +11,10 @@ export {
 	handleOauth,
 	handleAuthorize,
 	handleAuthorizeConsent,
-	handleCallback,
 	handleVerify,
+	handleGoogleConnect,
+	handleGoogleConsent,
+	handleCallback,
 	handleToken,
 	handleRevoke,
 	handleProtectedResourceMetadata,
@@ -93,11 +95,6 @@ async function handleAuthServerMetadata (req, res) {
 }
 
 function validateAuthorizeParams (query) {
-	if (!clientId) {
-		const err = new Error('GOOGLE_CLIENT_ID missing')
-		err.status = 500
-		throw err
-	}
 	if (query.redirect_uri) {
 		if (!isAllowedRedirectUri(query.redirect_uri)) {
 			console.warn(`[oauth] Unauthorized redirect_uri: "${query.redirect_uri}". Add domain to ALLOWED_REDIRECT_DOMAINS to allow.`)
@@ -130,44 +127,6 @@ function validateAuthorizeParams (query) {
 	return { codeChallenge, codeChallengeMethod }
 }
 
-function redirectToGoogle (res, req, opts = {}) {
-	const {
-		redirectUri = null,
-		state = null,
-		codeChallenge = null,
-		codeChallengeMethod = null,
-		sessionName = null,
-		policy = null,
-		admin = 0,
-		reauthAppId = null,
-		scopes = baseScopes.join(' ')
-	} = opts
-	const callbackUrl = `${appUrl.replace(/\/$/, '')}/oauth/callback`
-	const ip = getClientIp(req)
-	const stateToken = db.oauthStates.create({
-		clientRedirectUri: redirectUri,
-		clientState: state,
-		codeChallenge,
-		codeChallengeMethod,
-		sessionName,
-		policy,
-		admin,
-		reauthAppId,
-		ip
-	})
-	const u = new URL('https://accounts.google.com/o/oauth2/v2/auth')
-	u.searchParams.set('client_id', clientId)
-	u.searchParams.set('redirect_uri', callbackUrl)
-	u.searchParams.set('response_type', 'code')
-	u.searchParams.set('scope', scopes)
-	u.searchParams.set('access_type', 'offline')
-	u.searchParams.set('prompt', 'consent')
-	u.searchParams.set('state', stateToken)
-	res.statusCode = 302
-	res.setHeader('location', u.toString())
-	res.end()
-}
-
 async function handleAuthorize (req, res, query) {
 	let validation
 	try {
@@ -198,16 +157,16 @@ async function handleAuthorizeConsent (req, res) {
 	const params = new URLSearchParams(rawBody)
 
 	const query = {}
+	let email = null
 	let sessionName = null
 	let admin = 0
-	let reauthAppId = null
 	let policy = null
 
 	for (const [key, value] of params.entries()) {
-		if (key === 'session_name') {
+		if (key === 'email') {
+			email = value.trim().toLowerCase() || null
+		} else if (key === 'session_name') {
 			sessionName = value.trim() || null
-		} else if (key === 'reauth_app_id') {
-			reauthAppId = value.trim() || null
 		} else if (key === 'admin') {
 			admin = value === 'true' || value === '1' || value === 'on' ? 1 : 0
 		} else if (key === 'policy') {
@@ -215,6 +174,13 @@ async function handleAuthorizeConsent (req, res) {
 		} else {
 			query[key] = value
 		}
+	}
+
+	if (!email || !email.includes('@')) {
+		res.statusCode = 400
+		res.setHeader('content-type', 'application/json; charset=utf-8')
+		res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Valid email address is required' }))
+		return
 	}
 
 	if (policy) {
@@ -238,19 +204,143 @@ async function handleAuthorizeConsent (req, res) {
 	}
 	const { codeChallenge, codeChallengeMethod } = validation
 
-	const scopes = allScopes
+	const magicCode = randomBytes(24).toString('base64url')
+	const magicExpiresAt = Date.now() + (15 * 60 * 1000)
+	const ip = getClientIp(req)
 
-	redirectToGoogle(res, req, {
-		redirectUri: query.redirect_uri || null,
-		state: query.state || null,
+	db.oauthStates.create({
+		clientRedirectUri: query.redirect_uri || null,
+		clientState: query.state || null,
 		codeChallenge,
 		codeChallengeMethod,
 		sessionName,
-		policy,
 		admin,
-		reauthAppId,
-		scopes
+		policy,
+		email,
+		magicCode,
+		magicExpiresAt,
+		ip
 	})
+
+	const verifyUrl = `${appUrl.replace(/\/$/, '')}/oauth/verify?code=${magicCode}`
+	await sendMail({
+		to: email,
+		subject: 'Sign in to google-mcp Gateway',
+		text: `Click the link below to sign in and activate your MCP session token:\n\n${verifyUrl}\n\nThis link expires in 15 minutes.`,
+		html: `<p>Click the link below to sign in and activate your MCP session token:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p>This link expires in 15 minutes.</p>`
+	})
+
+	res.statusCode = 200
+	res.setHeader('content-type', 'text/html; charset=utf-8')
+	res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:440px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;text-align:center;"><h2>Check your email</h2><p>A magic sign-in link has been sent to <strong>${email}</strong>.</p><p>Click the link in your email to activate your MCP session token.</p></body></html>`)
+}
+
+async function handleVerify (req, res, query) {
+	const code = query.code
+	if (!code) {
+		res.statusCode = 400
+		res.setHeader('content-type', 'text/plain')
+		res.end('Missing verification code.')
+		return
+	}
+	const state = db.oauthStates.consumeMagicCode(code)
+	if (!state) {
+		res.statusCode = 403
+		res.setHeader('content-type', 'text/plain')
+		res.end('Invalid or expired verification link.')
+		return
+	}
+	const email = state.email || 'user@localhost'
+	const user = db.users.upsert({
+		email,
+		name: state.sessionName || null
+	})
+	const ip = getClientIp(req)
+	const ua = req.headers['user-agent'] || null
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		type: 'bearer',
+		name: state.sessionName || (state.admin ? 'Admin Session' : 'Default Session'),
+		admin: state.admin ? 1 : 0,
+		ip: state.ip || ip,
+		ua
+	})
+
+	if (state.clientRedirectUri) {
+		const authCode = db.oauthCodes.create({
+			sessionId: session.id,
+			clientRedirectUri: state.clientRedirectUri,
+			codeChallenge: state.codeChallenge,
+			codeChallengeMethod: state.codeChallengeMethod
+		})
+		const target = new URL(state.clientRedirectUri)
+		target.searchParams.set('code', authCode)
+		if (state.clientState) target.searchParams.set('state', state.clientState)
+		res.statusCode = 302
+		res.setHeader('location', target.toString())
+		res.end()
+		return
+	}
+
+	res.statusCode = 200
+	res.setHeader('content-type', 'text/plain; charset=utf-8')
+	res.end(`user: ${email}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
+}
+
+async function handleGoogleConnect (req, res, query) {
+	const initData = {
+		params: query
+	}
+	const connectHtml = await fs.readFile(path.join(dirname, 'public/google-connect.html'), 'utf8')
+	const html = connectHtml.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c'))
+	res.statusCode = 200
+	res.setHeader('content-type', 'text/html; charset=utf-8')
+	res.end(html)
+}
+
+async function handleGoogleConsent (req, res) {
+	if (req.method !== 'POST') {
+		res.statusCode = 405
+		res.end('Method Not Allowed')
+		return
+	}
+	if (!clientId) {
+		res.statusCode = 500
+		res.setHeader('content-type', 'text/plain')
+		res.end('GOOGLE_CLIENT_ID environment variable is missing')
+		return
+	}
+	const rawBody = await getBody(req)
+	const params = new URLSearchParams(rawBody)
+
+	const servicesList = params.getAll('services')
+	const writeList = params.getAll('write')
+	const sessionId = params.get('session_id') || null
+	const reauthAppId = params.get('reauth_app_id') || null
+
+	const scopes = buildScopesFromSelection(servicesList, writeList)
+	const callbackUrl = `${appUrl.replace(/\/$/, '')}/oauth/callback`
+	const ip = getClientIp(req)
+
+	const stateToken = db.oauthStates.create({
+		sessionId,
+		reauthAppId,
+		provider: 'google',
+		ip
+	})
+
+	const u = new URL('https://accounts.google.com/o/oauth2/v2/auth')
+	u.searchParams.set('client_id', clientId)
+	u.searchParams.set('redirect_uri', callbackUrl)
+	u.searchParams.set('response_type', 'code')
+	u.searchParams.set('scope', scopes)
+	u.searchParams.set('access_type', 'offline')
+	u.searchParams.set('prompt', 'consent')
+	u.searchParams.set('state', stateToken)
+	res.statusCode = 302
+	res.setHeader('location', u.toString())
+	res.end()
 }
 
 async function handleCallback (req, res, query) {
@@ -266,7 +356,7 @@ async function handleCallback (req, res, query) {
 	if (!oauthState) {
 		res.statusCode = 403
 		res.setHeader('content-type', 'text/plain')
-		res.end('Invalid or expired OAuth state (CSRF verification failed). Please try initiating sign-in again.')
+		res.end('Invalid or expired OAuth state (CSRF verification failed). Please try connecting Google again.')
 		return
 	}
 	const callbackUrl = `${appUrl.replace(/\/$/, '')}/oauth/callback`
@@ -298,16 +388,10 @@ async function handleCallback (req, res, query) {
 		res.end('Could not retrieve user email from Google account.')
 		return
 	}
-	const user = db.users.upsert({
-		email,
-		name: googleUser.name || null
-	})
-	const ip = getClientIp(req)
-	const ua = req.headers['user-agent'] || null
 
 	if (oauthState.reauthAppId) {
 		const existingApp = db.tokens.get(oauthState.reauthAppId)
-		if (existingApp && existingApp.userId === user.id) {
+		if (existingApp) {
 			const updatedCreds = {
 				...existingApp.credentials,
 				accessToken: tokenData.access_token,
@@ -318,37 +402,31 @@ async function handleCallback (req, res, query) {
 				expiresAt: Date.now() + ((tokenData.expires_in || 3600) * 1000),
 				scopes: tokenData.scope || existingApp.scopes
 			})
-			if (oauthState.clientRedirectUri) {
-				const linkedSessions = db.links.listByAppId(existingApp.id)
-				const primarySessionId = linkedSessions[0]?.sessionTokenId
-				if (primarySessionId) {
-					const authCode = db.oauthCodes.create({
-						sessionId: primarySessionId,
-						clientRedirectUri: oauthState.clientRedirectUri,
-						codeChallenge: oauthState.codeChallenge,
-						codeChallengeMethod: oauthState.codeChallengeMethod
-					})
-					const target = new URL(oauthState.clientRedirectUri)
-					target.searchParams.set('code', authCode)
-					if (oauthState.clientState) target.searchParams.set('state', oauthState.clientState)
-					res.statusCode = 302
-					res.setHeader('location', target.toString())
-					res.end()
-					return
-				}
-			}
 			res.statusCode = 200
 			res.setHeader('content-type', 'text/html; charset=utf-8')
-			res.end('<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center;"><h2>App Re-authenticated</h2><p>Google app credentials have been successfully updated in place. Linked agent sessions will resume automatically.</p></body></html>')
+			res.end('<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center;"><h2>Google App Re-authenticated</h2><p>Google app credentials have been successfully updated in place. Linked agent sessions will resume automatically.</p></body></html>')
 			return
 		}
 	}
 
+	let targetUserId = null
+	if (oauthState.sessionId) {
+		const session = db.tokens.get(oauthState.sessionId)
+		if (session) targetUserId = session.userId
+	}
+	if (!targetUserId) {
+		const user = db.users.upsert({
+			email,
+			name: googleUser.name || null
+		})
+		targetUserId = user.id
+	}
+
 	const appToken = db.tokens.create({
-		userId: user.id,
+		userId: targetUserId,
 		provider: 'google',
 		type: 'oauth',
-		name: `${user.name || email} Google`,
+		name: `${googleUser.name || email} Google`,
 		credentials: {
 			accessToken: tokenData.access_token,
 			refreshToken: tokenData.refresh_token || null
@@ -357,113 +435,16 @@ async function handleCallback (req, res, query) {
 		scopes: tokenData.scope || null
 	})
 
-	const session = db.tokens.create({
-		userId: user.id,
-		provider: 'self',
-		type: 'bearer',
-		name: oauthState.sessionName || (oauthState.admin ? 'Admin Session' : 'Default Session'),
-		admin: 0,
-		ip,
-		ua
-	})
-
-	db.links.create({
-		sessionTokenId: session.id,
-		appTokenId: appToken.id,
-		policy: oauthState.policy || null
-	})
-
-	if (oauthState.admin) {
-		const magicCode = randomBytes(24).toString('base64url')
-		const magicExpiresAt = Date.now() + (15 * 60 * 1000)
-		db.oauthStates.create({
-			userId: user.id,
-			sessionName: session.id,
-			clientRedirectUri: oauthState.clientRedirectUri,
-			clientState: oauthState.clientState,
-			codeChallenge: oauthState.codeChallenge,
-			codeChallengeMethod: oauthState.codeChallengeMethod,
-			admin: 1,
-			magicCode,
-			magicExpiresAt,
-			ip
+	if (oauthState.sessionId) {
+		db.links.create({
+			sessionTokenId: oauthState.sessionId,
+			appTokenId: appToken.id
 		})
-		const verifyUrl = `${appUrl.replace(/\/$/, '')}/oauth/verify?code=${magicCode}`
-		await sendMail({
-			to: email,
-			subject: 'Verify your MCP Admin Session',
-			text: `Click the link below to verify your admin session:\n\n${verifyUrl}\n\nThis link expires in 15 minutes.`,
-			html: `<p>Click the link below to verify your admin session:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p>This link expires in 15 minutes.</p>`
-		})
-		res.statusCode = 200
-		res.setHeader('content-type', 'text/html; charset=utf-8')
-		res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;"><h2>Admin Verification Required</h2><p>A verification email has been sent to <strong>${email}</strong>.</p><p>Click the link in your email to activate admin privileges for this session.</p></body></html>`)
-		return
-	}
-
-	if (oauthState.clientRedirectUri) {
-		const authCode = db.oauthCodes.create({
-			sessionId: session.id,
-			clientRedirectUri: oauthState.clientRedirectUri,
-			codeChallenge: oauthState.codeChallenge,
-			codeChallengeMethod: oauthState.codeChallengeMethod
-		})
-		const target = new URL(oauthState.clientRedirectUri)
-		target.searchParams.set('code', authCode)
-		if (oauthState.clientState) target.searchParams.set('state', oauthState.clientState)
-		res.statusCode = 302
-		res.setHeader('location', target.toString())
-		res.end()
-		return
 	}
 
 	res.statusCode = 200
-	res.setHeader('content-type', 'text/plain; charset=utf-8')
-	res.end(`user: ${email}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
-}
-
-async function handleVerify (req, res, query) {
-	const code = query.code
-	if (!code) {
-		res.statusCode = 400
-		res.setHeader('content-type', 'text/plain')
-		res.end('Missing verification code.')
-		return
-	}
-	const state = db.oauthStates.consumeMagicCode(code)
-	if (!state) {
-		res.statusCode = 403
-		res.setHeader('content-type', 'text/plain')
-		res.end('Invalid or expired verification link.')
-		return
-	}
-	const sessionId = state.sessionName
-	const session = db.tokens.get(sessionId)
-	if (!session) {
-		res.statusCode = 404
-		res.setHeader('content-type', 'text/plain')
-		res.end('Session not found.')
-		return
-	}
-	db.tokens.setAdmin(session.id, true)
-	if (state.clientRedirectUri) {
-		const authCode = db.oauthCodes.create({
-			sessionId: session.id,
-			clientRedirectUri: state.clientRedirectUri,
-			codeChallenge: state.codeChallenge,
-			codeChallengeMethod: state.codeChallengeMethod
-		})
-		const target = new URL(state.clientRedirectUri)
-		target.searchParams.set('code', authCode)
-		if (state.clientState) target.searchParams.set('state', state.clientState)
-		res.statusCode = 302
-		res.setHeader('location', target.toString())
-		res.end()
-		return
-	}
-	res.statusCode = 200
-	res.setHeader('content-type', 'text/plain; charset=utf-8')
-	res.end(`Admin verified!\nuser: ${session.email}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
+	res.setHeader('content-type', 'text/html; charset=utf-8')
+	res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;text-align:center;"><h2>Google Account Connected!</h2><p>Connected Google account <strong>${email}</strong>.</p><p>You can close this window and return to your MCP agent.</p></body></html>`)
 }
 
 async function handleToken (req, res) {
@@ -583,10 +564,13 @@ const routes = {
 	'/.well-known/oauth-authorization-server': (req, res) => handleAuthServerMetadata(req, res),
 	'/oauth/authorize': (req, res, { query }) => handleAuthorize(req, res, query),
 	'/oauth/authorize/consent': (req, res) => handleAuthorizeConsent(req, res),
-	'/oauth/callback': (req, res, { query }) => handleCallback(req, res, query),
 	'/oauth/verify': (req, res, { query }) => handleVerify(req, res, query),
+	'/oauth/callback': (req, res, { query }) => handleCallback(req, res, query),
 	'/oauth/token': (req, res) => handleToken(req, res),
-	'/oauth/revoke': (req, res) => handleRevoke(req, res)
+	'/oauth/revoke': (req, res) => handleRevoke(req, res),
+	'/providers/google/connect': (req, res, { query }) => handleGoogleConnect(req, res, query),
+	'/providers/google/consent': (req, res) => handleGoogleConsent(req, res),
+	'/providers/google/callback': (req, res, { query }) => handleCallback(req, res, query)
 }
 
 async function handleOauth (req, res, { pathname, query }) {

@@ -62,7 +62,7 @@ const server = http.createServer(async (req, res) => {
 			await handleMcp(req, res, token)
 			return
 		}
-		if (pathname.startsWith('/oauth/') || pathname.startsWith('/.well-known/oauth-')) {
+		if (pathname.startsWith('/oauth/') || pathname.startsWith('/providers/') || pathname.startsWith('/.well-known/oauth-')) {
 			await handleOauth(req, res, { pathname, query })
 			return
 		}

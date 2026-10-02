@@ -63,6 +63,7 @@
 				color: #333;
 			}
 
+			.form-group input[type=email],
 			.form-group input[type=text] {
 				width: 100%;
 				padding: 10px 12px;
@@ -117,9 +118,13 @@
 	<body class=column>
 		<div class="view column">
 			<h1 id="page-title">Generate Bearer Token</h1>
-			<p class="subtitle" id="page-subtitle">Sign in with Google to create an MCP session token</p>
+			<p class="subtitle" id="page-subtitle">Enter your email to receive a sign-in magic link and create an MCP session token</p>
 			<form id="consent-form" method="POST" action="/oauth/authorize/consent">
 				<div id="hidden-inputs"></div>
+				<div class="form-group" id="email-group">
+					<label for="email">Email Address</label>
+					<input type="email" name="email" id="email" required placeholder="you@example.com">
+				</div>
 				<div class="form-group" id="session-name-group">
 					<label for="session_name">Session Name (optional)</label>
 					<input type="text" name="session_name" id="session_name" placeholder="e.g. Coding Agent, Chef Assistant">
@@ -129,9 +134,9 @@
 						<input type="checkbox" name="admin" id="admin" value="true">
 						<span>Admin Privileges</span>
 					</label>
-					<div class="admin-hint">Allows managing other sessions and apps via the <code>auth</code> tool. Requires out-of-band email verification.</div>
+					<div class="admin-hint">Allows managing other sessions and connecting upstream apps via the <code>auth</code> tool.</div>
 				</div>
-				<button type="submit" id="submit-btn">Sign in with Google</button>
+				<button type="submit" id="submit-btn">Send Magic Link</button>
 			</form>
 		</div>
 		<script>
@@ -139,17 +144,9 @@
 
 			function init () {
 				const params = initData.params || {}
-				if (params.reauth_app_id) {
-					const titleEl = document.getElementById('page-title')
-					const subtitleEl = document.getElementById('page-subtitle')
-					const submitEl = document.getElementById('submit-btn')
-					if (titleEl) titleEl.textContent = 'Re-authenticate App'
-					if (subtitleEl) subtitleEl.textContent = 'Renew upstream Google OAuth credentials'
-					if (submitEl) submitEl.textContent = 'Re-authenticate with Google'
-					const sessGroup = document.getElementById('session-name-group')
-					if (sessGroup) sessGroup.style.display = 'none'
-					const adminGroup = document.getElementById('admin-group')
-					if (adminGroup) adminGroup.style.display = 'none'
+				if (params.email) {
+					const emailEl = document.getElementById('email')
+					if (emailEl) emailEl.value = params.email
 				}
 				if (params.session_name) {
 					const nameEl = document.getElementById('session_name')
@@ -161,7 +158,7 @@
 				}
 				const hiddenContainer = document.getElementById('hidden-inputs')
 				for (const [key, value] of Object.entries(params)) {
-					if (key === 'admin' || key === 'session_name') continue
+					if (key === 'email' || key === 'admin' || key === 'session_name') continue
 					const input = document.createElement('input')
 					input.type = 'hidden'
 					input.name = key

@@ -279,7 +279,7 @@ async function connectApp (token, opts = {}) {
 	if (provider === 'google' && !apiKey && !credentials) {
 		return {
 			actionRequired: 'oauth_flow',
-			connectUrl: `${appUrl.replace(/\/$/, '')}/oauth/authorize?action=connect_app`
+			connectUrl: `${appUrl.replace(/\/$/, '')}/providers/google/connect?session_id=${session.id}`
 		}
 	}
 	const app = db.tokens.create({

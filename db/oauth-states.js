@@ -27,6 +27,9 @@ function init () {
 			reauth_app_id TEXT,
 			magic_code TEXT,
 			magic_expires_at INTEGER,
+			email TEXT,
+			session_id TEXT,
+			provider TEXT,
 			ip TEXT,
 			created_at INTEGER NOT NULL
 		);
@@ -39,6 +42,9 @@ function init () {
 	if (!columns.includes('reauth_app_id')) sqlite.exec('ALTER TABLE oauth_states ADD COLUMN reauth_app_id TEXT;')
 	if (!columns.includes('magic_code')) sqlite.exec('ALTER TABLE oauth_states ADD COLUMN magic_code TEXT;')
 	if (!columns.includes('magic_expires_at')) sqlite.exec('ALTER TABLE oauth_states ADD COLUMN magic_expires_at INTEGER;')
+	if (!columns.includes('email')) sqlite.exec('ALTER TABLE oauth_states ADD COLUMN email TEXT;')
+	if (!columns.includes('session_id')) sqlite.exec('ALTER TABLE oauth_states ADD COLUMN session_id TEXT;')
+	if (!columns.includes('provider')) sqlite.exec('ALTER TABLE oauth_states ADD COLUMN provider TEXT;')
 }
 
 function formatOauthState (row) {
@@ -56,6 +62,9 @@ function formatOauthState (row) {
 		reauthAppId: row.reauth_app_id,
 		magicCode: row.magic_code,
 		magicExpiresAt: row.magic_expires_at,
+		email: row.email,
+		sessionId: row.session_id,
+		provider: row.provider,
 		ip: row.ip,
 		createdAt: row.created_at
 	}
@@ -74,15 +83,18 @@ function create (opts = {}) {
 		reauthAppId = null,
 		magicCode = null,
 		magicExpiresAt = null,
+		email = null,
+		sessionId = null,
+		provider = null,
 		ip = null
 	} = opts
 	pruneExpired()
 	const state = randomBytes(24).toString('base64url')
 	const now = Date.now()
 	sqlite.prepare(`
-		INSERT INTO oauth_states (state, user_id, client_redirect_uri, client_state, code_challenge, code_challenge_method, session_name, admin, policy, reauth_app_id, magic_code, magic_expires_at, ip, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`).run(state, userId, clientRedirectUri, clientState, codeChallenge, codeChallengeMethod, sessionName, admin ? 1 : 0, policy, reauthAppId, magicCode, magicExpiresAt, ip, now)
+		INSERT INTO oauth_states (state, user_id, client_redirect_uri, client_state, code_challenge, code_challenge_method, session_name, admin, policy, reauth_app_id, magic_code, magic_expires_at, email, session_id, provider, ip, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`).run(state, userId, clientRedirectUri, clientState, codeChallenge, codeChallengeMethod, sessionName, admin ? 1 : 0, policy, reauthAppId, magicCode, magicExpiresAt, email, sessionId, provider, ip, now)
 	return state
 }
 
