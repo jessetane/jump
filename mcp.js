@@ -30,13 +30,15 @@ const authTool = {
 					'connect_app',
 					'disconnect_app',
 					'link_app',
-					'unlink_app'
+					'unlink_app',
+					'update_email'
 				],
 				description: 'Administrative action to perform.'
 			},
 			sessionId: { type: 'string', description: 'Target session token ID.' },
 			appId: { type: 'string', description: 'Target upstream app token ID.' },
 			name: { type: 'string', description: 'Human-readable label.' },
+			email: { type: 'string', description: 'New email address (for update_email action).' },
 			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe").' },
 			apiKey: { type: 'string', description: 'API Key (for static key apps).' },
 			policy: { type: 'array', description: 'Granular policy JSON rules for a link.' },
@@ -92,7 +94,8 @@ const authActions = {
 	connect_app: (args, token) => api.auth.connectApp(token, args),
 	disconnect_app: (args, token) => api.auth.disconnectApp(token, args),
 	link_app: (args, token) => api.auth.linkApp(token, args),
-	unlink_app: (args, token) => api.auth.unlinkApp(token, args)
+	unlink_app: (args, token) => api.auth.unlinkApp(token, args),
+	update_email: (args, token) => api.auth.updateEmail(token, args)
 }
 
 const toolHandlers = {
@@ -133,24 +136,24 @@ function formatContent (result) {
 	}]
 }
 
-function formatError (err) {
+function formatError (err, toolName = 'tool') {
 	if (err.message?.startsWith('Policy violation:')) {
-		console.warn(`[mcp] google_api policy violation: ${err.message.replace(/^Policy violation:\s*/, '')}`)
+		console.warn(`[mcp] ${toolName} policy violation: ${err.message.replace(/^Policy violation:\s*/, '')}`)
 	} else if (err.message?.startsWith('Access denied:')) {
-		console.warn(`[mcp] auth access denied: ${err.message}`)
+		console.warn(`[mcp] ${toolName} access denied: ${err.message}`)
 		return {
 			isError: true,
 			content: [{ type: 'text', text: err.message }]
 		}
 	} else if (err.message?.startsWith('Authentication required:')) {
-		console.warn('[mcp] google_api rejected: Authentication required')
+		console.warn(`[mcp] ${toolName} rejected: Authentication required`)
 	} else if (err.message?.startsWith('Failed to refresh Google access token:')) {
 		console.warn(`[mcp] ${err.message}`)
 	} else if (err.status) {
-		console.warn(`[mcp] google_api error (${err.status}): ${err.message}`)
+		console.warn(`[mcp] ${toolName} error (${err.status}): ${err.message}`)
 		return {
 			isError: true,
-			content: [{ type: 'text', text: `Google API Error (${err.status}): ${err.message}` }]
+			content: [{ type: 'text', text: toolName === 'google_api' ? `Google API Error (${err.status}): ${err.message}` : err.message }]
 		}
 	}
 	return {
@@ -173,7 +176,7 @@ async function executeTool (name, args = {}, token) {
 		const result = await handler(args, token)
 		return { content: formatContent(result) }
 	} catch (err) {
-		return formatError(err)
+		return formatError(err, name)
 	}
 }
 

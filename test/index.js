@@ -927,13 +927,13 @@ test('executeTool google_api enforces link policy and auth tools decode policy',
 	const statusRes = await executeTool('auth', { action: 'status' }, session.token)
 	assert.equal(statusRes.isError, undefined)
 	const statusParsed = JSON.parse(statusRes.content[0].text)
-	assert.deepEqual(statusParsed.linkedApps[0].policy, policyObj)
+	assert.deepEqual(statusParsed.apps[0].policy, policyObj)
 
 	const listRes = await executeTool('auth', { action: 'list' }, session.token)
 	assert.equal(listRes.isError, undefined)
 	const listParsed = JSON.parse(listRes.content[0].text)
 	const foundSession = listParsed.sessions.find(s => s.id === session.id)
-	assert.deepEqual(foundSession.linkedApps[0].policy, policyObj)
+	assert.deepEqual(foundSession.apps[0].policy, policyObj)
 
 	const deniedDeleteRes = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/calendar/v3/calendars/work/events/123',
@@ -1113,8 +1113,9 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	assert.equal(whoamiRes.status, 200)
 	const whoamiData = await whoamiRes.json()
 	assert.equal(whoamiData.authenticated, true)
-	assert.equal(whoamiData.email, 'rest-test@example.com')
-	assert.equal(whoamiData.currentSession.id, session1.id)
+	assert.equal(whoamiData.user.id, user.id)
+	assert.equal(whoamiData.user.email, 'rest-test@example.com')
+	assert.equal(whoamiData.session.id, session1.id)
 
 	const listRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
 		headers: { authorization: `Bearer ${session1.token}` }
@@ -1149,12 +1150,14 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 })
 
 test('mcp auth tool with whoami and get actions', async () => {
-	const { session } = createTestSession({ email: 'mcp-whoami@example.com' })
+	const { user, session } = createTestSession({ email: 'mcp-whoami@example.com' })
 	const whoamiResult = await executeTool('auth', { action: 'whoami' }, session.token)
 	assert.equal(whoamiResult.isError, undefined)
 	const parsedWhoami = JSON.parse(whoamiResult.content[0].text)
 	assert.equal(parsedWhoami.authenticated, true)
-	assert.equal(parsedWhoami.email, 'mcp-whoami@example.com')
+	assert.equal(parsedWhoami.user.id, user.id)
+	assert.equal(parsedWhoami.user.email, 'mcp-whoami@example.com')
+	assert.equal(parsedWhoami.session.id, session.id)
 
 	const getResult = await executeTool('auth', { action: 'get', sessionId: session.id }, session.token)
 	assert.equal(getResult.isError, undefined)
@@ -1255,7 +1258,7 @@ test('non-admin session auth restrictions and self-management', async () => {
 	assert.equal(whoamiResult.isError, undefined)
 	const whoamiParsed = JSON.parse(whoamiResult.content[0].text)
 	assert.equal(whoamiParsed.authenticated, true)
-	assert.equal(whoamiParsed.currentSession.admin, false)
+	assert.equal(whoamiParsed.session.admin, false)
 
 	const listResult = await executeTool('auth', { action: 'list' }, session1.token)
 	assert.equal(listResult.isError, true)
@@ -1596,6 +1599,59 @@ test('rest api /api/apps and /api/links endpoints', async () => {
 	const deleteAppData = await deleteAppRes.json()
 	assert.equal(deleteAppData.disconnected, true)
 	assert.equal(db.tokens.get(newAppId), null)
+})
+
+test('auth update_email action', async () => {
+	const user1 = db.users.upsert({ email: 'email-owner@example.com', name: 'Original User' })
+	const adminSession = db.tokens.create({
+		userId: user1.id,
+		provider: 'self',
+		admin: 1
+	})
+	const workerSession = db.tokens.create({
+		userId: user1.id,
+		provider: 'self',
+		admin: 0
+	})
+	const user2 = db.users.upsert({ email: 'taken@example.com', name: 'Other User' })
+
+	const nonAdminRes = await executeTool('auth', {
+		action: 'update_email',
+		email: 'new-email@example.com'
+	}, workerSession.token)
+	assert.equal(nonAdminRes.isError, true)
+	assert.match(nonAdminRes.content[0].text, /requires admin privileges/)
+
+	const invalidEmailRes = await executeTool('auth', {
+		action: 'update_email',
+		email: 'not-an-email'
+	}, adminSession.token)
+	assert.equal(invalidEmailRes.isError, true)
+	assert.match(invalidEmailRes.content[0].text, /Valid new email address is required/)
+
+	const conflictRes = await executeTool('auth', {
+		action: 'update_email',
+		email: 'taken@example.com'
+	}, adminSession.token)
+	assert.equal(conflictRes.isError, true)
+	assert.match(conflictRes.content[0].text, /already registered/)
+
+	const successRes = await executeTool('auth', {
+		action: 'update_email',
+		email: 'updated-email@example.com'
+	}, adminSession.token)
+	assert.equal(successRes.isError, undefined)
+	const successData = JSON.parse(successRes.content[0].text)
+	assert.equal(successData.updated, true)
+	assert.equal(successData.user.id, user1.id)
+	assert.equal(successData.user.email, 'updated-email@example.com')
+
+	const updatedUser = db.users.get(user1.id)
+	assert.equal(updatedUser.email, 'updated-email@example.com')
+
+	const whoamiRes = await executeTool('auth', { action: 'whoami' }, adminSession.token)
+	const whoamiData = JSON.parse(whoamiRes.content[0].text)
+	assert.equal(whoamiData.user.email, 'updated-email@example.com')
 })
 
 test('teardown server', (t, done) => {

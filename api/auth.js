@@ -15,7 +15,8 @@ export {
 	connectApp,
 	disconnectApp,
 	linkApp,
-	unlinkApp
+	unlinkApp,
+	updateEmail
 }
 
 const status = whoami
@@ -33,7 +34,7 @@ async function whoami (token) {
 		}
 	}
 	const links = db.links.listBySessionId(session.id)
-	const linkedApps = links.map(l => ({
+	const apps = links.map(l => ({
 		id: l.app?.id,
 		provider: l.app?.provider,
 		type: l.app?.type,
@@ -44,8 +45,12 @@ async function whoami (token) {
 	}))
 	return {
 		authenticated: true,
-		email: session.email,
-		currentSession: {
+		user: {
+			id: session.userId,
+			email: session.email,
+			name: session.userName
+		},
+		session: {
 			id: session.id,
 			name: session.name,
 			admin: Boolean(session.admin),
@@ -54,7 +59,7 @@ async function whoami (token) {
 			created: session.created,
 			updated: session.updated
 		},
-		linkedApps
+		apps
 	}
 }
 
@@ -84,7 +89,7 @@ async function list (token) {
 			created: s.created,
 			updated: s.updated,
 			isCurrent: s.id === session.id,
-			linkedApps: links.map(l => ({
+			apps: links.map(l => ({
 				id: l.app?.id,
 				provider: l.app?.provider,
 				name: l.app?.name,
@@ -126,7 +131,7 @@ async function get (token, sessionId) {
 			created: targetSession.created,
 			updated: targetSession.updated,
 			isCurrent: targetSession.id === session.id,
-			linkedApps: links.map(l => ({
+			apps: links.map(l => ({
 				id: l.app?.id,
 				provider: l.app?.provider,
 				name: l.app?.name,
@@ -385,5 +390,42 @@ async function unlinkApp (token, { sessionId, appId } = {}) {
 		unlinked: removed,
 		sessionId,
 		appId
+	}
+}
+
+async function updateEmail (token, opts = {}) {
+	const newEmail = opts.email || opts.newEmail
+	const appUrl = process.env.APP_URL || 'http://localhost:8080'
+	const session = token ? db.tokens.getByToken(token) : null
+	if (!session) {
+		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
+		error.status = 401
+		throw error
+	}
+	if (!session.admin) {
+		const error = new Error('Access denied: updating account email requires admin privileges')
+		error.status = 403
+		throw error
+	}
+	if (!newEmail || typeof newEmail !== 'string' || !newEmail.includes('@')) {
+		const error = new Error('Valid new email address is required')
+		error.status = 400
+		throw error
+	}
+	const normalizedEmail = newEmail.trim().toLowerCase()
+	const existing = db.users.getByEmail(normalizedEmail)
+	if (existing && existing.id !== session.userId) {
+		const error = new Error(`Email already registered to another account: ${normalizedEmail}`)
+		error.status = 409
+		throw error
+	}
+	const user = db.users.updateEmail(session.userId, normalizedEmail)
+	return {
+		updated: true,
+		user: {
+			id: user.id,
+			email: user.email,
+			name: user.name
+		}
 	}
 }

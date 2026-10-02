@@ -3,7 +3,11 @@ import { randomUUID } from 'node:crypto'
 
 export {
 	init,
-	upsert
+	upsert,
+	get,
+	getByEmail,
+	updateEmail,
+	updateName
 }
 
 function init () {
@@ -17,6 +21,16 @@ function init () {
 		);
 		CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 	`)
+}
+
+function get (id) {
+	if (!id) return null
+	return sqlite.prepare('SELECT * FROM users WHERE id = ?').get(id) || null
+}
+
+function getByEmail (email) {
+	if (!email) return null
+	return sqlite.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase()) || null
 }
 
 function upsert (opts = {}) {
@@ -33,7 +47,17 @@ function upsert (opts = {}) {
 	return getByEmail(normalizedEmail)
 }
 
-function getByEmail (email) {
-	if (!email) return null
-	return sqlite.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase()) || null
+function updateEmail (id, newEmail) {
+	if (!id || !newEmail) return null
+	const now = new Date().toISOString()
+	const normalizedEmail = newEmail.trim().toLowerCase()
+	sqlite.prepare('UPDATE users SET email = ?, updated = ? WHERE id = ?').run(normalizedEmail, now, id)
+	return get(id)
+}
+
+function updateName (id, newName) {
+	if (!id) return null
+	const now = new Date().toISOString()
+	sqlite.prepare('UPDATE users SET name = ?, updated = ? WHERE id = ?').run(newName, now, id)
+	return get(id)
 }
