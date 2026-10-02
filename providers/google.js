@@ -1,11 +1,13 @@
-import * as db from './db/index.js'
+import * as db from '../db/index.js'
 
 export {
-	getFreshGoogleToken,
+	getFreshToken,
+	refreshAppToken,
 	proxyGoogleApi,
 	getUserInfo,
 	revokeGoogleToken,
 	readResponseBody,
+	normalizeTargetUrl,
 	isGoogleApiUrl,
 	baseScopes,
 	services,
@@ -129,11 +131,17 @@ function buildScopesFromSelection (selectedServices = [], writeServiceIds = []) 
 	return Array.from(scopeSet).join(' ')
 }
 
-async function refreshGoogleAccessToken (session) {
+async function refreshAppToken (appToken) {
+	const refreshToken = appToken.credentials?.refreshToken
+	if (!refreshToken) {
+		const err = new Error('No refresh token available for Google app')
+		err.status = 401
+		throw err
+	}
 	const params = new URLSearchParams({
 		client_id: clientId,
 		client_secret: clientSecret,
-		refresh_token: session.refreshToken,
+		refresh_token: refreshToken,
 		grant_type: 'refresh_token'
 	})
 	const res = await fetch('https://oauth2.googleapis.com/token', {
@@ -149,35 +157,36 @@ async function refreshGoogleAccessToken (session) {
 		throw err
 	}
 	const expiresAt = Date.now() + ((data.expires_in || 3600) * 1000)
-	db.sessions.updateTokens(session.id, {
+	const updatedCreds = {
+		...appToken.credentials,
 		accessToken: data.access_token,
+		refreshToken: data.refresh_token || refreshToken
+	}
+	const updated = db.tokens.updateCredentials(appToken.id, {
+		credentials: updatedCreds,
 		expiresAt,
-		refreshToken: data.refresh_token || null,
-		scope: data.scope || null
+		scopes: data.scope || appToken.scopes
 	})
 	return {
 		token: data.access_token,
-		session: db.sessions.get(session.id)
+		app: updated
 	}
 }
 
-async function getFreshGoogleToken (token) {
-	if (!token) return null
-	const session = db.sessions.getByToken(token)
-	if (session) {
-		if (session.refreshToken && (!session.expiresAt || Date.now() > session.expiresAt - 60000)) {
-			const refreshed = await refreshGoogleAccessToken(session)
-			return {
-				token: refreshed.token,
-				session: refreshed.session
-			}
-		}
+async function getFreshToken (appToken) {
+	if (!appToken) return null
+	const creds = appToken.credentials || {}
+	if (creds.refreshToken && (!appToken.expiresAt || Date.now() > appToken.expiresAt - 60000)) {
+		const refreshed = await refreshAppToken(appToken)
 		return {
-			token: session.accessToken,
-			session
+			token: refreshed.token,
+			app: refreshed.app
 		}
 	}
-	return null
+	return {
+		token: creds.accessToken,
+		app: appToken
+	}
 }
 
 async function getUserInfo (googleToken) {
@@ -274,13 +283,11 @@ async function proxyGoogleApi (opts = {}) {
 		throw err
 	}
 	const fullUrl = normalizeTargetUrl(targetUrl)
-
 	if (!isGoogleApiUrl(fullUrl)) {
 		const err = new Error(`Target URL domain not allowed. Requests must target *.googleapis.com, got: ${fullUrl}`)
 		err.status = 403
 		throw err
 	}
-
 	const reqHeaders = {
 		authorization: `Bearer ${token}`,
 		...headers
