@@ -46,7 +46,7 @@ const adminTool = {
 			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe").' },
 			policy: {
 				type: 'array',
-				description: 'Ordered policy rules evaluated top-to-bottom (first match wins, default deny when rules exist). Example: [{"action":"allow","methods":["GET"],"path":"/calendar/v3/calendars/xyz/**"}]',
+				description: 'Ordered list of policy rules evaluated top-to-bottom (first match wins, default deny). Best practice: write a minimal allowlist of specific paths (e.g. "/calendar/v3/calendars/xyz/events/**"); unlisted paths are automatically denied. Do NOT duplicate rules for URL-encoding—paths are automatically decoded (use literal "@" rather than "%40").',
 				items: {
 					type: 'object',
 					required: ['action'],
@@ -59,11 +59,11 @@ const adminTool = {
 						methods: {
 							type: 'array',
 							items: { type: 'string' },
-							description: 'HTTP methods (e.g. ["GET", "POST", "PUT", "PATCH", "DELETE", "*"]). If omitted, matches all methods.'
+							description: 'Allowed HTTP methods (e.g. ["GET", "POST", "PUT", "PATCH", "DELETE", "*"]). If omitted, matches all methods.'
 						},
 						path: {
 							type: 'string',
-							description: 'Path glob pattern (* matches single segment, ** matches nested paths, e.g. "/calendar/v3/calendars/xyz/events/**").'
+							description: 'Path glob pattern (* matches single segment, ** matches recursively, e.g. "/calendar/v3/calendars/xyz/events/**"). Use literal "@" (automatically matches "%40").'
 						},
 						origin: {
 							type: 'string',
