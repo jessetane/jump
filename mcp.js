@@ -9,63 +9,90 @@ export {
 	handleMcp
 }
 
-const tools = [
-	{
-		name: 'auth',
-		description: 'Inspect authentication status, list active sessions for current user, get session details, or revoke sessions (available to admin sessions).',
-		inputSchema: {
-			type: 'object',
-			properties: {
-				action: {
-					type: 'string',
-					enum: ['whoami', 'status', 'list', 'get', 'revoke'],
-					description: 'Action to perform: "whoami" (or "status", check current authentication state and session info), "list" (list all active sessions for current user), "get" (get details of a session by sessionId), or "revoke" (revoke current session, a specific session by sessionId, or all other sessions). Defaults to "whoami".'
-				},
-				sessionId: {
-					type: 'string',
-					description: 'Specific session ID when action is "get" or "revoke".'
-				},
-				allOthers: {
-					type: 'boolean',
-					description: 'When action is "revoke", set to true to revoke all other active sessions for this user except the current session.'
-				}
-			}
-		}
-	},
-	{
-		name: 'google_api',
-		description: 'Make HTTP requests directly to Google APIs (e.g. Drive, Docs, Sheets, Calendar, Gmail, Tasks) restricted to *.googleapis.com. Automatically attaches the user\'s Google OAuth Bearer token.',
-		inputSchema: {
-			type: 'object',
-			properties: {
-				url: {
-					type: 'string',
-					description: 'Full https://*.googleapis.com URL or relative path with optional query parameters (e.g. "drive/v3/files?pageSize=10", "calendar/v3/calendars/primary/events", or "https://sheets.googleapis.com/v4/spreadsheets/ID").'
-				},
-				method: {
-					type: 'string',
-					description: 'HTTP method (GET, POST, PUT, PATCH, DELETE). Defaults to GET.'
-				},
-				body: {
-					type: ['object', 'string'],
-					description: 'JSON body object or string payload for POST/PUT/PATCH requests.'
-				},
-				headers: {
-					type: 'object',
-					description: 'Optional additional HTTP headers to include with the request.'
-				}
+const authTool = {
+	name: 'auth',
+	description: 'Administer MCP sessions, connected upstream apps, and routing policies.',
+	inputSchema: {
+		type: 'object',
+		properties: {
+			action: {
+				type: 'string',
+				enum: [
+					'whoami',
+					'status',
+					'list',
+					'list_sessions',
+					'get',
+					'create_session',
+					'revoke',
+					'revoke_session',
+					'list_apps',
+					'connect_app',
+					'disconnect_app',
+					'link_app',
+					'unlink_app'
+				],
+				description: 'Administrative action to perform.'
 			},
-			required: ['url']
+			sessionId: { type: 'string', description: 'Target session token ID.' },
+			appId: { type: 'string', description: 'Target upstream app token ID.' },
+			name: { type: 'string', description: 'Human-readable label.' },
+			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe").' },
+			apiKey: { type: 'string', description: 'API Key (for static key apps).' },
+			policy: { type: 'array', description: 'Granular policy JSON rules for a link.' },
+			admin: { type: 'boolean', description: 'Grant admin permissions to a new session.' },
+			allOthers: { type: 'boolean', description: 'When action is revoke, set to true to revoke all other sessions.' }
 		}
 	}
-]
+}
+
+const googleApiTool = {
+	name: 'google_api',
+	description: 'Make HTTP requests directly to Google APIs (e.g. Drive, Docs, Sheets, Calendar, Gmail, Tasks) restricted to *.googleapis.com. Automatically attaches the user\'s Google OAuth Bearer token.',
+	inputSchema: {
+		type: 'object',
+		properties: {
+			url: {
+				type: 'string',
+				description: 'Full https://*.googleapis.com URL or relative path with optional query parameters (e.g. "drive/v3/files?pageSize=10", "calendar/v3/calendars/primary/events", or "https://sheets.googleapis.com/v4/spreadsheets/ID").'
+			},
+			method: {
+				type: 'string',
+				description: 'HTTP method (GET, POST, PUT, PATCH, DELETE). Defaults to GET.'
+			},
+			body: {
+				type: ['object', 'string'],
+				description: 'JSON body object or string payload for POST/PUT/PATCH requests.'
+			},
+			headers: {
+				type: 'object',
+				description: 'Optional additional HTTP headers to include with the request.'
+			},
+			appId: {
+				type: 'string',
+				description: 'Optional target Google app token ID if multiple Google accounts are linked.'
+			}
+		},
+		required: ['url']
+	}
+}
+
+const tools = [authTool, googleApiTool]
 
 const authActions = {
 	whoami: (args, token) => api.auth.whoami(token),
 	status: (args, token) => api.auth.whoami(token),
 	list: (args, token) => api.auth.list(token),
+	list_sessions: (args, token) => api.auth.list(token),
 	get: (args, token) => api.auth.get(token, args.sessionId),
-	revoke: (args, token) => api.auth.revoke(token, args)
+	create_session: (args, token) => api.auth.createSession(token, args),
+	revoke: (args, token) => api.auth.revoke(token, args),
+	revoke_session: (args, token) => api.auth.revoke(token, args),
+	list_apps: (args, token) => api.auth.listApps(token),
+	connect_app: (args, token) => api.auth.connectApp(token, args),
+	disconnect_app: (args, token) => api.auth.disconnectApp(token, args),
+	link_app: (args, token) => api.auth.linkApp(token, args),
+	unlink_app: (args, token) => api.auth.unlinkApp(token, args)
 }
 
 const toolHandlers = {
@@ -150,6 +177,22 @@ async function executeTool (name, args = {}, token) {
 	}
 }
 
+function getAvailableTools (token) {
+	if (!token) return [googleApiTool]
+	db.tokens.touchByToken(token)
+	const session = db.tokens.getByToken(token)
+	if (!session) return [googleApiTool]
+	const links = db.links.listBySessionId(session.id)
+	const list = []
+	if (session.admin) {
+		list.push(authTool)
+	}
+	if (links.some(l => l.app?.provider === 'google') || links.length === 0) {
+		list.push(googleApiTool)
+	}
+	return list
+}
+
 const rpcMethods = {
 	initialize: params => {
 		if (process.env.NODE_ENV !== 'test') {
@@ -178,11 +221,7 @@ const rpcMethods = {
 		if (process.env.NODE_ENV !== 'test') {
 			console.log('[mcp] tools/list')
 		}
-		const session = token ? db.sessions.getByToken(token) : null
-		if (session && !session.admin) {
-			return { tools: tools.filter(t => t.name !== 'auth') }
-		}
-		return { tools }
+		return { tools: getAvailableTools(token) }
 	},
 	'tools/call': (params, token) => {
 		const name = params?.name
@@ -190,6 +229,7 @@ const rpcMethods = {
 		if (process.env.NODE_ENV !== 'test') {
 			console.log(`[mcp] tools/call: name=${name || '(missing)'} args=${JSON.stringify(args)}`)
 		}
+		if (token) db.tokens.touchByToken(token)
 		return executeTool(name, args, token)
 	}
 }

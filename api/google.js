@@ -1,35 +1,39 @@
-import { proxyGoogleApi, getFreshGoogleToken } from '../google.js'
+import * as db from '../db/index.js'
+import * as googleProvider from '../providers/google.js'
 import { evaluatePolicy } from '../policy.js'
 
 export {
 	request
 }
 
-async function request ({ url, method = 'GET', body, headers } = {}, token) {
+async function request ({ url, method = 'GET', body, headers, appId } = {}, token) {
 	if (!url) {
 		const err = new Error('URL is required')
 		err.status = 400
 		throw err
 	}
-	let authInfo = null
-	try {
-		authInfo = await getFreshGoogleToken(token)
-	} catch (err) {
-		const error = new Error(`Failed to refresh Google access token: ${err.message}`)
-		error.status = 401
-		throw error
-	}
-	const googleToken = authInfo?.token || null
-	if (!googleToken) {
-		const appUrl = process.env.APP_URL || 'http://localhost:8080'
+	const appUrl = process.env.APP_URL || 'http://localhost:8080'
+	const session = token ? db.tokens.getByToken(token) : null
+	if (!session) {
 		const err = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
 		err.status = 401
 		throw err
 	}
+	const links = db.links.listBySessionId(session.id)
+	const googleLinks = links.filter(l => l.app?.provider === 'google')
+	if (googleLinks.length === 0) {
+		const err = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
+		err.status = 401
+		throw err
+	}
+	let targetLink = googleLinks[0]
+	if (appId) {
+		const found = googleLinks.find(l => l.app?.id === appId)
+		if (found) targetLink = found
+	}
 	const normalizedMethod = (method || 'GET').toUpperCase()
-	const session = authInfo.session
-	if (session?.policy) {
-		const check = evaluatePolicy(session.policy, {
+	if (targetLink.policy) {
+		const check = evaluatePolicy(targetLink.policy, {
 			url,
 			method: normalizedMethod
 		})
@@ -39,8 +43,22 @@ async function request ({ url, method = 'GET', body, headers } = {}, token) {
 			throw err
 		}
 	}
-	return proxyGoogleApi({
-		token: googleToken,
+	let freshInfo = null
+	try {
+		freshInfo = await googleProvider.getFreshToken(targetLink.app)
+	} catch (err) {
+		const reauthUrl = `${appUrl.replace(/\/$/, '')}/oauth/authorize?reauth_app_id=${targetLink.app.id}`
+		const error = new Error(`Failed to refresh Google access token: ${err.message}. Re-authenticate: ${reauthUrl}`)
+		error.status = 401
+		throw error
+	}
+	if (!freshInfo?.token) {
+		const err = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
+		err.status = 401
+		throw err
+	}
+	return googleProvider.proxyGoogleApi({
+		token: freshInfo.token,
 		url,
 		method: normalizedMethod,
 		body,

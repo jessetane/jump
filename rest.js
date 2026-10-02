@@ -66,8 +66,50 @@ const routes = {
 			const result = await api.auth.list(token)
 			sendJson(res, result)
 		},
+		async POST (req, res, { token }) {
+			const rawBody = await getBody(req)
+			let body = {}
+			try {
+				body = JSON.parse(rawBody)
+			} catch {}
+			const result = await api.auth.createSession(token, body)
+			sendJson(res, result, 201)
+		},
 		async DELETE (req, res, { token, query }) {
 			const result = await api.auth.revoke(token, { allOthers: query.allOthers === 'true' })
+			sendJson(res, result)
+		}
+	},
+	'/api/apps': {
+		async GET (req, res, { token }) {
+			const result = await api.auth.listApps(token)
+			sendJson(res, result)
+		},
+		async POST (req, res, { token }) {
+			const rawBody = await getBody(req)
+			let body = {}
+			try {
+				body = JSON.parse(rawBody)
+			} catch {}
+			const result = await api.auth.connectApp(token, body)
+			sendJson(res, result, 201)
+		}
+	},
+	'/api/links': {
+		async POST (req, res, { token }) {
+			const rawBody = await getBody(req)
+			let body = {}
+			try {
+				body = JSON.parse(rawBody)
+			} catch {}
+			const result = await api.auth.linkApp(token, body)
+			sendJson(res, result, 201)
+		},
+		async DELETE (req, res, { token, query }) {
+			const result = await api.auth.unlinkApp(token, {
+				sessionId: query.sessionId,
+				appId: query.appId
+			})
 			sendJson(res, result)
 		}
 	}
@@ -87,6 +129,17 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 		}
 		if (req.method === 'DELETE') {
 			const result = await api.auth.revoke(token, { sessionId })
+			sendJson(res, result)
+			return
+		}
+		const err = new Error('Method Not Allowed')
+		err.code = 405
+		throw err
+	}
+	if (pathname.startsWith('/api/apps/')) {
+		const appId = pathname.slice('/api/apps/'.length)
+		if (req.method === 'DELETE') {
+			const result = await api.auth.disconnectApp(token, { appId })
 			sendJson(res, result)
 			return
 		}
