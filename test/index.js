@@ -148,7 +148,7 @@ test('mcp initialize & tools/list', async () => {
 	assert.deepEqual(toolNames, [])
 })
 
-test('mcp auth tool without auth', async () => {
+test('mcp admin tool without auth', async () => {
 	const addr = server.address()
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
@@ -158,7 +158,7 @@ test('mcp auth tool without auth', async () => {
 			id: 3,
 			method: 'tools/call',
 			params: {
-				name: 'auth',
+				name: 'admin',
 				arguments: { action: 'status' }
 			}
 		})
@@ -733,7 +733,7 @@ test('mcp auth status, list, and revoke', async () => {
 	db.links.create({ sessionTokenId: session1.id, appTokenId: app.id })
 	db.links.create({ sessionTokenId: session2.id, appTokenId: app.id })
 
-	const listResult = await executeTool('auth', { action: 'list' }, session1.token)
+	const listResult = await executeTool('admin', { action: 'list' }, session1.token)
 	assert.equal(listResult.isError, undefined)
 	const listParsed = JSON.parse(listResult.content[0].text)
 	assert.equal(listParsed.sessions.length, 2)
@@ -746,7 +746,7 @@ test('mcp auth status, list, and revoke', async () => {
 	assert.equal(other.ip, '10.0.0.5')
 	assert.equal(other.ua, 'ChatGPT/2.0')
 
-	const revokeOtherResult = await executeTool('auth', { action: 'revoke', allOthers: true }, session1.token)
+	const revokeOtherResult = await executeTool('admin', { action: 'revoke', allOthers: true }, session1.token)
 	assert.equal(revokeOtherResult.isError, undefined)
 	const revokeOtherParsed = JSON.parse(revokeOtherResult.content[0].text)
 	assert.equal(revokeOtherParsed.revoked, true)
@@ -754,7 +754,7 @@ test('mcp auth status, list, and revoke', async () => {
 	assert.equal(db.tokens.get(session2.id), null)
 	assert.ok(db.tokens.get(session1.id))
 
-	const revokeCurrentResult = await executeTool('auth', { action: 'revoke' }, session1.token)
+	const revokeCurrentResult = await executeTool('admin', { action: 'revoke' }, session1.token)
 	assert.equal(revokeCurrentResult.isError, undefined)
 	const revokeCurrentParsed = JSON.parse(revokeCurrentResult.content[0].text)
 	assert.equal(revokeCurrentParsed.revoked, true)
@@ -924,12 +924,12 @@ test('executeTool google_api enforces link policy and auth tools decode policy',
 		policy: policyObj
 	})
 
-	const statusRes = await executeTool('auth', { action: 'status' }, session.token)
+	const statusRes = await executeTool('admin', { action: 'status' }, session.token)
 	assert.equal(statusRes.isError, undefined)
 	const statusParsed = JSON.parse(statusRes.content[0].text)
 	assert.deepEqual(statusParsed.session.apps[0].policy, policyObj)
 
-	const listRes = await executeTool('auth', { action: 'list' }, session.token)
+	const listRes = await executeTool('admin', { action: 'list' }, session.token)
 	assert.equal(listRes.isError, undefined)
 	const listParsed = JSON.parse(listRes.content[0].text)
 	const foundSession = listParsed.sessions.find(s => s.id === session.id)
@@ -1149,9 +1149,9 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	assert.equal(db.tokens.get(session1.id), null)
 })
 
-test('mcp auth tool with whoami and get actions', async () => {
+test('mcp admin tool with whoami and get actions', async () => {
 	const { user, session } = createTestSession({ email: 'mcp-whoami@example.com' })
-	const whoamiResult = await executeTool('auth', { action: 'whoami' }, session.token)
+	const whoamiResult = await executeTool('admin', { action: 'whoami' }, session.token)
 	assert.equal(whoamiResult.isError, undefined)
 	const parsedWhoami = JSON.parse(whoamiResult.content[0].text)
 	assert.equal(parsedWhoami.authenticated, true)
@@ -1159,7 +1159,7 @@ test('mcp auth tool with whoami and get actions', async () => {
 	assert.equal(parsedWhoami.user.email, 'mcp-whoami@example.com')
 	assert.equal(parsedWhoami.session.id, session.id)
 
-	const getResult = await executeTool('auth', { action: 'get', sessionId: session.id }, session.token)
+	const getResult = await executeTool('admin', { action: 'get', sessionId: session.id }, session.token)
 	assert.equal(getResult.isError, undefined)
 	const parsedGet = JSON.parse(getResult.content[0].text)
 	assert.equal(parsedGet.session.id, session.id)
@@ -1221,7 +1221,7 @@ test('mcp tools/list filtering based on session admin status', async () => {
 	})
 	assert.equal(adminRes.status, 200)
 	const adminData = await adminRes.json()
-	assert.deepEqual(adminData.result.tools.map(t => t.name), ['auth', 'google_api'])
+	assert.deepEqual(adminData.result.tools.map(t => t.name), ['admin', 'google_api'])
 
 	const workerRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
@@ -1254,36 +1254,36 @@ test('non-admin session auth restrictions and self-management', async () => {
 		admin: 0
 	})
 
-	const whoamiResult = await executeTool('auth', { action: 'whoami' }, session1.token)
+	const whoamiResult = await executeTool('admin', { action: 'whoami' }, session1.token)
 	assert.equal(whoamiResult.isError, undefined)
 	const whoamiParsed = JSON.parse(whoamiResult.content[0].text)
 	assert.equal(whoamiParsed.authenticated, true)
 	assert.equal(whoamiParsed.session.admin, false)
 
-	const listResult = await executeTool('auth', { action: 'list' }, session1.token)
+	const listResult = await executeTool('admin', { action: 'list' }, session1.token)
 	assert.equal(listResult.isError, true)
 	assert.match(listResult.content[0].text, /requires admin privileges/)
 
-	const getOtherResult = await executeTool('auth', { action: 'get', sessionId: session2.id }, session1.token)
+	const getOtherResult = await executeTool('admin', { action: 'get', sessionId: session2.id }, session1.token)
 	assert.equal(getOtherResult.isError, true)
 	assert.match(getOtherResult.content[0].text, /requires admin privileges/)
 
-	const getSelfResult = await executeTool('auth', { action: 'get', sessionId: session1.id }, session1.token)
+	const getSelfResult = await executeTool('admin', { action: 'get', sessionId: session1.id }, session1.token)
 	assert.equal(getSelfResult.isError, undefined)
 	const getSelfParsed = JSON.parse(getSelfResult.content[0].text)
 	assert.equal(getSelfParsed.session.id, session1.id)
 
-	const revokeOthersResult = await executeTool('auth', { action: 'revoke', allOthers: true }, session1.token)
+	const revokeOthersResult = await executeTool('admin', { action: 'revoke', allOthers: true }, session1.token)
 	assert.equal(revokeOthersResult.isError, true)
 	assert.match(revokeOthersResult.content[0].text, /requires admin privileges/)
 	assert.ok(db.tokens.get(session2.id))
 
-	const revokeOtherIdResult = await executeTool('auth', { action: 'revoke', sessionId: session2.id }, session1.token)
+	const revokeOtherIdResult = await executeTool('admin', { action: 'revoke', sessionId: session2.id }, session1.token)
 	assert.equal(revokeOtherIdResult.isError, true)
 	assert.match(revokeOtherIdResult.content[0].text, /requires admin privileges/)
 	assert.ok(db.tokens.get(session2.id))
 
-	const revokeSelfResult = await executeTool('auth', { action: 'revoke', sessionId: session1.id }, session1.token)
+	const revokeSelfResult = await executeTool('admin', { action: 'revoke', sessionId: session1.id }, session1.token)
 	assert.equal(revokeSelfResult.isError, undefined)
 	assert.equal(db.tokens.get(session1.id), null)
 	assert.ok(db.tokens.get(session2.id))
@@ -1403,7 +1403,7 @@ test('30-day dormancy pruning scopes only provider = self', () => {
 	assert.ok(db.tokens.get(upstreamApp.id), 'Upstream apps must not be pruned by dormancy')
 })
 
-test('auth tool administrative actions: create_session, list_apps, connect_app, link_app, unlink_app', async () => {
+test('admin tool administrative actions: create_session, list_apps, connect_app, link_app, unlink_app', async () => {
 	const user = db.users.upsert({ email: 'admin-actions@example.com' })
 	const adminSession = db.tokens.create({
 		userId: user.id,
@@ -1418,7 +1418,7 @@ test('auth tool administrative actions: create_session, list_apps, connect_app, 
 		expiresAt: Date.now() + 3600000
 	})
 
-	const connectRes = await executeTool('auth', {
+	const connectRes = await executeTool('admin', {
 		action: 'connect_app',
 		provider: 'stripe',
 		name: 'Stripe Prod',
@@ -1430,12 +1430,12 @@ test('auth tool administrative actions: create_session, list_apps, connect_app, 
 	assert.equal(connectData.app.provider, 'stripe')
 	const stripeAppId = connectData.app.id
 
-	const appsRes = await executeTool('auth', { action: 'list_apps' }, adminSession.token)
+	const appsRes = await executeTool('admin', { action: 'list_apps' }, adminSession.token)
 	assert.equal(appsRes.isError, undefined)
 	const appsData = JSON.parse(appsRes.content[0].text)
 	assert.equal(appsData.apps.length, 2)
 
-	const newSessRes = await executeTool('auth', {
+	const newSessRes = await executeTool('admin', {
 		action: 'create_session',
 		name: 'Chef Agent',
 		admin: false,
@@ -1447,7 +1447,7 @@ test('auth tool administrative actions: create_session, list_apps, connect_app, 
 	assert.equal(newSessData.session.name, 'Chef Agent')
 	const chefSessionId = newSessData.session.id
 
-	const linkRes = await executeTool('auth', {
+	const linkRes = await executeTool('admin', {
 		action: 'link_app',
 		sessionId: chefSessionId,
 		appId: stripeAppId,
@@ -1457,7 +1457,7 @@ test('auth tool administrative actions: create_session, list_apps, connect_app, 
 	const linkData = JSON.parse(linkRes.content[0].text)
 	assert.equal(linkData.linked, true)
 
-	const unlinkRes = await executeTool('auth', {
+	const unlinkRes = await executeTool('admin', {
 		action: 'unlink_app',
 		sessionId: chefSessionId,
 		appId: stripeAppId
@@ -1603,7 +1603,7 @@ test('rest api /api/apps and /api/links endpoints', async () => {
 	assert.equal(db.tokens.get(newAppId), null)
 })
 
-test('auth update_email action', async () => {
+test('admin update_email action', async () => {
 	const user1 = db.users.upsert({ email: 'email-owner@example.com', name: 'Original User' })
 	const adminSession = db.tokens.create({
 		userId: user1.id,
@@ -1617,28 +1617,28 @@ test('auth update_email action', async () => {
 	})
 	const user2 = db.users.upsert({ email: 'taken@example.com', name: 'Other User' })
 
-	const nonAdminRes = await executeTool('auth', {
+	const nonAdminRes = await executeTool('admin', {
 		action: 'update_email',
 		email: 'new-email@example.com'
 	}, workerSession.token)
 	assert.equal(nonAdminRes.isError, true)
 	assert.match(nonAdminRes.content[0].text, /requires admin privileges/)
 
-	const invalidEmailRes = await executeTool('auth', {
+	const invalidEmailRes = await executeTool('admin', {
 		action: 'update_email',
 		email: 'not-an-email'
 	}, adminSession.token)
 	assert.equal(invalidEmailRes.isError, true)
 	assert.match(invalidEmailRes.content[0].text, /Valid new email address is required/)
 
-	const conflictRes = await executeTool('auth', {
+	const conflictRes = await executeTool('admin', {
 		action: 'update_email',
 		email: 'taken@example.com'
 	}, adminSession.token)
 	assert.equal(conflictRes.isError, true)
 	assert.match(conflictRes.content[0].text, /already registered/)
 
-	const successRes = await executeTool('auth', {
+	const successRes = await executeTool('admin', {
 		action: 'update_email',
 		email: 'updated-email@example.com'
 	}, adminSession.token)
@@ -1651,13 +1651,13 @@ test('auth update_email action', async () => {
 	const updatedUser = db.users.get(user1.id)
 	assert.equal(updatedUser.email, 'updated-email@example.com')
 
-	const whoamiRes = await executeTool('auth', { action: 'whoami' }, adminSession.token)
+	const whoamiRes = await executeTool('admin', { action: 'whoami' }, adminSession.token)
 	const whoamiData = JSON.parse(whoamiRes.content[0].text)
 	assert.equal(whoamiData.user.email, 'updated-email@example.com')
 })
 
-test('auth update_name action', async () => {
-	const user = db.users.upsert({ email: 'name-owner@example.com', name: 'Initial Name' })
+test('admin update_user action', async () => {
+	const user = db.users.upsert({ email: 'user-props@example.com', name: 'Initial Name' })
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -1669,25 +1669,30 @@ test('auth update_name action', async () => {
 		admin: 0
 	})
 
-	const nonAdminRes = await executeTool('auth', {
-		action: 'update_name',
+	const nonAdminRes = await executeTool('admin', {
+		action: 'update_user',
 		name: 'Hacker Name'
 	}, workerSession.token)
 	assert.equal(nonAdminRes.isError, true)
 	assert.match(nonAdminRes.content[0].text, /requires admin privileges/)
 
-	const updateRes = await executeTool('auth', {
-		action: 'update_name',
+	const updateRes = await executeTool('admin', {
+		action: 'update_user',
+		id: 'fake-id-attempt',
+		email: 'fake-email-attempt@example.com',
 		name: 'Jesse Tane'
 	}, adminSession.token)
 	assert.equal(updateRes.isError, undefined)
 	const updateData = JSON.parse(updateRes.content[0].text)
 	assert.equal(updateData.updated, true)
+	assert.equal(updateData.user.id, user.id)
+	assert.equal(updateData.user.email, 'user-props@example.com')
 	assert.equal(updateData.user.name, 'Jesse Tane')
 
-	const whoamiRes = await executeTool('auth', { action: 'whoami' }, adminSession.token)
+	const whoamiRes = await executeTool('admin', { action: 'whoami' }, adminSession.token)
 	const whoamiData = JSON.parse(whoamiRes.content[0].text)
 	assert.equal(whoamiData.user.name, 'Jesse Tane')
+	assert.equal(whoamiData.user.email, 'user-props@example.com')
 })
 
 test('teardown server', (t, done) => {

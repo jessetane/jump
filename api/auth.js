@@ -17,7 +17,7 @@ export {
 	linkApp,
 	unlinkApp,
 	updateEmail,
-	updateName
+	updateUser
 }
 
 const status = whoami
@@ -431,8 +431,7 @@ async function updateEmail (token, opts = {}) {
 	}
 }
 
-async function updateName (token, opts = {}) {
-	const newName = opts.name !== undefined ? opts.name : opts.newName
+async function updateUser (token, opts = {}) {
 	const appUrl = process.env.APP_URL || 'http://localhost:8080'
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
@@ -441,11 +440,12 @@ async function updateName (token, opts = {}) {
 		throw error
 	}
 	if (!session.admin) {
-		const error = new Error('Access denied: updating account name requires admin privileges')
+		const error = new Error('Access denied: updating user profile requires admin privileges')
 		error.status = 403
 		throw error
 	}
-	const user = db.users.updateName(session.userId, newName ? String(newName).trim() : null)
+	const { id, email, ...updates } = opts
+	const user = db.users.updateUser(session.userId, updates)
 	return {
 		updated: true,
 		user: {

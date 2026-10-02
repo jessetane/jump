@@ -7,7 +7,7 @@ export {
 	get,
 	getByEmail,
 	updateEmail,
-	updateName
+	updateUser
 }
 
 function init () {
@@ -55,9 +55,22 @@ function updateEmail (id, newEmail) {
 	return get(id)
 }
 
-function updateName (id, newName) {
-	if (!id) return null
+function updateUser (id, updates = {}) {
+	if (!id || typeof updates !== 'object') return null
+	const allowed = ['name']
+	const sets = []
+	const params = []
+	for (const key of allowed) {
+		if (key in updates) {
+			sets.push(`${key} = ?`)
+			params.push(updates[key] ? String(updates[key]).trim() : null)
+		}
+	}
+	if (sets.length === 0) return get(id)
 	const now = new Date().toISOString()
-	sqlite.prepare('UPDATE users SET name = ?, updated = ? WHERE id = ?').run(newName, now, id)
+	sets.push('updated = ?')
+	params.push(now)
+	params.push(id)
+	sqlite.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...params)
 	return get(id)
 }

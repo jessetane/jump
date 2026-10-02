@@ -9,9 +9,9 @@ export {
 	handleMcp
 }
 
-const authTool = {
-	name: 'auth',
-	description: 'Administer MCP sessions, connected upstream apps, and routing policies.',
+const adminTool = {
+	name: 'admin',
+	description: 'Administer MCP sessions, connected upstream apps, routing policies, and user account settings.',
 	inputSchema: {
 		type: 'object',
 		properties: {
@@ -32,13 +32,13 @@ const authTool = {
 					'link_app',
 					'unlink_app',
 					'update_email',
-					'update_name'
+					'update_user'
 				],
 				description: 'Administrative action to perform.'
 			},
 			sessionId: { type: 'string', description: 'Target session token ID.' },
 			appId: { type: 'string', description: 'Target upstream app token ID.' },
-			name: { type: 'string', description: 'Human-readable label.' },
+			name: { type: 'string', description: 'Human-readable label or user display name.' },
 			email: { type: 'string', description: 'New email address (for update_email action).' },
 			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe").' },
 			apiKey: { type: 'string', description: 'API Key (for static key apps).' },
@@ -80,9 +80,9 @@ const googleApiTool = {
 	}
 }
 
-const tools = [authTool, googleApiTool]
+const tools = [adminTool, googleApiTool]
 
-const authActions = {
+const adminActions = {
 	whoami: (args, token) => api.auth.whoami(token),
 	status: (args, token) => api.auth.whoami(token),
 	list: (args, token) => api.auth.list(token),
@@ -97,15 +97,15 @@ const authActions = {
 	link_app: (args, token) => api.auth.linkApp(token, args),
 	unlink_app: (args, token) => api.auth.unlinkApp(token, args),
 	update_email: (args, token) => api.auth.updateEmail(token, args),
-	update_name: (args, token) => api.auth.updateName(token, args)
+	update_user: (args, token) => api.auth.updateUser(token, args)
 }
 
 const toolHandlers = {
-	auth (args, token) {
+	admin (args, token) {
 		const action = args.action || 'whoami'
-		const handle = authActions[action]
+		const handle = adminActions[action]
 		if (!handle) {
-			console.warn(`[mcp] auth action rejected: Unknown action "${action}"`)
+			console.warn(`[mcp] admin action rejected: Unknown action "${action}"`)
 			const err = new Error(`Unknown action: ${action}`)
 			err.status = 400
 			throw err
@@ -190,7 +190,7 @@ function getAvailableTools (token) {
 	const links = db.links.listBySessionId(session.id)
 	const list = []
 	if (session.admin) {
-		list.push(authTool)
+		list.push(adminTool)
 	}
 	if (links.some(l => l.app?.provider === 'google')) {
 		list.push(googleApiTool)
