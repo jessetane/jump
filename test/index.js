@@ -19,11 +19,54 @@ fs.rmSync(`${testDbPath}-shm`, { force: true })
 
 const { server } = await import('../index.js')
 const db = await import('../db/index.js')
-const { readResponseBody, isGoogleApiUrl } = await import('../google.js')
+const { readResponseBody, isGoogleApiUrl } = await import('../providers/google.js')
 const { executeTool } = await import('../mcp.js')
 const { isAllowedRedirectUri } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
+
+function createTestSession (opts = {}) {
+	const {
+		email = 'user@example.com',
+		name = 'Test User',
+		admin = false,
+		accessToken = 'ya29.fake-token',
+		refreshToken = '1//fake-refresh',
+		expiresAt = Date.now() + 3600000,
+		scopes = null,
+		policy = null,
+		ip = '127.0.0.1',
+		ua = 'TestClient/1.0'
+	} = opts
+	const user = db.users.upsert({ email, name })
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		type: 'bearer',
+		name: 'Test Session',
+		admin: admin ? 1 : 0,
+		ip,
+		ua
+	})
+	const app = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Test Google App',
+		credentials: {
+			accessToken,
+			refreshToken
+		},
+		expiresAt,
+		scopes
+	})
+	db.links.create({
+		sessionTokenId: session.id,
+		appTokenId: app.id,
+		policy
+	})
+	return { user, session, app }
+}
 
 test('setup server', (t, done) => {
 	server.listen(0, '127.0.0.1', done)
@@ -88,7 +131,7 @@ test('mcp initialize & tools/list', async () => {
 	assert.equal(listRes.status, 200)
 	const listData = await listRes.json()
 	const toolNames = listData.result.tools.map(t => t.name)
-	assert.deepEqual(toolNames, ['auth', 'google_api'])
+	assert.deepEqual(toolNames, ['google_api'])
 })
 
 test('mcp auth tool without auth', async () => {
@@ -188,11 +231,7 @@ test('isGoogleApiUrl domain restrictions', () => {
 })
 
 test('rejects non-googleapis URLs in google_api tool', async () => {
-	const user = db.users.upsert({ email: 'user@example.com' })
-	const session = db.sessions.create({
-		userId: user.id,
-		accessToken: 'ya29.fake-token'
-	})
+	const { session } = createTestSession({ email: 'user@example.com' })
 	const result = await executeTool('google_api', {
 		url: 'https://evil.com/steal-token'
 	}, session.token)
@@ -201,11 +240,7 @@ test('rejects non-googleapis URLs in google_api tool', async () => {
 })
 
 test('mcp google_api tool ignores body on GET requests', async () => {
-	const user = db.users.upsert({ email: 'getbody@example.com' })
-	const session = db.sessions.create({
-		userId: user.id,
-		accessToken: 'ya29.fake-token'
-	})
+	const { session } = createTestSession({ email: 'getbody@example.com' })
 	const result = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/drive/v3/files',
 		method: 'GET',
@@ -228,12 +263,7 @@ test('oauth state flow', async () => {
 })
 
 test('oauth code exchange flow', async () => {
-	const user = db.users.upsert({ email: 'test@example.com', name: 'Test User' })
-	const session = db.sessions.create({
-		userId: user.id,
-		accessToken: 'ya29.fake-token',
-		refreshToken: '1//fake-refresh'
-	})
+	const { session } = createTestSession({ email: 'test@example.com', name: 'Test User' })
 	const code = db.oauthCodes.create({
 		sessionId: session.id,
 		clientRedirectUri: 'https://chatgpt.com/callback'
@@ -290,12 +320,7 @@ test('well-known oauth discovery endpoints', async () => {
 })
 
 test('oauth pkce flow with S256', async () => {
-	const user = db.users.upsert({ email: 'pkce@example.com', name: 'PKCE User' })
-	const session = db.sessions.create({
-		userId: user.id,
-		accessToken: 'ya29.fake-pkce-token',
-		refreshToken: '1//fake-pkce-refresh'
-	})
+	const { session } = createTestSession({ email: 'pkce@example.com', name: 'PKCE User' })
 	const addr = server.address()
 	const verifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
 	const challenge = createHash('sha256').update(verifier).digest('base64url')
@@ -637,52 +662,55 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 		body: new URLSearchParams({ token: 'nonexistent-token' }).toString()
 	})
 	assert.equal(unknownRes.status, 200)
-	const user = db.users.upsert({ email: 'revoke-endpoint@example.com' })
-	const session = db.sessions.create({
-		userId: user.id,
-		accessToken: 'ya29.revoke-access-token',
-		refreshToken: '1//revoke-refresh-token'
-	})
-	assert.ok(db.sessions.get(session.id))
+
+	const { session } = createTestSession({ email: 'revoke-endpoint@example.com' })
+	assert.ok(db.tokens.get(session.id))
 	const revokeRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({ token: session.token }).toString()
 	})
 	assert.equal(revokeRes.status, 200)
-	assert.equal(db.sessions.get(session.id), null)
-	const sessionJson = db.sessions.create({
-		userId: user.id,
-		accessToken: 'ya29.revoke-json-access-token'
-	})
-	assert.ok(db.sessions.get(sessionJson.id))
+	assert.equal(db.tokens.get(session.id), null)
+
+	const { session: sessionJson } = createTestSession({ email: 'revoke-json@example.com' })
+	assert.ok(db.tokens.get(sessionJson.id))
 	const revokeJsonRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({ token: sessionJson.token })
 	})
 	assert.equal(revokeJsonRes.status, 200)
-	assert.equal(db.sessions.get(sessionJson.id), null)
+	assert.equal(db.tokens.get(sessionJson.id), null)
 })
 
 test('mcp auth status, list, and revoke', async () => {
 	const user = db.users.upsert({ email: 'sessions-tool@example.com' })
-	const session1 = db.sessions.create({
+	const session1 = db.tokens.create({
 		userId: user.id,
-		accessToken: 'ya29.session-1-token',
-		refreshToken: '1//session-1-refresh',
-		admin: true,
+		provider: 'self',
+		admin: 1,
 		ip: '192.168.1.10',
-		ua: 'ClaudeDesktop/1.0',
-		scope: 'https://www.googleapis.com/auth/drive.readonly'
+		ua: 'ClaudeDesktop/1.0'
 	})
-	const session2 = db.sessions.create({
+	const session2 = db.tokens.create({
 		userId: user.id,
-		accessToken: 'ya29.session-2-token',
-		refreshToken: '1//session-2-refresh',
+		provider: 'self',
+		admin: 0,
 		ip: '10.0.0.5',
 		ua: 'ChatGPT/2.0'
 	})
+	const app = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Google Drive',
+		scopes: 'https://www.googleapis.com/auth/drive.readonly',
+		expiresAt: Date.now() + 3600000
+	})
+	db.links.create({ sessionTokenId: session1.id, appTokenId: app.id })
+	db.links.create({ sessionTokenId: session2.id, appTokenId: app.id })
+
 	const listResult = await executeTool('auth', { action: 'list' }, session1.token)
 	assert.equal(listResult.isError, undefined)
 	const listParsed = JSON.parse(listResult.content[0].text)
@@ -695,18 +723,20 @@ test('mcp auth status, list, and revoke', async () => {
 	assert.equal(other.id, session2.id)
 	assert.equal(other.ip, '10.0.0.5')
 	assert.equal(other.ua, 'ChatGPT/2.0')
+
 	const revokeOtherResult = await executeTool('auth', { action: 'revoke', allOthers: true }, session1.token)
 	assert.equal(revokeOtherResult.isError, undefined)
 	const revokeOtherParsed = JSON.parse(revokeOtherResult.content[0].text)
 	assert.equal(revokeOtherParsed.revoked, true)
 	assert.equal(revokeOtherParsed.count, 1)
-	assert.equal(db.sessions.get(session2.id), null)
-	assert.ok(db.sessions.get(session1.id))
+	assert.equal(db.tokens.get(session2.id), null)
+	assert.ok(db.tokens.get(session1.id))
+
 	const revokeCurrentResult = await executeTool('auth', { action: 'revoke' }, session1.token)
 	assert.equal(revokeCurrentResult.isError, undefined)
 	const revokeCurrentParsed = JSON.parse(revokeCurrentResult.content[0].text)
 	assert.equal(revokeCurrentParsed.revoked, true)
-	assert.equal(db.sessions.get(session1.id), null)
+	assert.equal(db.tokens.get(session1.id), null)
 })
 
 test('matchPattern matching logic', () => {
@@ -854,8 +884,7 @@ test('evaluatePolicy matches URLs with query parameters in url string', () => {
 	assert.equal(evaluatePolicy(sheetPolicy, { url: 'https://sheets.googleapis.com/v4/spreadsheets/123?includeGridData=true' }).allowed, true)
 })
 
-test('executeTool google_api enforces session policy and auth tools decode policy', async () => {
-	const user = db.users.upsert({ email: 'policy-test@example.com' })
+test('executeTool google_api enforces link policy and auth tools decode policy', async () => {
 	const policyObj = [
 		{
 			action: 'deny',
@@ -867,30 +896,22 @@ test('executeTool google_api enforces session policy and auth tools decode polic
 			path: '/calendar/v3/calendars/work/**'
 		}
 	]
-	const session = db.sessions.create({
-		userId: user.id,
-		accessToken: 'ya29.policy-token',
-		policy: JSON.stringify(policyObj),
+	const { session } = createTestSession({
+		email: 'policy-test@example.com',
 		admin: true,
-		expiresAt: Date.now() + 3600000
+		policy: policyObj
 	})
 
-	const noTokenSession = db.sessions.create({
-		userId: user.id,
-		policy: JSON.stringify(policyObj),
-		expiresAt: Date.now() + 3600000
-	})
-
-	const statusRes = await executeTool('auth', { action: 'status' }, noTokenSession.token)
+	const statusRes = await executeTool('auth', { action: 'status' }, session.token)
 	assert.equal(statusRes.isError, undefined)
 	const statusParsed = JSON.parse(statusRes.content[0].text)
-	assert.deepEqual(statusParsed.policy, policyObj)
+	assert.deepEqual(statusParsed.linkedApps[0].policy, policyObj)
 
 	const listRes = await executeTool('auth', { action: 'list' }, session.token)
 	assert.equal(listRes.isError, undefined)
 	const listParsed = JSON.parse(listRes.content[0].text)
 	const foundSession = listParsed.sessions.find(s => s.id === session.id)
-	assert.deepEqual(foundSession.policy, policyObj)
+	assert.deepEqual(foundSession.linkedApps[0].policy, policyObj)
 
 	const deniedDeleteRes = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/calendar/v3/calendars/work/events/123',
@@ -1042,24 +1063,32 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	const unauthData = await unauthRes.json()
 	assert.equal(unauthData.authenticated, false)
 	assert.match(unauthData.signInUrl, /\/oauth\/authorize/)
+
 	const unauthSessions = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`)
 	assert.equal(unauthSessions.status, 401)
+
 	const user = db.users.upsert({ email: 'rest-test@example.com' })
-	const session1 = db.sessions.create({
+	const session1 = db.tokens.create({
 		userId: user.id,
-		accessToken: 'ya29.rest-session-1',
-		refreshToken: '1//rest-refresh-1',
-		admin: true,
-		expiresAt: Date.now() + 3600000,
+		provider: 'self',
+		admin: 1,
 		ip: '127.0.0.1',
 		ua: 'TestClient/1.0'
 	})
-	const session2 = db.sessions.create({
+	const session2 = db.tokens.create({
 		userId: user.id,
-		accessToken: 'ya29.rest-session-2',
-		refreshToken: '1//rest-refresh-2',
-		expiresAt: Date.now() + 3600000
+		provider: 'self',
+		admin: 0
 	})
+	const app = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Google Rest App'
+	})
+	db.links.create({ sessionTokenId: session1.id, appTokenId: app.id })
+	db.links.create({ sessionTokenId: session2.id, appTokenId: app.id })
+
 	const whoamiRes = await fetch(`http://127.0.0.1:${addr.port}/api/whoami`, {
 		headers: { authorization: `Bearer ${session1.token}` }
 	})
@@ -1068,12 +1097,14 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	assert.equal(whoamiData.authenticated, true)
 	assert.equal(whoamiData.email, 'rest-test@example.com')
 	assert.equal(whoamiData.currentSession.id, session1.id)
+
 	const listRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
 		headers: { authorization: `Bearer ${session1.token}` }
 	})
 	assert.equal(listRes.status, 200)
 	const listData = await listRes.json()
 	assert.equal(listData.sessions.length, 2)
+
 	const getRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${session2.id}`, {
 		headers: { authorization: `Bearer ${session1.token}` }
 	})
@@ -1081,8 +1112,7 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	const getData = await getRes.json()
 	assert.equal(getData.session.id, session2.id)
 	assert.equal(getData.session.token, undefined)
-	assert.equal(getData.session.accessToken, undefined)
-	assert.equal(getData.session.refreshToken, undefined)
+
 	const delSpecificRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${session2.id}`, {
 		method: 'DELETE',
 		headers: { authorization: `Bearer ${session1.token}` }
@@ -1090,45 +1120,34 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	assert.equal(delSpecificRes.status, 200)
 	const delData = await delSpecificRes.json()
 	assert.equal(delData.revoked, true)
-	assert.equal(db.sessions.get(session2.id), null)
+	assert.equal(db.tokens.get(session2.id), null)
+
 	const delAllRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
 		method: 'DELETE',
 		headers: { authorization: `Bearer ${session1.token}` }
 	})
 	assert.equal(delAllRes.status, 200)
-	assert.equal(db.sessions.get(session1.id), null)
+	assert.equal(db.tokens.get(session1.id), null)
 })
 
 test('mcp auth tool with whoami and get actions', async () => {
-	const user = db.users.upsert({ email: 'mcp-whoami@example.com' })
-	const session = db.sessions.create({
-		userId: user.id,
-		accessToken: 'ya29.mcp-session',
-		refreshToken: '1//mcp-refresh',
-		expiresAt: Date.now() + 3600000
-	})
+	const { session } = createTestSession({ email: 'mcp-whoami@example.com' })
 	const whoamiResult = await executeTool('auth', { action: 'whoami' }, session.token)
 	assert.equal(whoamiResult.isError, undefined)
 	const parsedWhoami = JSON.parse(whoamiResult.content[0].text)
 	assert.equal(parsedWhoami.authenticated, true)
 	assert.equal(parsedWhoami.email, 'mcp-whoami@example.com')
+
 	const getResult = await executeTool('auth', { action: 'get', sessionId: session.id }, session.token)
 	assert.equal(getResult.isError, undefined)
 	const parsedGet = JSON.parse(getResult.content[0].text)
 	assert.equal(parsedGet.session.id, session.id)
 	assert.equal(parsedGet.session.token, undefined)
-	assert.equal(parsedGet.session.accessToken, undefined)
-	assert.equal(parsedGet.session.refreshToken, undefined)
 })
 
 test('transparent rest proxy /api/google/*', async () => {
 	const addr = server.address()
-	const user = db.users.upsert({ email: 'rest-proxy@example.com' })
-	const session = db.sessions.create({
-		userId: user.id,
-		accessToken: 'ya29.rest-proxy-session',
-		expiresAt: Date.now() + 3600000
-	})
+	const { session } = createTestSession({ email: 'rest-proxy@example.com' })
 	const notFoundRes = await fetch(`http://127.0.0.1:${addr.port}/api/google`, {
 		headers: { authorization: `Bearer ${session.token}` }
 	})
@@ -1146,18 +1165,25 @@ test('transparent rest proxy /api/google/*', async () => {
 test('mcp tools/list filtering based on session admin status', async () => {
 	const addr = server.address()
 	const user = db.users.upsert({ email: 'mcp-tools-filter@example.com' })
-	const adminSession = db.sessions.create({
+	const adminSession = db.tokens.create({
 		userId: user.id,
-		accessToken: 'ya29.admin-token',
-		admin: true,
+		provider: 'self',
+		admin: 1
+	})
+	const workerSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 0
+	})
+	const app = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Google Filter App',
 		expiresAt: Date.now() + 3600000
 	})
-	const workerSession = db.sessions.create({
-		userId: user.id,
-		accessToken: 'ya29.worker-token',
-		admin: false,
-		expiresAt: Date.now() + 3600000
-	})
+	db.links.create({ sessionTokenId: adminSession.id, appTokenId: app.id })
+	db.links.create({ sessionTokenId: workerSession.id, appTokenId: app.id })
 
 	const adminRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
@@ -1196,17 +1222,15 @@ test('mcp tools/list filtering based on session admin status', async () => {
 
 test('non-admin session auth restrictions and self-management', async () => {
 	const user = db.users.upsert({ email: 'non-admin-auth@example.com' })
-	const session1 = db.sessions.create({
+	const session1 = db.tokens.create({
 		userId: user.id,
-		accessToken: 'ya29.non-admin-1',
-		admin: false,
-		expiresAt: Date.now() + 3600000
+		provider: 'self',
+		admin: 0
 	})
-	const session2 = db.sessions.create({
+	const session2 = db.tokens.create({
 		userId: user.id,
-		accessToken: 'ya29.non-admin-2',
-		admin: false,
-		expiresAt: Date.now() + 3600000
+		provider: 'self',
+		admin: 0
 	})
 
 	const whoamiResult = await executeTool('auth', { action: 'whoami' }, session1.token)
@@ -1232,17 +1256,17 @@ test('non-admin session auth restrictions and self-management', async () => {
 	const revokeOthersResult = await executeTool('auth', { action: 'revoke', allOthers: true }, session1.token)
 	assert.equal(revokeOthersResult.isError, true)
 	assert.match(revokeOthersResult.content[0].text, /requires admin privileges/)
-	assert.ok(db.sessions.get(session2.id))
+	assert.ok(db.tokens.get(session2.id))
 
 	const revokeOtherIdResult = await executeTool('auth', { action: 'revoke', sessionId: session2.id }, session1.token)
 	assert.equal(revokeOtherIdResult.isError, true)
 	assert.match(revokeOtherIdResult.content[0].text, /requires admin privileges/)
-	assert.ok(db.sessions.get(session2.id))
+	assert.ok(db.tokens.get(session2.id))
 
 	const revokeSelfResult = await executeTool('auth', { action: 'revoke', sessionId: session1.id }, session1.token)
 	assert.equal(revokeSelfResult.isError, undefined)
-	assert.equal(db.sessions.get(session1.id), null)
-	assert.ok(db.sessions.get(session2.id))
+	assert.equal(db.tokens.get(session1.id), null)
+	assert.ok(db.tokens.get(session2.id))
 })
 
 test('oauth consent flow with admin parameter', async () => {
@@ -1287,6 +1311,280 @@ test('oauth consent flow with admin parameter', async () => {
 	const stateTokenNoAdmin = new URL(locationNoAdmin).searchParams.get('state')
 	const oauthStateNoAdmin = db.oauthStates.consume(stateTokenNoAdmin)
 	assert.equal(oauthStateNoAdmin.admin, false)
+})
+
+test('magic link admin verification flow (/oauth/verify)', async () => {
+	const addr = server.address()
+	const user = db.users.upsert({ email: 'magic@example.com' })
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 0
+	})
+	const magicCode = 'test-magic-code-123'
+	db.oauthStates.create({
+		userId: user.id,
+		sessionName: session.id,
+		clientRedirectUri: 'https://chatgpt.com/callback',
+		clientState: 'magic-state-abc',
+		magicCode,
+		magicExpiresAt: Date.now() + 600000
+	})
+
+	const verifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${magicCode}`, {
+		redirect: 'manual'
+	})
+	assert.equal(verifyRes.status, 302)
+	const targetLocation = verifyRes.headers.get('location')
+	assert.ok(targetLocation)
+	const targetUrl = new URL(targetLocation)
+	assert.equal(targetUrl.hostname, 'chatgpt.com')
+	assert.equal(targetUrl.searchParams.get('state'), 'magic-state-abc')
+	const authCode = targetUrl.searchParams.get('code')
+	assert.ok(authCode)
+
+	const updatedSession = db.tokens.get(session.id)
+	assert.equal(updatedSession.admin, true)
+
+	const tokenRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			code: authCode,
+			redirect_uri: 'https://chatgpt.com/callback',
+			grant_type: 'authorization_code'
+		}).toString()
+	})
+	assert.equal(tokenRes.status, 200)
+	const tokenData = await tokenRes.json()
+	assert.equal(tokenData.access_token, session.token)
+})
+
+test('30-day dormancy pruning scopes only provider = self', () => {
+	const user = db.users.upsert({ email: 'dormancy@example.com' })
+	const oldDate = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000).toISOString()
+	const activeSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self'
+	})
+	const dormantSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self'
+	})
+	const upstreamApp = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Upstream App'
+	})
+	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, dormantSession.id)
+	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, upstreamApp.id)
+
+	db.tokens.pruneDormant(30 * 24 * 60 * 60 * 1000)
+
+	assert.equal(db.tokens.get(dormantSession.id), null)
+	assert.ok(db.tokens.get(activeSession.id))
+	assert.ok(db.tokens.get(upstreamApp.id), 'Upstream apps must not be pruned by dormancy')
+})
+
+test('auth tool administrative actions: create_session, list_apps, connect_app, link_app, unlink_app', async () => {
+	const user = db.users.upsert({ email: 'admin-actions@example.com' })
+	const adminSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 1
+	})
+	const googleApp = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Main Google',
+		expiresAt: Date.now() + 3600000
+	})
+
+	const connectRes = await executeTool('auth', {
+		action: 'connect_app',
+		provider: 'stripe',
+		name: 'Stripe Prod',
+		apiKey: 'sk_test_12345'
+	}, adminSession.token)
+	assert.equal(connectRes.isError, undefined)
+	const connectData = JSON.parse(connectRes.content[0].text)
+	assert.equal(connectData.connected, true)
+	assert.equal(connectData.app.provider, 'stripe')
+	const stripeAppId = connectData.app.id
+
+	const appsRes = await executeTool('auth', { action: 'list_apps' }, adminSession.token)
+	assert.equal(appsRes.isError, undefined)
+	const appsData = JSON.parse(appsRes.content[0].text)
+	assert.equal(appsData.apps.length, 2)
+
+	const newSessRes = await executeTool('auth', {
+		action: 'create_session',
+		name: 'Chef Agent',
+		admin: false,
+		linkAppIds: [googleApp.id]
+	}, adminSession.token)
+	assert.equal(newSessRes.isError, undefined)
+	const newSessData = JSON.parse(newSessRes.content[0].text)
+	assert.equal(newSessData.created, true)
+	assert.equal(newSessData.session.name, 'Chef Agent')
+	const chefSessionId = newSessData.session.id
+
+	const linkRes = await executeTool('auth', {
+		action: 'link_app',
+		sessionId: chefSessionId,
+		appId: stripeAppId,
+		policy: [{ action: 'allow', path: '/**' }]
+	}, adminSession.token)
+	assert.equal(linkRes.isError, undefined)
+	const linkData = JSON.parse(linkRes.content[0].text)
+	assert.equal(linkData.linked, true)
+
+	const unlinkRes = await executeTool('auth', {
+		action: 'unlink_app',
+		sessionId: chefSessionId,
+		appId: stripeAppId
+	}, adminSession.token)
+	assert.equal(unlinkRes.isError, undefined)
+	const unlinkData = JSON.parse(unlinkRes.content[0].text)
+	assert.equal(unlinkData.unlinked, true)
+})
+
+test('multi-account disambiguation in google_api tool', async () => {
+	const user = db.users.upsert({ email: 'multi-account@example.com' })
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self'
+	})
+	const personalApp = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Personal Google',
+		credentials: { accessToken: 'ya29.personal' },
+		expiresAt: Date.now() + 3600000
+	})
+	const workApp = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Work Google',
+		credentials: { accessToken: 'ya29.work' },
+		expiresAt: Date.now() + 3600000
+	})
+	db.links.create({ sessionTokenId: session.id, appTokenId: personalApp.id, policy: [{ action: 'allow', path: '/drive/**' }] })
+	db.links.create({ sessionTokenId: session.id, appTokenId: workApp.id, policy: [{ action: 'allow', path: '/calendar/**' }] })
+
+	const resWithAppId = await executeTool('google_api', {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+		appId: workApp.id
+	}, session.token)
+	assert.equal(resWithAppId.isError, true)
+	assert.doesNotMatch(resWithAppId.content[0].text, /Policy violation/)
+})
+
+test('in-place upstream re-auth flow updates app credentials without changing session token', async () => {
+	const user = db.users.upsert({ email: 'reauth@example.com' })
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		name: 'Persistent Agent Session'
+	})
+	const app = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Expiring App',
+		credentials: { accessToken: 'ya29.old', refreshToken: '1//old-refresh' },
+		expiresAt: Date.now() - 1000
+	})
+	db.links.create({ sessionTokenId: session.id, appTokenId: app.id })
+
+	const initialSessionToken = session.token
+	const state = db.oauthStates.create({
+		userId: user.id,
+		reauthAppId: app.id,
+		clientRedirectUri: 'https://chatgpt.com/callback'
+	})
+
+	const updatedCreds = { accessToken: 'ya29.new-fresh-token', refreshToken: '1//new-refresh' }
+	db.tokens.updateCredentials(app.id, {
+		credentials: updatedCreds,
+		expiresAt: Date.now() + 3600000
+	})
+
+	const reloadedApp = db.tokens.get(app.id)
+	assert.equal(reloadedApp.credentials.accessToken, 'ya29.new-fresh-token')
+	const reloadedSession = db.tokens.get(session.id)
+	assert.equal(reloadedSession.token, initialSessionToken, 'Session token remains unchanged across upstream re-auth')
+})
+
+test('rest api /api/apps and /api/links endpoints', async () => {
+	const addr = server.address()
+	const user = db.users.upsert({ email: 'rest-apps@example.com' })
+	const adminSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 1
+	})
+
+	const postAppRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({
+			provider: 'anthropic',
+			name: 'Anthropic Key',
+			apiKey: 'sk-ant-12345'
+		})
+	})
+	assert.equal(postAppRes.status, 201)
+	const postAppData = await postAppRes.json()
+	assert.equal(postAppData.connected, true)
+	const newAppId = postAppData.app.id
+
+	const getAppsRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+		headers: { authorization: `Bearer ${adminSession.token}` }
+	})
+	assert.equal(getAppsRes.status, 200)
+	const getAppsData = await getAppsRes.json()
+	assert.ok(getAppsData.apps.some(a => a.id === newAppId))
+
+	const postLinkRes = await fetch(`http://127.0.0.1:${addr.port}/api/links`, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({
+			sessionId: adminSession.id,
+			appId: newAppId,
+			policy: [{ action: 'allow' }]
+		})
+	})
+	assert.equal(postLinkRes.status, 201)
+	const postLinkData = await postLinkRes.json()
+	assert.equal(postLinkData.linked, true)
+
+	const deleteLinkRes = await fetch(`http://127.0.0.1:${addr.port}/api/links?sessionId=${adminSession.id}&appId=${newAppId}`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${adminSession.token}` }
+	})
+	assert.equal(deleteLinkRes.status, 200)
+	const deleteLinkData = await deleteLinkRes.json()
+	assert.equal(deleteLinkData.unlinked, true)
+
+	const deleteAppRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${newAppId}`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${adminSession.token}` }
+	})
+	assert.equal(deleteAppRes.status, 200)
+	const deleteAppData = await deleteAppRes.json()
+	assert.equal(deleteAppData.disconnected, true)
+	assert.equal(db.tokens.get(newAppId), null)
 })
 
 test('teardown server', (t, done) => {
