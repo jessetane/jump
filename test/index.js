@@ -1424,12 +1424,14 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 		action: 'connect_app',
 		provider: 'stripe',
 		name: 'Stripe Prod',
+		account: 'acct_stripe_prod_123',
 		apiKey: 'sk_test_12345'
 	}, adminSession.token)
 	assert.equal(connectRes.isError, undefined)
 	const connectData = JSON.parse(connectRes.content[0].text)
 	assert.equal(connectData.connected, true)
 	assert.equal(connectData.app.provider, 'stripe')
+	assert.equal(connectData.app.account, 'acct_stripe_prod_123')
 	const stripeAppId = connectData.app.id
 
 	const appsRes = await executeTool('admin', { action: 'list_apps' }, adminSession.token)

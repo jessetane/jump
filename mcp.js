@@ -41,6 +41,7 @@ const adminTool = {
 			sessionId: { type: 'string', description: 'Target session token ID.' },
 			appId: { type: 'string', description: 'Target upstream app token ID.' },
 			name: { type: 'string', description: 'Human-readable label or user display name.' },
+			account: { type: 'string', description: 'Upstream account or tenant identifier (e.g. email, username, account ID).' },
 			email: { type: 'string', description: 'New email address (for update_email action).' },
 			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe").' },
 			apiKey: { type: 'string', description: 'API Key (for static key apps).' },

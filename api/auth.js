@@ -274,7 +274,7 @@ async function listApps (token) {
 }
 
 async function connectApp (token, opts = {}) {
-	const { provider = 'google', name, apiKey, credentials } = opts
+	const { provider = 'google', name, apiKey, account, credentials } = opts
 	const appUrl = process.env.APP_URL || 'http://localhost:8080'
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
@@ -293,12 +293,18 @@ async function connectApp (token, opts = {}) {
 			connectUrl: `${appUrl.replace(/\/$/, '')}/providers/google/connect?session_id=${session.id}`
 		}
 	}
+	let creds = credentials
+	if (!creds && apiKey) {
+		creds = { apiKey, ...(account && { account: String(account).trim() }) }
+	} else if (!creds && account) {
+		creds = { account: String(account).trim() }
+	}
 	const app = db.tokens.create({
 		userId: session.userId,
 		provider,
 		type: apiKey ? 'api_key' : 'oauth',
 		name: name || `${provider} app`,
-		credentials: credentials || (apiKey ? { apiKey } : null)
+		credentials: creds
 	})
 	return {
 		connected: true,
@@ -464,7 +470,7 @@ async function updateUser (token, opts = {}) {
 }
 
 async function updateApp (token, opts = {}) {
-	const { appId, name } = opts
+	const { appId, name, account } = opts
 	const appUrl = process.env.APP_URL || 'http://localhost:8080'
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
@@ -488,7 +494,17 @@ async function updateApp (token, opts = {}) {
 		error.status = 404
 		throw error
 	}
-	const updated = db.tokens.updateName(appId, name)
+	if (name !== undefined) {
+		db.tokens.updateName(appId, name)
+	}
+	if (account !== undefined) {
+		const updatedCreds = {
+			...(targetApp.credentials || {}),
+			account: account ? String(account).trim() : null
+		}
+		db.tokens.updateCredentials(appId, { credentials: updatedCreds })
+	}
+	const updated = db.tokens.get(appId)
 	return {
 		updated: true,
 		app: {
