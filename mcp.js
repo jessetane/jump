@@ -31,7 +31,8 @@ const authTool = {
 					'disconnect_app',
 					'link_app',
 					'unlink_app',
-					'update_email'
+					'update_email',
+					'update_name'
 				],
 				description: 'Administrative action to perform.'
 			},
@@ -95,7 +96,8 @@ const authActions = {
 	disconnect_app: (args, token) => api.auth.disconnectApp(token, args),
 	link_app: (args, token) => api.auth.linkApp(token, args),
 	unlink_app: (args, token) => api.auth.unlinkApp(token, args),
-	update_email: (args, token) => api.auth.updateEmail(token, args)
+	update_email: (args, token) => api.auth.updateEmail(token, args),
+	update_name: (args, token) => api.auth.updateName(token, args)
 }
 
 const toolHandlers = {

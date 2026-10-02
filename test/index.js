@@ -1372,6 +1372,8 @@ test('magic link admin verification flow (/oauth/verify)', async () => {
 	const createdSession = db.tokens.getByToken(tokenData.access_token)
 	assert.equal(createdSession.admin, true)
 	assert.equal(createdSession.name, 'Admin Magic Session')
+	const createdUser = db.users.get(createdSession.userId)
+	assert.equal(createdUser.name, null)
 })
 
 test('30-day dormancy pruning scopes only provider = self', () => {
@@ -1652,6 +1654,40 @@ test('auth update_email action', async () => {
 	const whoamiRes = await executeTool('auth', { action: 'whoami' }, adminSession.token)
 	const whoamiData = JSON.parse(whoamiRes.content[0].text)
 	assert.equal(whoamiData.user.email, 'updated-email@example.com')
+})
+
+test('auth update_name action', async () => {
+	const user = db.users.upsert({ email: 'name-owner@example.com', name: 'Initial Name' })
+	const adminSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 1
+	})
+	const workerSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 0
+	})
+
+	const nonAdminRes = await executeTool('auth', {
+		action: 'update_name',
+		name: 'Hacker Name'
+	}, workerSession.token)
+	assert.equal(nonAdminRes.isError, true)
+	assert.match(nonAdminRes.content[0].text, /requires admin privileges/)
+
+	const updateRes = await executeTool('auth', {
+		action: 'update_name',
+		name: 'Jesse Tane'
+	}, adminSession.token)
+	assert.equal(updateRes.isError, undefined)
+	const updateData = JSON.parse(updateRes.content[0].text)
+	assert.equal(updateData.updated, true)
+	assert.equal(updateData.user.name, 'Jesse Tane')
+
+	const whoamiRes = await executeTool('auth', { action: 'whoami' }, adminSession.token)
+	const whoamiData = JSON.parse(whoamiRes.content[0].text)
+	assert.equal(whoamiData.user.name, 'Jesse Tane')
 })
 
 test('teardown server', (t, done) => {

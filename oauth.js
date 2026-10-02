@@ -251,10 +251,7 @@ async function handleVerify (req, res, query) {
 		return
 	}
 	const email = state.email || 'user@localhost'
-	const user = db.users.upsert({
-		email,
-		name: state.sessionName || null
-	})
+	const user = db.users.upsert({ email })
 	const ip = getClientIp(req)
 	const ua = req.headers['user-agent'] || null
 	const session = db.tokens.create({
