@@ -1434,6 +1434,16 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(connectData.app.account, 'acct_stripe_prod_123')
 	const stripeAppId = connectData.app.id
 
+	const reauthRes = await executeTool('admin', {
+		action: 'connect_app',
+		provider: 'google',
+		appId: googleApp.id
+	}, adminSession.token)
+	assert.equal(reauthRes.isError, undefined)
+	const reauthData = JSON.parse(reauthRes.content[0].text)
+	assert.equal(reauthData.actionRequired, 'oauth_flow')
+	assert.ok(reauthData.connectUrl.includes(`reauth_app_id=${googleApp.id}`))
+
 	const appsRes = await executeTool('admin', { action: 'list_apps' }, adminSession.token)
 	assert.equal(appsRes.isError, undefined)
 	const appsData = JSON.parse(appsRes.content[0].text)
