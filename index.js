@@ -48,6 +48,10 @@ const server = http.createServer(async (req, res) => {
 	const token = resolveToken(req)
 	try {
 		if (pathname === '/') {
+			if (req.method === 'POST') {
+				await handleMcp(req, res, token)
+				return
+			}
 			const indexHtml = await fs.readFile(path.join(dirname, 'public/index.html'), 'utf8')
 			res.statusCode = 200
 			res.setHeader('content-type', 'text/html; charset=utf-8')

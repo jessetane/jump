@@ -107,6 +107,20 @@ test('mcp initialize & tools/list', async () => {
 	const initData = await initRes.json()
 	assert.equal(initData.result.serverInfo.name, 'google-mcp')
 
+	const rootInitRes = await fetch(`http://127.0.0.1:${addr.port}/`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			jsonrpc: '2.0',
+			id: 1,
+			method: 'initialize',
+			params: {}
+		})
+	})
+	assert.equal(rootInitRes.status, 200)
+	const rootInitData = await rootInitRes.json()
+	assert.equal(rootInitData.result.serverInfo.name, 'google-mcp')
+
 	const notifRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
