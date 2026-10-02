@@ -57,9 +57,9 @@ async function whoami (token) {
 			ip: session.ip,
 			ua: session.ua,
 			created: session.created,
-			updated: session.updated
-		},
-		apps
+			updated: session.updated,
+			apps
+		}
 	}
 }
 

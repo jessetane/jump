@@ -927,7 +927,7 @@ test('executeTool google_api enforces link policy and auth tools decode policy',
 	const statusRes = await executeTool('auth', { action: 'status' }, session.token)
 	assert.equal(statusRes.isError, undefined)
 	const statusParsed = JSON.parse(statusRes.content[0].text)
-	assert.deepEqual(statusParsed.apps[0].policy, policyObj)
+	assert.deepEqual(statusParsed.session.apps[0].policy, policyObj)
 
 	const listRes = await executeTool('auth', { action: 'list' }, session.token)
 	assert.equal(listRes.isError, undefined)
