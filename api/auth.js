@@ -45,7 +45,6 @@ async function whoami (token) {
 	return {
 		authenticated: true,
 		email: session.email,
-		admin: Boolean(session.admin),
 		currentSession: {
 			id: session.id,
 			name: session.name,

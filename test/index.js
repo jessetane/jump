@@ -1255,7 +1255,6 @@ test('non-admin session auth restrictions and self-management', async () => {
 	assert.equal(whoamiResult.isError, undefined)
 	const whoamiParsed = JSON.parse(whoamiResult.content[0].text)
 	assert.equal(whoamiParsed.authenticated, true)
-	assert.equal(whoamiParsed.admin, false)
 	assert.equal(whoamiParsed.currentSession.admin, false)
 
 	const listResult = await executeTool('auth', { action: 'list' }, session1.token)
