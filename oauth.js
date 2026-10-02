@@ -395,7 +395,9 @@ async function handleCallback (req, res, query) {
 			const updatedCreds = {
 				...existingApp.credentials,
 				accessToken: tokenData.access_token,
-				refreshToken: tokenData.refresh_token || existingApp.credentials?.refreshToken
+				refreshToken: tokenData.refresh_token || existingApp.credentials?.refreshToken,
+				email,
+				account: email
 			}
 			db.tokens.updateCredentials(existingApp.id, {
 				credentials: updatedCreds,
