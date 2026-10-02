@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as db from './db/index.js'
-import { getUserInfo, revokeGoogleToken, baseScopes, services, buildScopesFromSelection } from './providers/google.js'
+import { getUserInfo, revokeGoogleToken, baseScopes, allScopes, services, buildScopesFromSelection } from './providers/google.js'
 import { getBody, sendMail } from './util.js'
 import { validatePolicy } from './policy.js'
 
@@ -178,13 +178,7 @@ async function handleAuthorize (req, res, query) {
 		res.end(JSON.stringify({ error: err.code || 'invalid_request', error_description: err.message }))
 		return
 	}
-	const clientServices = Object.values(services).map(s => ({
-		id: s.id,
-		name: s.name,
-		enterprise: Boolean(s.enterprise)
-	}))
 	const initData = {
-		services: clientServices,
 		params: query
 	}
 	const authorizeHtml = await fs.readFile(path.join(dirname, 'public/authorize.html'), 'utf8')
@@ -204,44 +198,32 @@ async function handleAuthorizeConsent (req, res) {
 	const params = new URLSearchParams(rawBody)
 
 	const query = {}
-	const serviceIdsRead = []
-	const serviceIdsWrite = []
 	let sessionName = null
-	let policy = null
 	let admin = 0
 	let reauthAppId = null
+	let policy = null
 
 	for (const [key, value] of params.entries()) {
-		if (key === 'services') {
-			for (const v of value.split(',')) {
-				const s = v.trim()
-				if (s) serviceIdsRead.push(s)
-			}
-		} else if (key === 'write') {
-			for (const v of value.split(',')) {
-				const s = v.trim()
-				if (s) serviceIdsWrite.push(s)
-			}
-		} else if (key === 'session_name') {
+		if (key === 'session_name') {
 			sessionName = value.trim() || null
 		} else if (key === 'reauth_app_id') {
 			reauthAppId = value.trim() || null
-		} else if (key === 'policy') {
-			const trimmed = value.trim()
-			if (trimmed) {
-				const validation = validatePolicy(trimmed)
-				if (!validation.valid) {
-					res.statusCode = 400
-					res.setHeader('content-type', 'application/json; charset=utf-8')
-					res.end(JSON.stringify({ error: 'invalid_request', error_description: validation.error }))
-					return
-				}
-				policy = trimmed
-			}
 		} else if (key === 'admin') {
 			admin = value === 'true' || value === '1' || value === 'on' ? 1 : 0
+		} else if (key === 'policy') {
+			policy = value.trim() || null
 		} else {
 			query[key] = value
+		}
+	}
+
+	if (policy) {
+		const policyValidation = validatePolicy(policy)
+		if (!policyValidation.valid) {
+			res.statusCode = 400
+			res.setHeader('content-type', 'application/json; charset=utf-8')
+			res.end(JSON.stringify({ error: 'invalid_request', error_description: policyValidation.error }))
+			return
 		}
 	}
 
@@ -256,9 +238,7 @@ async function handleAuthorizeConsent (req, res) {
 	}
 	const { codeChallenge, codeChallengeMethod } = validation
 
-	const scopes = serviceIdsRead.length > 0
-		? buildScopesFromSelection(serviceIdsRead, serviceIdsWrite)
-		: baseScopes.join(' ')
+	const scopes = allScopes
 
 	redirectToGoogle(res, req, {
 		redirectUri: query.redirect_uri || null,

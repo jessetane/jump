@@ -10,6 +10,7 @@ export {
 	normalizeTargetUrl,
 	isGoogleApiUrl,
 	baseScopes,
+	allScopes,
 	services,
 	buildScopesFromSelection
 }
@@ -130,6 +131,8 @@ function buildScopesFromSelection (selectedServices = [], writeServiceIds = []) 
 	}
 	return Array.from(scopeSet).join(' ')
 }
+
+const allScopes = buildScopesFromSelection(Object.keys(services), Object.keys(services))
 
 async function refreshAppToken (appToken) {
 	const refreshToken = appToken.credentials?.refreshToken

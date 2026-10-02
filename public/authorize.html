@@ -32,7 +32,7 @@
 
 			@media (min-width: 520px) {
 				.view {
-					max-width: 480px;
+					max-width: 440px;
 				}
 			}
 
@@ -40,7 +40,7 @@
 				font-size: 1.5rem;
 				text-align: center;
 				margin-top: 0.85rem;
-				margin-bottom: 0.85rem;
+				margin-bottom: 0.5rem;
 			}
 
 			.subtitle {
@@ -48,8 +48,7 @@
 				font-size: 0.95rem;
 				line-height: 1.4;
 				text-align: center;
-				margin: 0;
-				margin-bottom: 1.25rem;
+				margin: 0 0 1.5rem;
 			}
 
 			.form-group {
@@ -66,58 +65,18 @@
 
 			.form-group input[type=text] {
 				width: 100%;
-				padding: 9px 12px;
+				padding: 10px 12px;
 				font-size: 0.95rem;
 				border: 1px solid #ccc;
-				border-radius: 4px;
-			}
-
-			.table {
-				width: 100%;
-				border-collapse: collapse;
-				margin-bottom: 1rem;
-				font-size: 0.9rem;
-			}
-
-			.table th {
-				text-align: left;
-				padding: 8px 6px;
-				border-bottom: 2px solid #ccc;
-			}
-
-			.table td {
-				padding: 8px 6px;
-				border-bottom: 1px solid #eee;
-			}
-
-			.table tr:hover {
-				background: #fafafa;
-			}
-
-			.col-check {
-				text-align: center;
-				width: 60px;
-			}
-
-			.col-check input:disabled {
-				opacity: 0.35;
-				cursor: not-allowed;
-			}
-
-			.enterprise-mark {
-				color: #000;
-				font-weight: bold;
-			}
-
-			.footnote {
-				font-size: 0.78rem;
-				color: #666;
-				line-height: 1.4;
-				margin-bottom: 1.5rem;
+				border-radius: 6px;
 			}
 
 			.admin-section {
 				margin-bottom: 1.5rem;
+				padding: 12px;
+				background: #f8fafc;
+				border: 1px solid #e2e8f0;
+				border-radius: 6px;
 			}
 
 			.admin-label {
@@ -127,56 +86,27 @@
 				font-size: 0.9rem;
 				font-weight: bold;
 				cursor: pointer;
-				color: #333;
+				color: #1e293b;
 			}
 
 			.admin-hint {
-				font-size: 0.75rem;
-				color: #777;
-				margin-top: 0.25rem;
+				font-size: 0.78rem;
+				color: #64748b;
+				margin-top: 0.35rem;
 				margin-left: 21px;
-			}
-
-			.policy-section {
-				margin-bottom: 1.5rem;
-			}
-
-			.policy-section summary {
-				font-size: 0.9rem;
-				font-weight: bold;
-				cursor: pointer;
-				margin-bottom: 0.5rem;
-				color: #333;
-			}
-
-			.policy-section textarea {
-				width: 100%;
-				height: 120px;
-				font-family: monospace;
-				font-size: 0.8rem;
-				padding: 8px;
-				border: 1px solid #ccc;
-				border-radius: 4px;
-				resize: vertical;
-				box-sizing: border-box;
-			}
-
-			.policy-hint {
-				font-size: 0.75rem;
-				color: #777;
-				margin-top: 0.25rem;
+				line-height: 1.35;
 			}
 
 			button[type=submit] {
 				width: 100%;
-				padding: 11px 16px;
+				padding: 12px 16px;
 				background: #000;
 				color: #fff;
 				border: none;
 				border-radius: 6px;
 				font-size: 1rem;
 				cursor: pointer;
-				margin-bottom: 1.5rem;
+				font-weight: 500;
 			}
 
 			button[type=submit]:hover {
@@ -186,97 +116,26 @@
 	</head>
 	<body class=column>
 		<div class="view column">
-			<h1 id="page-title">google-mcp</h1>
-			<p class="subtitle" id="page-subtitle">Configure API services access</p>
+			<h1 id="page-title">Generate Bearer Token</h1>
+			<p class="subtitle" id="page-subtitle">Sign in with Google to create an MCP session token</p>
 			<form id="consent-form" method="POST" action="/oauth/authorize/consent">
 				<div id="hidden-inputs"></div>
 				<div class="form-group" id="session-name-group">
-					<label for="session_name">Session Name</label>
-					<input type="text" name="session_name" id="session_name" placeholder="e.g. Chef Assistant, Personal Mac, Work Agent">
+					<label for="session_name">Session Name (optional)</label>
+					<input type="text" name="session_name" id="session_name" placeholder="e.g. Coding Agent, Chef Assistant">
 				</div>
-				<table class="table">
-					<thead>
-						<tr>
-							<th>Service</th>
-							<th class="col-check">Read</th>
-							<th class="col-check">Write</th>
-						</tr>
-					</thead>
-					<tbody id="service-rows">
-						<tr id="row-all">
-							<td><strong>All</strong></td>
-							<td class="col-check"><input type="checkbox" id="all-read"></td>
-							<td class="col-check"><input type="checkbox" id="all-write" disabled></td>
-						</tr>
-					</tbody>
-				</table>
-				<div class="footnote">
-					<span class="enterprise-mark">*</span> Restricted to enterprise Google Workspace accounts with domain-wide delegation. Requests from personal accounts will fail if selected.
-				</div>
-				<details class="policy-section">
-					<summary>Granular Access Control (Policy JSON)</summary>
-					<textarea name="policy" id="policy" placeholder='[
-  {
-    "action": "allow",
-    "methods": ["GET"],
-    "path": "/calendar/v3/calendars/team-schedule@group.calendar.google.com"
-  },
-  {
-    "action": "allow",
-    "path": "/calendar/v3/calendars/team-schedule@group.calendar.google.com/events/**"
-  }
-]'></textarea>
-					<div class="policy-hint">Optional. Define sequential URL path and method match rules (first matching rule wins). If left blank, full access granted by selected scopes is allowed.</div>
-				</details>
 				<div class="admin-section" id="admin-group">
 					<label class="admin-label">
 						<input type="checkbox" name="admin" id="admin" value="true">
-						<span>Allow session administration (auth tool)</span>
+						<span>Admin Privileges</span>
 					</label>
-					<div class="admin-hint">Requires out-of-band email verification. Grants permissions to inspect, list, and manage sessions/apps.</div>
+					<div class="admin-hint">Allows managing other sessions and apps via the <code>auth</code> tool. Requires out-of-band email verification.</div>
 				</div>
 				<button type="submit" id="submit-btn">Sign in with Google</button>
 			</form>
 		</div>
 		<script>
 			const initData = {{INIT_DATA}}
-
-			function updateAllRowState () {
-				const allRead = document.getElementById('all-read')
-				const allWrite = document.getElementById('all-write')
-				if (!allRead || !allWrite) return
-				const services = document.querySelectorAll('input[name="services"]')
-				if (services.length === 0) return
-				let readCount = 0
-				let writeCount = 0
-				for (const s of services) {
-					const id = s.value
-					const w = document.getElementById('wr_' + id)
-					if (s.checked) {
-						readCount++
-						if (w && w.checked) writeCount++
-					}
-				}
-				allRead.checked = readCount === services.length
-				allRead.indeterminate = readCount > 0 && readCount < services.length
-				allWrite.disabled = readCount === 0
-				if (readCount === 0) {
-					allWrite.checked = false
-					allWrite.indeterminate = false
-				} else {
-					allWrite.checked = readCount > 0 && writeCount === readCount
-					allWrite.indeterminate = writeCount > 0 && writeCount < readCount
-				}
-			}
-
-			function onServiceToggle (id) {
-				const s = document.getElementById('svc_' + id)
-				const w = document.getElementById('wr_' + id)
-				if (!s || !w) return
-				w.disabled = !s.checked
-				if (!s.checked) w.checked = false
-				updateAllRowState()
-			}
 
 			function init () {
 				const params = initData.params || {}
@@ -296,119 +155,19 @@
 					const nameEl = document.getElementById('session_name')
 					if (nameEl) nameEl.value = params.session_name
 				}
-				const policyVal = params.policy
-				if (policyVal) {
-					const policyEl = document.getElementById('policy')
-					if (policyEl) policyEl.value = policyVal
-					policyEl?.closest('details')?.setAttribute('open', '')
-				}
 				if (params.admin !== undefined) {
 					const adminEl = document.getElementById('admin')
 					if (adminEl) adminEl.checked = params.admin === 'true' || params.admin === '1' || params.admin === 'on'
 				}
-				let serviceIdsRead = null
-				if (params.services) {
-					serviceIdsRead = new Set()
-					for (const part of String(params.services).split(',')) {
-						const s = part.trim().toLowerCase()
-						if (s) serviceIdsRead.add(s)
-					}
-				}
-				const serviceIdsWrite = new Set()
-				if (params.write) {
-					for (const part of String(params.write).split(',')) {
-						const w = part.trim().toLowerCase()
-						if (w) serviceIdsWrite.add(w)
-					}
-				}
 				const hiddenContainer = document.getElementById('hidden-inputs')
 				for (const [key, value] of Object.entries(params)) {
-					if (key === 'policy' || key === 'services' || key === 'write' || key === 'admin' || key === 'session_name') continue
+					if (key === 'admin' || key === 'session_name') continue
 					const input = document.createElement('input')
 					input.type = 'hidden'
 					input.name = key
 					input.value = value
 					hiddenContainer.appendChild(input)
 				}
-				const tbody = document.getElementById('service-rows')
-				for (const s of (initData.services || [])) {
-					const tr = document.createElement('tr')
-					const tdSvc = document.createElement('td')
-					const spanName = document.createElement('span')
-					spanName.textContent = s.name
-					if (s.enterprise) {
-						const mark = document.createElement('span')
-						mark.className = 'enterprise-mark'
-						mark.textContent = ' *'
-						spanName.appendChild(mark)
-					}
-					tdSvc.appendChild(spanName)
-					const isReadChecked = serviceIdsRead ? serviceIdsRead.has(s.id) : false
-					const isWriteChecked = isReadChecked && serviceIdsWrite.has(s.id)
-					const tdRead = document.createElement('td')
-					tdRead.className = 'col-check'
-					const inputSvc = document.createElement('input')
-					inputSvc.type = 'checkbox'
-					inputSvc.name = 'services'
-					inputSvc.id = 'svc_' + s.id
-					inputSvc.value = s.id
-					inputSvc.checked = isReadChecked
-					inputSvc.addEventListener('change', function () {
-						onServiceToggle(s.id)
-					})
-					tdRead.appendChild(inputSvc)
-					const tdWrite = document.createElement('td')
-					tdWrite.className = 'col-check'
-					const inputWr = document.createElement('input')
-					inputWr.type = 'checkbox'
-					inputWr.name = 'write'
-					inputWr.id = 'wr_' + s.id
-					inputWr.value = s.id
-					inputWr.checked = isWriteChecked
-					inputWr.disabled = !isReadChecked
-					inputWr.addEventListener('change', function () {
-						updateAllRowState()
-					})
-					tdWrite.appendChild(inputWr)
-					tr.appendChild(tdSvc)
-					tr.appendChild(tdRead)
-					tr.appendChild(tdWrite)
-					tbody.appendChild(tr)
-				}
-
-				const allRead = document.getElementById('all-read')
-				const allWrite = document.getElementById('all-write')
-				if (allRead) {
-					allRead.addEventListener('click', function () {
-						const checked = allRead.checked
-						const services = document.querySelectorAll('input[name="services"]')
-						for (const s of services) {
-							const id = s.value
-							s.checked = checked
-							const w = document.getElementById('wr_' + id)
-							if (w) {
-								w.disabled = !s.checked
-								if (!s.checked) w.checked = false
-							}
-						}
-						updateAllRowState()
-					})
-				}
-				if (allWrite) {
-					allWrite.addEventListener('click', function () {
-						const checked = allWrite.checked
-						const services = document.querySelectorAll('input[name="services"]')
-						for (const s of services) {
-							const id = s.value
-							const w = document.getElementById('wr_' + id)
-							if (w && s.checked) {
-								w.checked = checked
-							}
-						}
-						updateAllRowState()
-					})
-				}
-				updateAllRowState()
 			}
 
 			init()

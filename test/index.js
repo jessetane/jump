@@ -431,7 +431,7 @@ test('oauth consent html page and post consent flow', async () => {
 	assert.equal(pageRes.status, 200)
 	assert.equal(pageRes.headers.get('content-type'), 'text/html; charset=utf-8')
 	const html = await pageRes.text()
-	assert.match(html, /google-mcp/)
+	assert.match(html, /Generate Bearer Token/)
 	assert.match(html, /action="\/oauth\/authorize\/consent"/)
 	assert.match(html, /"redirect_uri":"https:\/\/chatgpt\.com\/callback"/)
 	assert.match(html, /"state":"client-state-123"/)
@@ -440,11 +440,9 @@ test('oauth consent html page and post consent flow', async () => {
 		redirect_uri: 'https://chatgpt.com/callback',
 		state: 'client-state-123',
 		code_challenge: challenge,
-		code_challenge_method: 'S256'
+		code_challenge_method: 'S256',
+		session_name: 'Coding Agent'
 	})
-	for (const id of ['drive', 'docs', 'sheets', 'slides', 'forms', 'calendar', 'tasks', 'keep', 'meet', 'contacts', 'chat', 'gmail', 'photos', 'youtube']) {
-		consentBody.append('services', id)
-	}
 
 	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 		method: 'POST',
@@ -456,57 +454,14 @@ test('oauth consent html page and post consent flow', async () => {
 	const location = consentRes.headers.get('location')
 	assert.ok(location)
 	const targetUrl = new URL(location)
-	assert.match(targetUrl.searchParams.get('scope'), /drive\.readonly/)
-	assert.match(targetUrl.searchParams.get('scope'), /calendar\.readonly/)
-	assert.match(targetUrl.searchParams.get('scope'), /gmail\.readonly/)
-	assert.match(targetUrl.searchParams.get('scope'), /tasks\.readonly/)
-	assert.match(targetUrl.searchParams.get('scope'), /keep\.readonly/)
-	assert.match(targetUrl.searchParams.get('scope'), /meetings\.space\.readonly/)
-	assert.match(targetUrl.searchParams.get('scope'), /contacts\.readonly/)
-	assert.match(targetUrl.searchParams.get('scope'), /chat\.spaces\.readonly/)
-	assert.match(targetUrl.searchParams.get('scope'), /chat\.messages\.readonly/)
-	assert.match(targetUrl.searchParams.get('scope'), /photoslibrary\.readonly\.appcreateddata/)
-	assert.match(targetUrl.searchParams.get('scope'), /youtube\.readonly/)
+	assert.match(targetUrl.searchParams.get('scope'), /drive/)
+	assert.match(targetUrl.searchParams.get('scope'), /calendar/)
 	const stateParam = targetUrl.searchParams.get('state')
 	assert.ok(stateParam)
 	const stateRow = db.oauthStates.consume(stateParam)
 	assert.equal(stateRow.clientRedirectUri, 'https://chatgpt.com/callback')
 	assert.equal(stateRow.clientState, 'client-state-123')
-})
-
-test('oauth consent with dynamic service and write selection', async () => {
-	const addr = server.address()
-	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
-	const consentParams = new URLSearchParams()
-	consentParams.set('redirect_uri', 'https://chatgpt.com/callback')
-	consentParams.set('state', 'client-state-dynamic')
-	consentParams.set('code_challenge', challenge)
-	consentParams.set('code_challenge_method', 'S256')
-	consentParams.append('services', 'drive')
-	consentParams.append('services', 'calendar')
-	consentParams.append('write', 'calendar')
-
-	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: consentParams.toString(),
-		redirect: 'manual'
-	})
-	assert.equal(consentRes.status, 302)
-	const location = consentRes.headers.get('location')
-	assert.ok(location)
-	const targetUrl = new URL(location)
-	const scopeParam = targetUrl.searchParams.get('scope')
-
-	assert.match(scopeParam, /drive\.readonly/)
-	assert.equal(scopeParam.split(' ').includes('https://www.googleapis.com/auth/drive'), false)
-	assert.match(scopeParam, /auth\/calendar\b/)
-	assert.doesNotMatch(scopeParam, /calendar\.readonly/)
-	assert.doesNotMatch(scopeParam, /gmail/)
-	assert.doesNotMatch(scopeParam, /tasks/)
-
-	const stateRow = db.oauthStates.consume(targetUrl.searchParams.get('state'))
-	assert.ok(stateRow)
+	assert.equal(stateRow.sessionName, 'Coding Agent')
 })
 
 test('direct browser authorize without redirect_uri', async () => {
@@ -515,10 +470,11 @@ test('direct browser authorize without redirect_uri', async () => {
 	assert.equal(pageRes.status, 200)
 	assert.equal(pageRes.headers.get('content-type'), 'text/html; charset=utf-8')
 	const html = await pageRes.text()
-	assert.match(html, /google-mcp/)
+	assert.match(html, /Generate Bearer Token/)
 	assert.match(html, /action="\/oauth\/authorize\/consent"/)
-	const consentBody = new URLSearchParams()
-	consentBody.append('services', 'drive')
+	const consentBody = new URLSearchParams({
+		session_name: 'Browser Session'
+	})
 	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -532,6 +488,7 @@ test('direct browser authorize without redirect_uri', async () => {
 	const stateRow = db.oauthStates.consume(targetUrl.searchParams.get('state'))
 	assert.equal(stateRow.clientRedirectUri, null)
 	assert.equal(stateRow.codeChallenge, null)
+	assert.equal(stateRow.sessionName, 'Browser Session')
 })
 
 test('authorize page with policy and service query params', async () => {
