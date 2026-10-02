@@ -1435,7 +1435,7 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	const stripeAppId = connectData.app.id
 
 	const reauthRes = await executeTool('admin', {
-		action: 'reauth_app',
+		action: 'connect_app',
 		appId: googleApp.id
 	}, adminSession.token)
 	assert.equal(reauthRes.isError, undefined)
