@@ -1714,6 +1714,10 @@ test('admin update_app action', async () => {
 		provider: 'google',
 		type: 'oauth',
 		name: 'Original App Name',
+		credentials: {
+			accessToken: 'ya29.fake',
+			account: 'owner@gmail.com'
+		},
 		expiresAt: Date.now() + 3600000
 	})
 
@@ -1743,6 +1747,7 @@ test('admin update_app action', async () => {
 	assert.equal(updateData.updated, true)
 	assert.equal(updateData.app.id, app.id)
 	assert.equal(updateData.app.name, 'Personal Google Workspace')
+	assert.equal(updateData.app.account, 'owner@gmail.com')
 
 	const dbApp = db.tokens.get(app.id)
 	assert.equal(dbApp.name, 'Personal Google Workspace')

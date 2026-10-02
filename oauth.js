@@ -430,7 +430,9 @@ async function handleCallback (req, res, query) {
 		name: appName,
 		credentials: {
 			accessToken: tokenData.access_token,
-			refreshToken: tokenData.refresh_token || null
+			refreshToken: tokenData.refresh_token || null,
+			email,
+			account: email
 		},
 		expiresAt: Date.now() + ((tokenData.expires_in || 3600) * 1000),
 		scopes: tokenData.scope || null

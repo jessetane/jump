@@ -42,6 +42,7 @@ async function whoami (token) {
 		provider: l.app?.provider,
 		type: l.app?.type,
 		name: l.app?.name,
+		account: l.app?.credentials?.account || l.app?.credentials?.email || null,
 		scopes: l.app?.scopes,
 		expiresAt: l.app?.expiresAt,
 		policy: parsePolicy(l.policy)
@@ -96,6 +97,7 @@ async function list (token) {
 				id: l.app?.id,
 				provider: l.app?.provider,
 				name: l.app?.name,
+				account: l.app?.credentials?.account || l.app?.credentials?.email || null,
 				policy: parsePolicy(l.policy)
 			}))
 		}
@@ -138,6 +140,7 @@ async function get (token, sessionId) {
 				id: l.app?.id,
 				provider: l.app?.provider,
 				name: l.app?.name,
+				account: l.app?.credentials?.account || l.app?.credentials?.email || null,
 				policy: parsePolicy(l.policy)
 			}))
 		}
@@ -261,6 +264,7 @@ async function listApps (token) {
 		provider: a.provider,
 		type: a.type,
 		name: a.name,
+		account: a.credentials?.account || a.credentials?.email || null,
 		scopes: a.scopes,
 		expiresAt: a.expiresAt,
 		created: a.created,
@@ -302,7 +306,8 @@ async function connectApp (token, opts = {}) {
 			id: app.id,
 			provider: app.provider,
 			type: app.type,
-			name: app.name
+			name: app.name,
+			account: app.credentials?.account || app.credentials?.email || null
 		}
 	}
 }
@@ -491,6 +496,7 @@ async function updateApp (token, opts = {}) {
 			provider: updated.provider,
 			type: updated.type,
 			name: updated.name,
+			account: updated.credentials?.account || updated.credentials?.email || null,
 			scopes: updated.scopes,
 			expiresAt: updated.expiresAt,
 			created: updated.created,
