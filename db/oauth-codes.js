@@ -17,7 +17,7 @@ function init () {
 			code_challenge TEXT,
 			code_challenge_method TEXT,
 			created_at INTEGER NOT NULL,
-			FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+			FOREIGN KEY(session_id) REFERENCES tokens(id) ON DELETE CASCADE
 		);
 		CREATE INDEX IF NOT EXISTS idx_oauth_codes_created ON oauth_codes(created_at);
 	`)

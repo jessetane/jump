@@ -1,7 +1,8 @@
 import { DatabaseSync } from 'node:sqlite'
 import fs from 'node:fs'
 import * as users from './users.js'
-import * as sessions from './sessions.js'
+import * as tokens from './tokens.js'
+import * as links from './links.js'
 import * as oauthStates from './oauth-states.js'
 import * as oauthCodes from './oauth-codes.js'
 
@@ -21,15 +22,17 @@ for (const ext of ['', '-wal', '-shm']) {
 }
 
 users.init()
-sessions.init()
+tokens.init()
+links.init()
 oauthStates.init()
 oauthCodes.init()
-sessions.pruneExpired()
+tokens.pruneDormant()
 
 export {
 	sqlite,
 	users,
-	sessions,
+	tokens,
+	links,
 	oauthStates,
 	oauthCodes
 }
