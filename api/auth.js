@@ -274,7 +274,7 @@ async function listApps (token) {
 }
 
 async function connectApp (token, opts = {}) {
-	const { provider = 'google', name, apiKey, account, credentials, appId } = opts
+	let { provider, name, apiKey, account, credentials, appId } = opts
 	const appUrl = process.env.APP_URL || 'http://localhost:8080'
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
@@ -287,6 +287,11 @@ async function connectApp (token, opts = {}) {
 		error.status = 403
 		throw error
 	}
+	if (appId && !provider) {
+		const existing = db.tokens.get(appId)
+		if (existing) provider = existing.provider
+	}
+	provider = provider || 'google'
 	if (provider === 'google' && !apiKey && !credentials) {
 		const reauthParam = appId ? `&reauth_app_id=${encodeURIComponent(appId)}` : ''
 		return {
