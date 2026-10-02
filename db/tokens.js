@@ -10,6 +10,7 @@ export {
 	updateCredentials,
 	updateName,
 	setAdmin,
+	rotateToken,
 	touch,
 	touchByToken,
 	remove,
@@ -178,6 +179,13 @@ function updateName (id, name) {
 function setAdmin (id, admin = true) {
 	const now = new Date().toISOString()
 	sqlite.prepare('UPDATE tokens SET admin = ?, updated = ? WHERE id = ?').run(admin ? 1 : 0, now, id)
+	return get(id)
+}
+
+function rotateToken (id, newToken = randomUUID()) {
+	if (!id) return null
+	const now = new Date().toISOString()
+	sqlite.prepare('UPDATE tokens SET token = ?, updated = ? WHERE id = ?').run(newToken, now, id)
 	return get(id)
 }
 

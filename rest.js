@@ -132,12 +132,32 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 			sendJson(res, result)
 			return
 		}
+		if (req.method === 'PATCH' || req.method === 'PUT') {
+			const rawBody = await getBody(req)
+			let body = {}
+			try {
+				body = JSON.parse(rawBody)
+			} catch {}
+			const result = await api.auth.updateSession(token, { ...body, sessionId })
+			sendJson(res, result)
+			return
+		}
 		const err = new Error('Method Not Allowed')
 		err.code = 405
 		throw err
 	}
 	if (pathname.startsWith('/api/apps/')) {
 		const appId = pathname.slice('/api/apps/'.length)
+		if (req.method === 'PATCH' || req.method === 'PUT') {
+			const rawBody = await getBody(req)
+			let body = {}
+			try {
+				body = JSON.parse(rawBody)
+			} catch {}
+			const result = await api.auth.updateApp(token, { ...body, appId })
+			sendJson(res, result)
+			return
+		}
 		if (req.method === 'DELETE') {
 			const revoke = query?.revoke !== 'false' && query?.revoke !== '0'
 			const result = await api.auth.disconnectApp(token, { appId, revoke })

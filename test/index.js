@@ -1814,7 +1814,28 @@ test('admin update_session action', async () => {
 	const adminPromoteData = JSON.parse(adminPromoteRes.content[0].text)
 	assert.equal(adminPromoteData.session.name, 'Promoted Admin')
 	assert.equal(adminPromoteData.session.admin, true)
+	assert.equal(adminPromoteData.session.token, undefined, 'Plaintext token is not returned when not rotated')
 	assert.equal(db.tokens.get(workerSession.id).admin, true)
+
+	const oldWorkerToken = workerSession.token
+	const rotateRes = await executeTool('admin', {
+		action: 'update_session',
+		sessionId: workerSession.id,
+		rotateToken: true
+	}, adminSession.token)
+	assert.equal(rotateRes.isError, undefined)
+	const rotateData = JSON.parse(rotateRes.content[0].text)
+	assert.ok(rotateData.session.token, 'New token is returned on rotation')
+	assert.notEqual(rotateData.session.token, oldWorkerToken, 'New token differs from old token')
+	const newWorkerToken = rotateData.session.token
+
+	const oldAuthCheck = await executeTool('admin', { action: 'whoami' }, oldWorkerToken)
+	const oldAuthData = JSON.parse(oldAuthCheck.content[0].text)
+	assert.equal(oldAuthData.authenticated, false, 'Old token is invalidated immediately')
+
+	const newAuthCheck = await executeTool('admin', { action: 'whoami' }, newWorkerToken)
+	const newAuthData = JSON.parse(newAuthCheck.content[0].text)
+	assert.equal(newAuthData.authenticated, true, 'New token authenticates successfully')
 })
 
 test('teardown server', (t, done) => {

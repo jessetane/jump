@@ -530,7 +530,7 @@ async function updateApp (token, opts = {}) {
 }
 
 async function updateSession (token, opts = {}) {
-	const { sessionId, name, admin } = opts
+	const { sessionId, name, admin, rotateToken } = opts
 	const appUrl = process.env.APP_URL || 'http://localhost:8080'
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
@@ -561,6 +561,11 @@ async function updateSession (token, opts = {}) {
 	if (admin !== undefined) {
 		db.tokens.setAdmin(targetId, Boolean(admin))
 	}
+	let newToken = null
+	if (rotateToken) {
+		const rotated = db.tokens.rotateToken(targetId)
+		newToken = rotated?.token || null
+	}
 	const updated = db.tokens.get(targetId)
 	return {
 		updated: true,
@@ -569,6 +574,7 @@ async function updateSession (token, opts = {}) {
 			userId: updated.userId,
 			name: updated.name,
 			admin: Boolean(updated.admin),
+			...(newToken ? { token: newToken } : {}),
 			ip: updated.ip,
 			ua: updated.ua,
 			created: updated.created,

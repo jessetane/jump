@@ -77,6 +77,7 @@ const adminTool = {
 				}
 			},
 			admin: { type: 'boolean', description: 'Grant admin permissions to a new session.' },
+			rotateToken: { type: 'boolean', description: 'When action is update_session, set to true to rotate and regenerate the session bearer token.' },
 			revoke: { type: 'boolean', description: 'When action is disconnect_app, set to false to remove locally without upstream revocation (defaults to true).' },
 			allOthers: { type: 'boolean', description: 'When action is revoke, set to true to revoke all other sessions.' }
 		}
