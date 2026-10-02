@@ -8,6 +8,7 @@ export {
 	getByToken,
 	listByUserId,
 	updateCredentials,
+	updateName,
 	setAdmin,
 	touch,
 	touchByToken,
@@ -164,6 +165,13 @@ function updateCredentials (id, opts = {}) {
 			updated = ?
 		WHERE id = ?
 	`).run(credsJson, expiresAt, scopes, name, now, id)
+	return get(id)
+}
+
+function updateName (id, name) {
+	if (!id) return null
+	const now = new Date().toISOString()
+	sqlite.prepare('UPDATE tokens SET name = ?, updated = ? WHERE id = ?').run(name ? String(name).trim() : null, now, id)
 	return get(id)
 }
 

@@ -9,11 +9,13 @@ export {
 	listSessions,
 	get,
 	createSession,
+	updateSession,
 	revoke,
 	revokeSession,
 	listApps,
 	connectApp,
 	disconnectApp,
+	updateApp,
 	linkApp,
 	unlinkApp,
 	updateEmail,
@@ -452,6 +454,96 @@ async function updateUser (token, opts = {}) {
 			id: user.id,
 			email: user.email,
 			name: user.name
+		}
+	}
+}
+
+async function updateApp (token, opts = {}) {
+	const { appId, name } = opts
+	const appUrl = process.env.APP_URL || 'http://localhost:8080'
+	const session = token ? db.tokens.getByToken(token) : null
+	if (!session) {
+		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
+		error.status = 401
+		throw error
+	}
+	if (!session.admin) {
+		const error = new Error('Access denied: app administration requires admin privileges')
+		error.status = 403
+		throw error
+	}
+	if (!appId) {
+		const error = new Error('appId is required')
+		error.status = 400
+		throw error
+	}
+	const targetApp = db.tokens.get(appId)
+	if (!targetApp || targetApp.userId !== session.userId || targetApp.provider === 'self') {
+		const error = new Error(`App not found: ${appId}`)
+		error.status = 404
+		throw error
+	}
+	const updated = db.tokens.updateName(appId, name)
+	return {
+		updated: true,
+		app: {
+			id: updated.id,
+			provider: updated.provider,
+			type: updated.type,
+			name: updated.name,
+			scopes: updated.scopes,
+			expiresAt: updated.expiresAt,
+			created: updated.created,
+			updated: updated.updated
+		}
+	}
+}
+
+async function updateSession (token, opts = {}) {
+	const { sessionId, name, admin } = opts
+	const appUrl = process.env.APP_URL || 'http://localhost:8080'
+	const session = token ? db.tokens.getByToken(token) : null
+	if (!session) {
+		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
+		error.status = 401
+		throw error
+	}
+	const targetId = sessionId || session.id
+	if (!session.admin && targetId !== session.id) {
+		const error = new Error('Access denied: session administration requires admin privileges')
+		error.status = 403
+		throw error
+	}
+	if (admin !== undefined && !session.admin) {
+		const error = new Error('Access denied: changing admin privileges requires admin privileges')
+		error.status = 403
+		throw error
+	}
+	const targetSession = db.tokens.get(targetId)
+	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self') {
+		const error = new Error(`Session not found: ${targetId}`)
+		error.status = 404
+		throw error
+	}
+	if (name !== undefined) {
+		db.tokens.updateName(targetId, name)
+	}
+	if (admin !== undefined) {
+		db.tokens.setAdmin(targetId, Boolean(admin))
+	}
+	const updated = db.tokens.get(targetId)
+	return {
+		updated: true,
+		session: {
+			id: updated.id,
+			userId: updated.userId,
+			name: updated.name,
+			admin: Boolean(updated.admin),
+			ip: updated.ip,
+			ua: updated.ua,
+			created: updated.created,
+			updated: updated.updated,
+			isCurrent: updated.id === session.id
 		}
 	}
 }

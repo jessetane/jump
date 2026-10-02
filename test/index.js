@@ -529,7 +529,8 @@ test('google provider connect screen and consent flow', async () => {
 	assert.match(connectHtml, /action="\/providers\/google\/consent"/)
 
 	const consentBody = new URLSearchParams({
-		session_id: 'sess_123'
+		session_id: 'sess_123',
+		app_name: 'Custom Work Google'
 	})
 	consentBody.append('services', 'drive')
 	consentBody.append('services', 'calendar')
@@ -553,6 +554,7 @@ test('google provider connect screen and consent flow', async () => {
 	assert.ok(stateParam)
 	const stateRow = db.oauthStates.consume(stateParam)
 	assert.equal(stateRow.sessionId, 'sess_123')
+	assert.equal(stateRow.sessionName, 'Custom Work Google')
 	assert.equal(stateRow.provider, 'google')
 })
 
@@ -1693,6 +1695,100 @@ test('admin update_user action', async () => {
 	const whoamiData = JSON.parse(whoamiRes.content[0].text)
 	assert.equal(whoamiData.user.name, 'Jesse Tane')
 	assert.equal(whoamiData.user.email, 'user-props@example.com')
+})
+
+test('admin update_app action', async () => {
+	const user = db.users.upsert({ email: 'update-app@example.com' })
+	const adminSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 1
+	})
+	const workerSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 0
+	})
+	const app = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Original App Name',
+		expiresAt: Date.now() + 3600000
+	})
+
+	const nonAdminRes = await executeTool('admin', {
+		action: 'update_app',
+		appId: app.id,
+		name: 'Renamed App'
+	}, workerSession.token)
+	assert.equal(nonAdminRes.isError, true)
+	assert.match(nonAdminRes.content[0].text, /requires admin privileges/)
+
+	const notFoundRes = await executeTool('admin', {
+		action: 'update_app',
+		appId: 'non-existent-app-id',
+		name: 'Renamed App'
+	}, adminSession.token)
+	assert.equal(notFoundRes.isError, true)
+	assert.match(notFoundRes.content[0].text, /App not found/)
+
+	const updateRes = await executeTool('admin', {
+		action: 'update_app',
+		appId: app.id,
+		name: 'Personal Google Workspace'
+	}, adminSession.token)
+	assert.equal(updateRes.isError, undefined)
+	const updateData = JSON.parse(updateRes.content[0].text)
+	assert.equal(updateData.updated, true)
+	assert.equal(updateData.app.id, app.id)
+	assert.equal(updateData.app.name, 'Personal Google Workspace')
+
+	const dbApp = db.tokens.get(app.id)
+	assert.equal(dbApp.name, 'Personal Google Workspace')
+})
+
+test('admin update_session action', async () => {
+	const user = db.users.upsert({ email: 'update-session@example.com' })
+	const adminSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		name: 'Admin Main',
+		admin: 1
+	})
+	const workerSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		name: 'Worker Initial',
+		admin: 0
+	})
+
+	const selfRenameRes = await executeTool('admin', {
+		action: 'update_session',
+		name: 'Worker Renamed'
+	}, workerSession.token)
+	assert.equal(selfRenameRes.isError, undefined)
+	const selfRenameData = JSON.parse(selfRenameRes.content[0].text)
+	assert.equal(selfRenameData.session.name, 'Worker Renamed')
+
+	const nonAdminEscalateRes = await executeTool('admin', {
+		action: 'update_session',
+		admin: true
+	}, workerSession.token)
+	assert.equal(nonAdminEscalateRes.isError, true)
+	assert.match(nonAdminEscalateRes.content[0].text, /requires admin privileges/)
+
+	const adminPromoteRes = await executeTool('admin', {
+		action: 'update_session',
+		sessionId: workerSession.id,
+		name: 'Promoted Admin',
+		admin: true
+	}, adminSession.token)
+	assert.equal(adminPromoteRes.isError, undefined)
+	const adminPromoteData = JSON.parse(adminPromoteRes.content[0].text)
+	assert.equal(adminPromoteData.session.name, 'Promoted Admin')
+	assert.equal(adminPromoteData.session.admin, true)
+	assert.equal(db.tokens.get(workerSession.id).admin, true)
 })
 
 test('teardown server', (t, done) => {

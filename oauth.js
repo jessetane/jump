@@ -315,6 +315,8 @@ async function handleGoogleConsent (req, res) {
 	const writeList = params.getAll('write')
 	const sessionId = params.get('session_id') || null
 	const reauthAppId = params.get('reauth_app_id') || null
+	const rawAppName = params.get('app_name') || params.get('name') || ''
+	const sessionName = rawAppName ? String(rawAppName).trim() : null
 
 	const scopes = buildScopesFromSelection(servicesList, writeList)
 	const callbackUrl = `${appUrl.replace(/\/$/, '')}/oauth/callback`
@@ -323,6 +325,7 @@ async function handleGoogleConsent (req, res) {
 	const stateToken = db.oauthStates.create({
 		sessionId,
 		reauthAppId,
+		sessionName,
 		provider: 'google',
 		ip
 	})
@@ -419,11 +422,12 @@ async function handleCallback (req, res, query) {
 		targetUserId = user.id
 	}
 
+	const appName = oauthState.sessionName || `${googleUser.name || email} Google`
 	const appToken = db.tokens.create({
 		userId: targetUserId,
 		provider: 'google',
 		type: 'oauth',
-		name: `${googleUser.name || email} Google`,
+		name: appName,
 		credentials: {
 			accessToken: tokenData.access_token,
 			refreshToken: tokenData.refresh_token || null

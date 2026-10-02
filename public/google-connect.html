@@ -89,6 +89,26 @@
 				margin-top: 0.5rem;
 			}
 
+			.form-group {
+				margin-bottom: 1.25rem;
+			}
+
+			.form-group label {
+				display: block;
+				font-size: 0.9rem;
+				font-weight: 600;
+				margin-bottom: 0.35rem;
+				color: #333;
+			}
+
+			.form-group input[type=text] {
+				width: 100%;
+				padding: 10px 12px;
+				font-size: 0.95rem;
+				border: 1px solid #cbd5e1;
+				border-radius: 6px;
+			}
+
 			button[type=submit] {
 				width: 100%;
 				padding: 12px 16px;
@@ -112,6 +132,10 @@
 			<p class="subtitle" id="page-subtitle">Select Google services to grant to your MCP gateway</p>
 			<form id="google-connect-form" method="POST" action="/providers/google/consent">
 				<div id="hidden-inputs"></div>
+				<div class="form-group" id="app-name-group">
+					<label for="app-name">App Name / Label (optional)</label>
+					<input type="text" id="app-name" name="app_name" placeholder="e.g. Personal Google, Work Google">
+				</div>
 				<table id="services-table">
 					<thead>
 						<tr>
@@ -188,9 +212,15 @@
 					const titleEl = document.getElementById('page-title')
 					const subtitleEl = document.getElementById('page-subtitle')
 					const submitEl = document.getElementById('submit-btn')
+					const nameGroup = document.getElementById('app-name-group')
 					if (titleEl) titleEl.textContent = 'Re-authenticate Google App'
 					if (subtitleEl) subtitleEl.textContent = 'Renew upstream Google OAuth credentials'
 					if (submitEl) submitEl.textContent = 'Re-authenticate Google Account'
+					if (nameGroup) nameGroup.style.display = 'none'
+				}
+				if (params.app_name || params.name) {
+					const nameInput = document.getElementById('app-name')
+					if (nameInput) nameInput.value = params.app_name || params.name
 				}
 				for (const s of serviceList) {
 					const tr = document.createElement('tr')
@@ -257,7 +287,7 @@
 				}
 				const hiddenContainer = document.getElementById('hidden-inputs')
 				for (const [key, value] of Object.entries(params)) {
-					if (key === 'services' || key === 'write') continue
+					if (key === 'services' || key === 'write' || key === 'app_name' || key === 'name') continue
 					const input = document.createElement('input')
 					input.type = 'hidden'
 					input.name = key
