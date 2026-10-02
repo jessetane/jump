@@ -44,8 +44,38 @@ const adminTool = {
 			account: { type: 'string', description: 'Upstream account or tenant identifier (e.g. email, username, account ID).' },
 			email: { type: 'string', description: 'New email address (for update_email action).' },
 			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe").' },
-			apiKey: { type: 'string', description: 'API Key (for static key apps).' },
-			policy: { type: 'array', description: 'Granular policy JSON rules for a link.' },
+			policy: {
+				type: 'array',
+				description: 'Ordered policy rules evaluated top-to-bottom (first match wins, default deny when rules exist). Example: [{"action":"allow","methods":["GET"],"path":"/calendar/v3/calendars/xyz/**"}]',
+				items: {
+					type: 'object',
+					required: ['action'],
+					properties: {
+						action: {
+							type: 'string',
+							enum: ['allow', 'deny'],
+							description: 'Rule action: "allow" or "deny".'
+						},
+						methods: {
+							type: 'array',
+							items: { type: 'string' },
+							description: 'HTTP methods (e.g. ["GET", "POST", "PUT", "PATCH", "DELETE", "*"]). If omitted, matches all methods.'
+						},
+						path: {
+							type: 'string',
+							description: 'Path glob pattern (* matches single segment, ** matches nested paths, e.g. "/calendar/v3/calendars/xyz/events/**").'
+						},
+						origin: {
+							type: 'string',
+							description: 'Origin glob pattern (e.g. "https://sheets.googleapis.com" or "https://*.googleapis.com").'
+						},
+						description: {
+							type: 'string',
+							description: 'Optional human-readable label or explanation for this rule.'
+						}
+					}
+				}
+			},
 			admin: { type: 'boolean', description: 'Grant admin permissions to a new session.' },
 			revoke: { type: 'boolean', description: 'When action is disconnect_app, set to false to remove locally without upstream revocation (defaults to true).' },
 			allOthers: { type: 'boolean', description: 'When action is revoke, set to true to revoke all other sessions.' }
