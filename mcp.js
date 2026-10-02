@@ -59,11 +59,11 @@ const adminTool = {
 						methods: {
 							type: 'array',
 							items: { type: 'string' },
-							description: 'Allowed HTTP methods (e.g. ["GET", "POST", "PUT", "PATCH", "DELETE", "*"]). If omitted, matches all methods.'
+							description: 'Allowed HTTP methods (e.g. ["GET", "POST", "PUT", "PATCH", "DELETE", "*"]). Omit (or use ["*"]) to allow all methods.'
 						},
 						path: {
 							type: 'string',
-							description: 'Path glob pattern (* matches single segment, ** matches recursively, e.g. "/calendar/v3/calendars/xyz/events/**"). Use literal "@" (automatically matches "%40").'
+							description: 'Path glob pattern (* matches single segment, ** matches recursively, e.g. "/calendar/v3/calendars/xyz/events/**"). Trailing "/**" matches both the endpoint and all nested sub-paths (e.g. ".../events/**" matches both ".../events" and ".../events/123"). Use literal "@" (automatically matches "%40").'
 						},
 						origin: {
 							type: 'string',
