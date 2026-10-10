@@ -22,14 +22,19 @@ async function request ({ url, method = 'GET', body, headers, appId } = {}, toke
 	const links = db.links.listBySessionId(session.id)
 	const googleLinks = links.filter(l => l.app?.provider === 'google')
 	if (googleLinks.length === 0) {
-		const err = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		err.status = 401
+		const err = new Error(`No Google app linked to session. Connect an account at: ${appUrl.replace(/\/$/, '')}/providers/google/connect`)
+		err.status = 403
 		throw err
 	}
 	let targetLink = googleLinks[0]
 	if (appId) {
 		const found = googleLinks.find(l => l.app?.id === appId)
-		if (found) targetLink = found
+		if (!found) {
+			const err = new Error(`App not linked to session or not found: ${appId}`)
+			err.status = 404
+			throw err
+		}
+		targetLink = found
 	}
 	const normalizedMethod = (method || 'GET').toUpperCase()
 	if (targetLink.policy) {

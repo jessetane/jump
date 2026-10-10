@@ -159,7 +159,7 @@ test('mcp admin tool without auth', async () => {
 			method: 'tools/call',
 			params: {
 				name: 'admin',
-				arguments: { action: 'status' }
+				arguments: { action: 'whoami' }
 			}
 		})
 	})
@@ -200,7 +200,7 @@ test('mcp rejects tool call without name', async () => {
 			id: 5,
 			method: 'tools/call',
 			params: {
-				arguments: { action: 'status' }
+				arguments: { action: 'whoami' }
 			}
 		})
 	})
@@ -708,7 +708,7 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 	assert.equal(db.tokens.get(sessionJson.id), null)
 })
 
-test('mcp auth status, list, and revoke', async () => {
+test('mcp auth whoami, list, and revoke', async () => {
 	const user = db.users.upsert({ email: 'sessions-tool@example.com' })
 	const session1 = db.tokens.create({
 		userId: user.id,
@@ -926,7 +926,7 @@ test('executeTool google_api enforces link policy and auth tools decode policy',
 		policy: policyObj
 	})
 
-	const statusRes = await executeTool('admin', { action: 'status' }, session.token)
+	const statusRes = await executeTool('admin', { action: 'whoami' }, session.token)
 	assert.equal(statusRes.isError, undefined)
 	const statusParsed = JSON.parse(statusRes.content[0].text)
 	assert.deepEqual(statusParsed.session.apps[0].policy, policyObj)
@@ -1836,6 +1836,54 @@ test('admin update_session action', async () => {
 	const newAuthCheck = await executeTool('admin', { action: 'whoami' }, newWorkerToken)
 	const newAuthData = JSON.parse(newAuthCheck.content[0].text)
 	assert.equal(newAuthData.authenticated, true, 'New token authenticates successfully')
+})
+
+test('google_api fail-loud on unlinked session or missing appId', async () => {
+	const user = db.users.upsert({ email: 'unlinked-fail@example.com' })
+	const sessionNoApps = db.tokens.create({
+		userId: user.id,
+		provider: 'self'
+	})
+	const noAppRes = await executeTool('google_api', {
+		url: 'https://www.googleapis.com/drive/v3/files'
+	}, sessionNoApps.token)
+	assert.equal(noAppRes.isError, true)
+	assert.match(noAppRes.content[0].text, /No Google app linked to session/)
+
+	const { session, app } = createTestSession({ email: 'linked-fail@example.com' })
+	const invalidAppRes = await executeTool('google_api', {
+		url: 'https://www.googleapis.com/drive/v3/files',
+		appId: 'non-existent-app-id'
+	}, session.token)
+	assert.equal(invalidAppRes.isError, true)
+	assert.match(invalidAppRes.content[0].text, /App not linked to session or not found: non-existent-app-id/)
+
+	await assert.rejects(
+		async () => {
+			await api.google.request({
+				url: 'https://www.googleapis.com/drive/v3/files',
+				appId: 'non-existent-app-id'
+			}, session.token)
+		},
+		err => {
+			assert.equal(err.status, 404)
+			assert.match(err.message, /App not linked to session or not found: non-existent-app-id/)
+			return true
+		}
+	)
+
+	await assert.rejects(
+		async () => {
+			await api.google.request({
+				url: 'https://www.googleapis.com/drive/v3/files'
+			}, sessionNoApps.token)
+		},
+		err => {
+			assert.equal(err.status, 403)
+			assert.match(err.message, /No Google app linked to session/)
+			return true
+		}
+	)
 })
 
 test('teardown server', (t, done) => {
