@@ -4,14 +4,11 @@ import { parsePolicy } from '../policy.js'
 
 export {
 	whoami,
-	status,
 	list,
-	listSessions,
 	get,
 	createSession,
 	updateSession,
 	revoke,
-	revokeSession,
 	listApps,
 	connectApp,
 	disconnectApp,
@@ -21,10 +18,6 @@ export {
 	updateEmail,
 	updateUser
 }
-
-const status = whoami
-const listSessions = list
-const revokeSession = revoke
 
 async function whoami (token) {
 	const appUrl = process.env.APP_URL || 'http://localhost:8080'

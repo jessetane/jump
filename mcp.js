@@ -19,13 +19,10 @@ const adminTool = {
 				type: 'string',
 				enum: [
 					'whoami',
-					'status',
 					'list',
-					'list_sessions',
 					'get',
 					'create_session',
 					'revoke',
-					'revoke_session',
 					'list_apps',
 					'connect_app',
 					'disconnect_app',
@@ -119,14 +116,11 @@ const tools = [adminTool, googleApiTool]
 
 const adminActions = {
 	whoami: (args, token) => api.auth.whoami(token),
-	status: (args, token) => api.auth.whoami(token),
 	list: (args, token) => api.auth.list(token),
-	list_sessions: (args, token) => api.auth.list(token),
 	get: (args, token) => api.auth.get(token, args.sessionId),
 	create_session: (args, token) => api.auth.createSession(token, args),
 	update_session: (args, token) => api.auth.updateSession(token, args),
 	revoke: (args, token) => api.auth.revoke(token, args),
-	revoke_session: (args, token) => api.auth.revoke(token, args),
 	list_apps: (args, token) => api.auth.listApps(token),
 	connect_app: (args, token) => api.auth.connectApp(token, args),
 	disconnect_app: (args, token) => api.auth.disconnectApp(token, args),
