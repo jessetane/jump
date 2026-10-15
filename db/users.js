@@ -20,6 +20,23 @@ function init () {
 			updated TEXT NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+		CREATE TABLE IF NOT EXISTS user_identities (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			identifier TEXT NOT NULL,
+			verified_at TEXT NOT NULL,
+			config TEXT DEFAULT '{}',
+			created TEXT NOT NULL,
+			UNIQUE(provider, identifier),
+			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
+		CREATE INDEX IF NOT EXISTS idx_user_identities_provider_identifier ON user_identities(provider, identifier);
+		INSERT OR IGNORE INTO user_identities (id, user_id, provider, identifier, verified_at, config, created)
+		SELECT lower(hex(randomblob(16))), id, 'email', lower(email), created, '{}', created
+		FROM users
+		WHERE email IS NOT NULL AND trim(email) != '';
 	`)
 }
 
@@ -30,7 +47,12 @@ function get (id) {
 
 function getByEmail (email) {
 	if (!email) return null
-	return sqlite.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase()) || null
+	const normalizedEmail = email.toLowerCase()
+	const identity = sqlite.prepare("SELECT user_id FROM user_identities WHERE provider = 'email' AND identifier = ?").get(normalizedEmail)
+	if (identity) {
+		return get(identity.user_id)
+	}
+	return sqlite.prepare('SELECT * FROM users WHERE email = ?').get(normalizedEmail) || null
 }
 
 function upsert (opts = {}) {
@@ -44,14 +66,35 @@ function upsert (opts = {}) {
 			name = COALESCE(excluded.name, users.name),
 			updated = excluded.updated
 	`).run(id, normalizedEmail, name, now, now)
-	return getByEmail(normalizedEmail)
+	const user = sqlite.prepare('SELECT * FROM users WHERE email = ?').get(normalizedEmail)
+	if (user) {
+		sqlite.prepare(`
+			INSERT INTO user_identities (id, user_id, provider, identifier, verified_at, config, created)
+			VALUES (?, ?, 'email', ?, ?, '{}', ?)
+			ON CONFLICT(provider, identifier) DO UPDATE SET
+				user_id = excluded.user_id,
+				verified_at = excluded.verified_at
+		`).run(randomUUID(), user.id, normalizedEmail, now, now)
+	}
+	return user
 }
 
 function updateEmail (id, newEmail) {
 	if (!id || !newEmail) return null
 	const now = new Date().toISOString()
 	const normalizedEmail = newEmail.trim().toLowerCase()
+	const oldUser = get(id)
 	sqlite.prepare('UPDATE users SET email = ?, updated = ? WHERE id = ?').run(normalizedEmail, now, id)
+	if (oldUser && oldUser.email) {
+		sqlite.prepare("DELETE FROM user_identities WHERE user_id = ? AND provider = 'email' AND identifier = ?").run(id, oldUser.email.toLowerCase())
+	}
+	sqlite.prepare(`
+		INSERT INTO user_identities (id, user_id, provider, identifier, verified_at, config, created)
+		VALUES (?, ?, 'email', ?, ?, '{}', ?)
+		ON CONFLICT(provider, identifier) DO UPDATE SET
+			user_id = excluded.user_id,
+			verified_at = excluded.verified_at
+	`).run(randomUUID(), id, normalizedEmail, now, now)
 	return get(id)
 }
 
