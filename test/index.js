@@ -11,7 +11,7 @@ process.env.DB_PATH = testDbPath
 process.env.NODE_ENV = 'test'
 process.env.GOOGLE_CLIENT_ID = 'test-client-id'
 process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret'
-process.env.ALLOWED_REDIRECT_DOMAINS = 'localhost,127.0.0.1,chatgpt.com'
+process.env.ALLOWED_REDIRECT_DOMAINS = 'localhost,127.0.0.1,chatgpt.com,antigravity.google,antigravity,cursor,vscode'
 
 fs.rmSync(testDbPath, { force: true })
 fs.rmSync(`${testDbPath}-wal`, { force: true })
@@ -398,7 +398,12 @@ test('isAllowedRedirectUri exact and wildcard matching', () => {
 	assert.equal(isAllowedRedirectUri('https://chatgpt.com/callback'), true)
 	assert.equal(isAllowedRedirectUri('https://foo.chatgpt.com/callback'), false)
 	assert.equal(isAllowedRedirectUri('https://localhost:3000/cb'), true)
+	assert.equal(isAllowedRedirectUri('https://antigravity.google/oauth-callback'), true)
+	assert.equal(isAllowedRedirectUri('antigravity://auth-callback'), true)
+	assert.equal(isAllowedRedirectUri('cursor://anyscheme/callback'), true)
+	assert.equal(isAllowedRedirectUri('vscode://callback'), true)
 	assert.equal(isAllowedRedirectUri('https://evil.com/callback'), false)
+	assert.equal(isAllowedRedirectUri('malicious://callback'), false)
 	assert.equal(isAllowedRedirectUri(''), false)
 	assert.equal(isAllowedRedirectUri(null), false)
 })
@@ -1673,6 +1678,10 @@ test('admin update_email action', async () => {
 
 	const updatedUser = db.users.get(user1.id)
 	assert.equal(updatedUser.email, 'updated-email@example.com')
+
+	const ident = db.identities.getByIdentifier('email', 'updated-email@example.com')
+	assert.ok(ident)
+	assert.equal(ident.userId, user1.id)
 
 	const whoamiRes = await executeTool('admin', { action: 'whoami' }, adminSession.token)
 	const whoamiData = JSON.parse(whoamiRes.content[0].text)

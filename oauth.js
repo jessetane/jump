@@ -52,9 +52,17 @@ function isAllowedRedirectUri (redirectUri) {
 	} catch {
 		return false
 	}
-	const envDomains = process.env.ALLOWED_REDIRECT_DOMAINS || 'localhost,127.0.0.1'
+	const envDomains = process.env.ALLOWED_REDIRECT_DOMAINS || 'localhost,127.0.0.1,antigravity.google,antigravity,cursor,vscode'
 	const allowedDomains = envDomains.split(',').map(d => d.trim().toLowerCase()).filter(Boolean)
 	const hostname = url.hostname.toLowerCase()
+	const protocol = url.protocol.toLowerCase()
+	if (protocol !== 'http:' && protocol !== 'https:') {
+		const scheme = protocol.replace(/:$/, '')
+		return allowedDomains.includes(scheme) || allowedDomains.includes(`${scheme}:`)
+	}
+	if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') {
+		return true
+	}
 	return allowedDomains.some(domain => {
 		if (domain.startsWith('*.')) {
 			const root = domain.slice(2)
@@ -63,6 +71,7 @@ function isAllowedRedirectUri (redirectUri) {
 		return hostname === domain
 	})
 }
+
 
 async function handleProtectedResourceMetadata (req, res) {
 	const base = appUrl.replace(/\/$/, '')
@@ -137,8 +146,21 @@ async function handleAuthorize (req, res, query) {
 		res.end(JSON.stringify({ error: err.code || 'invalid_request', error_description: err.message }))
 		return
 	}
+	const { codeChallenge, codeChallengeMethod } = validation
+	const consentToken = db.oauthStates.create({
+		clientRedirectUri: query.redirect_uri || null,
+		clientState: query.state || null,
+		codeChallenge,
+		codeChallengeMethod,
+		policy: query.policy || null,
+		sessionName: query.session_name || null,
+		admin: query.admin === 'true' || query.admin === '1' || query.admin === 'on' ? 1 : 0
+	})
 	const initData = {
-		params: query
+		params: {
+			...query,
+			consent_token: consentToken
+		}
 	}
 	const authorizeHtml = await fs.readFile(path.join(dirname, 'public/authorize.html'), 'utf8')
 	const html = authorizeHtml.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c'))
@@ -156,11 +178,17 @@ async function handleAuthorizeConsent (req, res) {
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
 
+	const consentToken = params.get('consent_token')
+	let consentState = null
+	if (consentToken) {
+		consentState = db.oauthStates.consume(consentToken)
+	}
+
 	const query = {}
 	let email = null
-	let sessionName = null
-	let admin = 0
-	let policy = null
+	let sessionName = consentState?.sessionName || null
+	let admin = consentState?.admin ? 1 : 0
+	let policy = consentState?.policy || null
 
 	for (const [key, value] of params.entries()) {
 		if (key === 'email') {
@@ -171,7 +199,7 @@ async function handleAuthorizeConsent (req, res) {
 			admin = value === 'true' || value === '1' || value === 'on' ? 1 : 0
 		} else if (key === 'policy') {
 			policy = value.trim() || null
-		} else {
+		} else if (key !== 'consent_token') {
 			query[key] = value
 		}
 	}
@@ -193,24 +221,32 @@ async function handleAuthorizeConsent (req, res) {
 		}
 	}
 
-	let validation
-	try {
-		validation = validateAuthorizeParams(query)
-	} catch (err) {
-		res.statusCode = err.status || 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: err.code || 'invalid_request', error_description: err.message }))
-		return
+	const clientRedirectUri = consentState?.clientRedirectUri || query.redirect_uri || null
+	const clientState = consentState?.clientState || query.state || null
+	let codeChallenge = consentState?.codeChallenge || null
+	let codeChallengeMethod = consentState?.codeChallengeMethod || null
+
+	if (!consentState) {
+		let validation
+		try {
+			validation = validateAuthorizeParams(query)
+		} catch (err) {
+			res.statusCode = err.status || 400
+			res.setHeader('content-type', 'application/json; charset=utf-8')
+			res.end(JSON.stringify({ error: err.code || 'invalid_request', error_description: err.message }))
+			return
+		}
+		codeChallenge = validation.codeChallenge
+		codeChallengeMethod = validation.codeChallengeMethod
 	}
-	const { codeChallenge, codeChallengeMethod } = validation
 
 	const magicCode = randomBytes(24).toString('base64url')
 	const magicExpiresAt = Date.now() + (15 * 60 * 1000)
 	const ip = getClientIp(req)
 
 	db.oauthStates.create({
-		clientRedirectUri: query.redirect_uri || null,
-		clientState: query.state || null,
+		clientRedirectUri,
+		clientState,
 		codeChallenge,
 		codeChallengeMethod,
 		sessionName,
