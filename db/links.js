@@ -14,30 +14,31 @@ export {
 
 function init () {
 	sqlite.exec(`
-		CREATE TABLE IF NOT EXISTS token_links (
-			session_token_id TEXT NOT NULL,
-			app_token_id TEXT NOT NULL,
+		DROP TABLE IF EXISTS token_links;
+		CREATE TABLE IF NOT EXISTS links (
+			session_id TEXT NOT NULL,
+			app_id TEXT NOT NULL,
 			policy TEXT,
 			created TEXT NOT NULL,
 			updated TEXT NOT NULL,
-			PRIMARY KEY (session_token_id, app_token_id),
-			FOREIGN KEY(session_token_id) REFERENCES tokens(id) ON DELETE CASCADE,
-			FOREIGN KEY(app_token_id) REFERENCES tokens(id) ON DELETE CASCADE
+			PRIMARY KEY (session_id, app_id),
+			FOREIGN KEY(session_id) REFERENCES tokens(id) ON DELETE CASCADE,
+			FOREIGN KEY(app_id) REFERENCES tokens(id) ON DELETE CASCADE
 		);
-		CREATE INDEX IF NOT EXISTS idx_token_links_app ON token_links(app_token_id);
+		CREATE INDEX IF NOT EXISTS idx_links_app ON links(app_id);
 	`)
 }
 
 function formatLink (row) {
 	if (!row) return null
 	return {
-		sessionTokenId: row.session_token_id,
-		appTokenId: row.app_token_id,
+		sessionId: row.session_id,
+		appId: row.app_id,
 		policy: row.policy,
 		created: row.link_created || row.created,
 		updated: row.link_updated || row.updated,
-		app: row.app_id ? formatToken({
-			id: row.app_id,
+		app: row.target_app_id ? formatToken({
+			id: row.target_app_id,
 			user_id: row.app_user_id,
 			provider: row.app_provider,
 			type: row.app_type,
@@ -56,79 +57,79 @@ function formatLink (row) {
 }
 
 function create (opts = {}) {
-	const { sessionTokenId, appTokenId, policy = null } = opts
+	const { sessionId, appId, policy = null } = opts
 	const now = new Date().toISOString()
 	const policyStr = policy && typeof policy === 'object' ? JSON.stringify(policy) : policy
 	sqlite.prepare(`
-		INSERT INTO token_links (session_token_id, app_token_id, policy, created, updated)
+		INSERT INTO links (session_id, app_id, policy, created, updated)
 		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(session_token_id, app_token_id) DO UPDATE SET
+		ON CONFLICT(session_id, app_id) DO UPDATE SET
 			policy = excluded.policy,
 			updated = excluded.updated
-	`).run(sessionTokenId, appTokenId, policyStr, now, now)
-	return get(sessionTokenId, appTokenId)
+	`).run(sessionId, appId, policyStr, now, now)
+	return get(sessionId, appId)
 }
 
-function get (sessionTokenId, appTokenId) {
-	if (!sessionTokenId || !appTokenId) return null
+function get (sessionId, appId) {
+	if (!sessionId || !appId) return null
 	const row = sqlite.prepare(`
-		SELECT token_links.*,
-			tokens.id AS app_id, tokens.user_id AS app_user_id, tokens.provider AS app_provider,
+		SELECT links.*,
+			tokens.id AS target_app_id, tokens.user_id AS app_user_id, tokens.provider AS app_provider,
 			tokens.type AS app_type, tokens.name AS app_name, tokens.token AS app_token,
 			tokens.credentials AS app_credentials, tokens.expires_at AS app_expires_at,
 			tokens.scopes AS app_scopes, tokens.admin AS app_admin,
 			tokens.created AS app_created, tokens.updated AS app_updated,
 			users.email, users.name AS user_name
-		FROM token_links
-		JOIN tokens ON token_links.app_token_id = tokens.id
+		FROM links
+		JOIN tokens ON links.app_id = tokens.id
 		JOIN users ON tokens.user_id = users.id
-		WHERE token_links.session_token_id = ? AND token_links.app_token_id = ?
-	`).get(sessionTokenId, appTokenId)
+		WHERE links.session_id = ? AND links.app_id = ?
+	`).get(sessionId, appId)
 	return formatLink(row)
 }
 
-function listBySessionId (sessionTokenId) {
-	if (!sessionTokenId) return []
+function listBySessionId (sessionId) {
+	if (!sessionId) return []
 	const rows = sqlite.prepare(`
-		SELECT token_links.session_token_id, token_links.app_token_id, token_links.policy,
-			token_links.created AS link_created, token_links.updated AS link_updated,
-			tokens.id AS app_id, tokens.user_id AS app_user_id, tokens.provider AS app_provider,
+		SELECT links.session_id, links.app_id, links.policy,
+			links.created AS link_created, links.updated AS link_updated,
+			tokens.id AS target_app_id, tokens.user_id AS app_user_id, tokens.provider AS app_provider,
 			tokens.type AS app_type, tokens.name AS app_name, tokens.token AS app_token,
 			tokens.credentials AS app_credentials, tokens.expires_at AS app_expires_at,
 			tokens.scopes AS app_scopes, tokens.admin AS app_admin,
 			tokens.created AS app_created, tokens.updated AS app_updated,
 			users.email, users.name AS user_name
-		FROM token_links
-		JOIN tokens ON token_links.app_token_id = tokens.id
+		FROM links
+		JOIN tokens ON links.app_id = tokens.id
 		JOIN users ON tokens.user_id = users.id
-		WHERE token_links.session_token_id = ?
-		ORDER BY token_links.created ASC
-	`).all(sessionTokenId)
+		WHERE links.session_id = ?
+		ORDER BY links.created ASC
+	`).all(sessionId)
 	return rows.map(formatLink)
 }
 
-function listByAppId (appTokenId) {
-	if (!appTokenId) return []
+function listByAppId (appId) {
+	if (!appId) return []
 	const rows = sqlite.prepare(`
-		SELECT token_links.*,
-			tokens.id AS session_id, tokens.user_id, tokens.provider, tokens.type,
+		SELECT links.*,
+			tokens.id AS target_session_id, tokens.user_id, tokens.provider, tokens.type,
 			tokens.name, tokens.token, tokens.admin, tokens.ip, tokens.ua,
 			tokens.created AS session_created, tokens.updated AS session_updated,
 			users.email, users.name AS user_name
-		FROM token_links
-		JOIN tokens ON token_links.session_token_id = tokens.id
+		FROM links
+		JOIN tokens ON links.session_id = tokens.id
 		JOIN users ON tokens.user_id = users.id
-		WHERE token_links.app_token_id = ?
-		ORDER BY token_links.created ASC
-	`).all(appTokenId)
+		WHERE links.app_id = ?
+		ORDER BY links.created ASC
+	`).all(appId)
 	return rows.map(r => ({
-		sessionTokenId: r.session_token_id,
-		appTokenId: r.app_token_id,
+		sessionId: r.session_id,
+		appId: r.app_id,
 		policy: r.policy,
 		created: r.created,
 		updated: r.updated,
 		session: {
-			id: r.session_id,
+			id: r.target_session_id,
 			userId: r.user_id,
 			provider: r.provider,
 			type: r.type,
@@ -144,22 +145,22 @@ function listByAppId (appTokenId) {
 	}))
 }
 
-function updatePolicy (sessionTokenId, appTokenId, policy) {
+function updatePolicy (sessionId, appId, policy) {
 	const now = new Date().toISOString()
 	const policyStr = policy && typeof policy === 'object' ? JSON.stringify(policy) : policy
 	const res = sqlite.prepare(`
-		UPDATE token_links
+		UPDATE links
 		SET policy = ?, updated = ?
-		WHERE session_token_id = ? AND app_token_id = ?
-	`).run(policyStr, now, sessionTokenId, appTokenId)
-	return res.changes > 0 ? get(sessionTokenId, appTokenId) : null
+		WHERE session_id = ? AND app_id = ?
+	`).run(policyStr, now, sessionId, appId)
+	return res.changes > 0 ? get(sessionId, appId) : null
 }
 
-function remove (sessionTokenId, appTokenId) {
-	if (!sessionTokenId || !appTokenId) return false
+function remove (sessionId, appId) {
+	if (!sessionId || !appId) return false
 	const res = sqlite.prepare(`
-		DELETE FROM token_links
-		WHERE session_token_id = ? AND app_token_id = ?
-	`).run(sessionTokenId, appTokenId)
+		DELETE FROM links
+		WHERE session_id = ? AND app_id = ?
+	`).run(sessionId, appId)
 	return res.changes > 0
 }

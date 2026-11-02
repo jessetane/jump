@@ -493,8 +493,8 @@ async function handleCallback (req, res, query) {
 	})
 	if (oauthState.sessionId) {
 		db.links.create({
-			sessionTokenId: oauthState.sessionId,
-			appTokenId: appToken.id
+			sessionId: oauthState.sessionId,
+			appId: appToken.id
 		})
 	}
 	res.statusCode = 200

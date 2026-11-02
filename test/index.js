@@ -62,8 +62,8 @@ function createTestSession (opts = {}) {
 		scopes
 	})
 	db.links.create({
-		sessionTokenId: session.id,
-		appTokenId: app.id,
+		sessionId: session.id,
+		appId: app.id,
 		policy
 	})
 	return { user, session, app }
@@ -738,8 +738,8 @@ test('mcp auth whoami, list, and revoke', async () => {
 		scopes: 'https://www.googleapis.com/auth/drive.readonly',
 		expiresAt: Date.now() + 3600000
 	})
-	db.links.create({ sessionTokenId: session1.id, appTokenId: app.id })
-	db.links.create({ sessionTokenId: session2.id, appTokenId: app.id })
+	db.links.create({ sessionId: session1.id, appId: app.id })
+	db.links.create({ sessionId: session2.id, appId: app.id })
 	const listResult = await executeTool('admin', { action: 'list' }, session1.token)
 	assert.equal(listResult.isError, undefined)
 	const listParsed = JSON.parse(listResult.content[0].text)
@@ -1021,8 +1021,8 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 		type: 'oauth',
 		name: 'Google Rest App'
 	})
-	db.links.create({ sessionTokenId: session1.id, appTokenId: app.id })
-	db.links.create({ sessionTokenId: session2.id, appTokenId: app.id })
+	db.links.create({ sessionId: session1.id, appId: app.id })
+	db.links.create({ sessionId: session2.id, appId: app.id })
 	const whoamiRes = await fetch(`http://127.0.0.1:${addr.port}/api/whoami`, {
 		headers: { authorization: `Bearer ${session1.token}` }
 	})
@@ -1121,8 +1121,8 @@ test('mcp tools/list filtering based on session admin status', async () => {
 		name: 'Google Filter App',
 		expiresAt: Date.now() + 3600000
 	})
-	db.links.create({ sessionTokenId: adminSession.id, appTokenId: app.id })
-	db.links.create({ sessionTokenId: workerSession.id, appTokenId: app.id })
+	db.links.create({ sessionId: adminSession.id, appId: app.id })
+	db.links.create({ sessionId: workerSession.id, appId: app.id })
 	const adminRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: {
@@ -1422,8 +1422,8 @@ test('multi-account disambiguation in google_api tool', async () => {
 		credentials: { accessToken: 'ya29.work' },
 		expiresAt: Date.now() + 3600000
 	})
-	db.links.create({ sessionTokenId: session.id, appTokenId: personalApp.id, policy: [{ action: 'allow', path: '/drive/**' }] })
-	db.links.create({ sessionTokenId: session.id, appTokenId: workApp.id, policy: [{ action: 'allow', path: '/calendar/**' }] })
+	db.links.create({ sessionId: session.id, appId: personalApp.id, policy: [{ action: 'allow', path: '/drive/**' }] })
+	db.links.create({ sessionId: session.id, appId: workApp.id, policy: [{ action: 'allow', path: '/calendar/**' }] })
 	const resWithAppId = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
 		appId: workApp.id
@@ -1454,7 +1454,7 @@ test('in-place upstream re-auth flow enforces ownership and updates app credenti
 		credentials: { accessToken: 'ya29.old', refreshToken: '1//old-refresh' },
 		expiresAt: Date.now() - 1000
 	})
-	db.links.create({ sessionTokenId: session.id, appTokenId: app.id })
+	db.links.create({ sessionId: session.id, appId: app.id })
 	const crossUserConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -1901,6 +1901,74 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 	} finally {
 		await new Promise(resolve => mockUpstream.close(resolve))
 	}
+})
+
+test('migrateLegacySessions converts legacy sessions table to tokens and links seamlessly', async () => {
+	const user = db.users.upsert({ email: 'legacy-prod@example.com', name: 'Legacy User' })
+	db.sqlite.exec(`
+		CREATE TABLE sessions (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			token TEXT UNIQUE NOT NULL,
+			refresh_token TEXT,
+			access_token TEXT,
+			expires_at INTEGER,
+			ip TEXT,
+			ua TEXT,
+			created TEXT NOT NULL,
+			updated TEXT NOT NULL,
+			scope TEXT,
+			readonly INTEGER NOT NULL DEFAULT 0,
+			policy TEXT,
+			admin INTEGER DEFAULT 0,
+			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+		)
+	`)
+	const legacySessionId = 'f3b4a209-0f9d-4e47-a34f-101152f9df51'
+	const legacyBearer = 'a9a812ae-f8ec-4fe6-bc36-428bb7d356fa'
+	const legacyPolicy = JSON.stringify([
+		{ action: 'allow', methods: ['GET'], path: '/calendar/v3/calendars/**' }
+	])
+	const nowIso = new Date().toISOString()
+	db.sqlite.prepare(`
+		INSERT INTO sessions (id, user_id, token, refresh_token, access_token, expires_at, ip, ua, created, updated, scope, readonly, policy, admin)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`).run(
+		legacySessionId,
+		user.id,
+		legacyBearer,
+		'1//legacy-refresh-token',
+		'ya29.legacy-access-token',
+		Date.now() + 3600000,
+		'2604:ee40::1',
+		'Mozilla/5.0',
+		nowIso,
+		nowIso,
+		'https://www.googleapis.com/auth/calendar openid',
+		0,
+		legacyPolicy,
+		1
+	)
+	db.migrateLegacySessions()
+	const hasSessionsTable = db.sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").get()
+	assert.equal(hasSessionsTable, undefined, 'Legacy sessions table is dropped after migration')
+	const migratedSession = db.tokens.getByToken(legacyBearer)
+	assert.ok(migratedSession, 'Legacy bearer token resolves to migrated session')
+	assert.equal(migratedSession.id, legacySessionId)
+	assert.equal(migratedSession.admin, true)
+	const links = db.links.listBySessionId(legacySessionId)
+	assert.equal(links.length, 1)
+	assert.equal(links[0].sessionId, legacySessionId)
+	assert.equal(links[0].policy, legacyPolicy)
+	assert.equal(links[0].app.provider, 'google')
+	assert.equal(links[0].app.credentials.refreshToken, '1//legacy-refresh-token')
+	assert.equal(links[0].app.credentials.accessToken, 'ya29.legacy-access-token')
+	assert.equal(links[0].app.credentials.account, 'legacy-prod@example.com')
+	const whoamiRes = await executeTool('admin', { action: 'whoami' }, legacyBearer)
+	const whoamiData = JSON.parse(whoamiRes.content[0].text)
+	assert.equal(whoamiData.authenticated, true)
+	assert.equal(whoamiData.session.apps.length, 1)
+	assert.deepEqual(whoamiData.session.apps[0].policy, JSON.parse(legacyPolicy))
 })
 
 test('teardown server', (t, done) => {

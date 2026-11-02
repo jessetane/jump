@@ -182,8 +182,8 @@ async function createSession (token, opts = {}) {
 		const app = db.tokens.get(appId)
 		if (app && app.userId === session.userId) {
 			db.links.create({
-				sessionTokenId: newSession.id,
-				appTokenId: app.id,
+				sessionId: newSession.id,
+				appId: app.id,
 				policy
 			})
 		}
@@ -413,14 +413,14 @@ async function linkApp (token, { sessionId, appId, policy = null } = {}) {
 		throw error
 	}
 	const link = db.links.create({
-		sessionTokenId: targetSession.id,
-		appTokenId: targetApp.id,
+		sessionId: targetSession.id,
+		appId: targetApp.id,
 		policy
 	})
 	return {
 		linked: true,
-		sessionTokenId: link.sessionTokenId,
-		appTokenId: link.appTokenId,
+		sessionId: link.sessionId,
+		appId: link.appId,
 		policy: parsePolicy(link.policy)
 	}
 }
