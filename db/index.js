@@ -23,11 +23,13 @@ for (const ext of ['', '-wal', '-shm']) {
 function migrateLegacySessions () {
 	const hasSessions = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").get()
 	if (!hasSessions) return
+	const minDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
 	const rows = sqlite.prepare(`
 		SELECT sessions.*, users.email, users.name AS user_name
 		FROM sessions
 		JOIN users ON sessions.user_id = users.id
-	`).all()
+		WHERE sessions.updated >= ?
+	`).all(minDate)
 	sqlite.exec('BEGIN;')
 	try {
 		for (const row of rows) {
