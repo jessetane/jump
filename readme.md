@@ -1,42 +1,48 @@
-# google-mcp
-MCP proxy for Google HTTP APIs.
+# jump
+MCP jump host for upstream REST APIs.
 
 ## Why
-Gemini on the web is limited and lacks the power and flexibility of a standalone agent. Other frontier platforms may have "official" Google connectors but they are either paid-only, read-only or don't cover enough surface area to be truly useful.
+
+* **Wrapper bloat**: Official and third-party MCP servers expose dozens or hundreds of rigid wrapper tools (`create_calendar_event`, `read_sheet_row`, `list_customers`). That burns thousands of context tokens on `tools/list` schemas while covering a fraction of the upstream API surface. Frontier models already know standard REST APIs from pretraining—they just need an authenticated HTTP pipe.  
+* **Coarse OAuth scopes**: Upstream OAuth scopes (especially Google's) are dangerously broad. Granting an agent write access to manage a shared team calendar gives it permission to delete your primary personal calendar too.  
+* **Credential isolation**: Agents shouldn't hold raw OAuth refresh tokens or master API keys on client machines.
+
+`jump` solves all three: agents authenticate to the jump host with a scoped session token, call a single `<provider>_api` REST passthrough tool per linked provider, and `jump` enforces fine-grained HTTP method, origin, and path glob policies on every request before injecting upstream credentials.
 
 ## How
-* **Auth**: An internal OAuth server manages interactive Google service scope selection and automatic token refreshing.  
-* **Proxy**: A single `google_api` MCP tool bridges HTTP calls to `*.googleapis.com`, giving agents near direct access to Google's REST APIs.  
+
+* **Two-tier token graph**: Gateway sessions (`provider = 'self'`) are decoupled from upstream app credentials (`provider = 'google' | 'stripe' | ...`, OAuth or API key). Multiple accounts from the same provider (e.g. personal and work Google accounts) can be linked to one or many sessions with independent policies.  
+* **Dynamic `<provider>_api` tools**: `tools/list` dynamically exposes `<provider>_api` (e.g. `google_api`, `stripe_api`) only for providers linked to the caller's session, and `admin` only for sessions with admin privileges.  
+* **Path/method policy firewall**: Each session-to-app link carries an ordered JSON policy (`allow`/`deny` by HTTP method, origin, and URL path globs with automatic percent-decoding and traversal prevention).
 
 ## Setup
-A Google Cloud project with OAuth credentials is required:
+```sh
+$ git clone https://github.com/jessetane/jump.git
+$ cd jump
+$ npm install
+$ cp .env.example .env
+```
 
-1. Enable the Google APIs you wish to use (Google Drive, Docs, Sheets, Slides, Forms, Calendar, Tasks, Keep, Meet, Gmail, Chat, People / Contacts, Photos, YouTube Data API v3, etc.) in your Google Cloud project.  
+### Google OAuth Provider (Optional)
+To connect Google accounts via interactive OAuth:
+
+1. Enable the Google APIs you wish to use (Drive, Docs, Sheets, Slides, Forms, Calendar, Tasks, Keep, Meet, Gmail, Chat, Contacts, Photos, YouTube, etc.) in your Google Cloud project.  
 2. Configure the OAuth consent screen.  
 3. Create an OAuth 2.0 Client ID (Web application) and add `<APP_URL>/oauth/callback` to Authorized redirect URIs.  
-4. Copy the Client ID and Client Secret into `.env`.  
+4. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
+
+### Email Delivery (Optional)
+Set `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, and `MAILGUN_SENDER` in `.env` to send sign-in magic links via email. In local development (when unset), magic links are printed to stdout.
 
 ## Usage
 
-### ChatGPT
-Go to **Plugins** → **New Plugin**:
-
-* Enter `<APP_URL>/mcp`, name, and description.  
-* OAuth is selected by default, no customization is necessary.
-
-### Claude Desktop
-Go to **Customize** → **Connectors**:
-
-* Add a new connector with URL `<APP_URL>/mcp`.  
-* Select "Sign in now" and "Use Claude's published identity".  
-
-### CLI Agents (Antigravity, Claude Code, etc.)
-Sign in at `<APP_URL>/oauth/authorize` in your browser to get your session token, then add the MCP server with the `Authorization: Bearer <token>` header:
+### 1. Sign In & Create an Admin Session
+Visit `<APP_URL>/oauth/authorize` in your browser, check **Admin Privileges**, and sign in via magic link (or connect directly via OAuth 2.0 PKCE + RFC 7591 Dynamic Client Registration from Claude Desktop, Antigravity, Cursor, or ChatGPT).
 
 ```json
 {
 	"mcpServers": {
-		"google": {
+		"jump": {
 			"serverUrl": "<APP_URL>/mcp",
 			"headers": {
 				"Authorization": "Bearer <token>"
@@ -46,65 +52,85 @@ Sign in at `<APP_URL>/oauth/authorize` in your browser to get your session token
 }
 ```
 
-### Authorization & Access Control
+### 2. Connect Upstream Apps & Link to Sessions
+From an admin session, use the `admin` MCP tool (or REST API) to connect upstream OAuth or API-key apps and link them to worker sessions with fine-grained policies:
 
-* **Scope Selection**: Visiting `<APP_URL>/oauth/authorize` displays a consent screen to select which Google services to enable (unchecked by default). Checking **Write** grants write privileges.  
-* **Session Administration (`auth` tool)**: Optional toggle granting permission to list and revoke sessions. When disabled (default), the `auth` tool is omitted from `tools/list` and sessions are restricted to domain API access.  
-* **Granular Policy Engine (JSON)**: Optional JSON policy attached to the token to restrict sub-resources, URLs, and HTTP methods beyond Google OAuth scopes:
+```javascript
+// Connect a Google account (returns interactive OAuth URL)
+admin({ action: 'connect_app', provider: 'google', name: 'Work Google' })
 
-```json
-[
-	{
-		"action": "allow",
-		"methods": ["GET"],
-		"path": "/calendar/v3/calendars/team-schedule@group.calendar.google.com"
-	},
-	{
-		"action": "allow",
-		"path": "/calendar/v3/calendars/team-schedule@group.calendar.google.com/events/**"
-	}
-]
+// Or connect any REST API with an API key and baseUrl
+admin({
+	action: 'connect_app',
+	provider: 'stripe',
+	name: 'Stripe Prod',
+	account: 'acct_123',
+	apiKey: 'sk_live_...',
+	baseUrl: 'https://api.stripe.com'
+})
+
+// Link an app to a session with a default-deny path/method policy
+admin({
+	action: 'link_app',
+	sessionId: '<session_id>',
+	appId: '<app_id>',
+	policy: [
+		{
+			action: 'allow',
+			methods: ['GET'],
+			path: '/calendar/v3/calendars/team@group.calendar.google.com'
+		},
+		{
+			action: 'allow',
+			path: '/calendar/v3/calendars/team@group.calendar.google.com/events/**'
+		}
+	]
+})
 ```
 
 ## Tools
 
-* **`auth`**: Inspect authentication status, list active sessions for current user, get session details, or revoke sessions (available to admin sessions).  
-  * `action`: `'whoami'` (or `'status'`, default), `'list'`, `'get'`, or `'revoke'`.  
-  * `sessionId`: Optional session ID when action is `'get'` or `'revoke'`.  
-  * `allOthers`: Optional boolean to revoke all other active sessions when action is `'revoke'`.  
-* **`google_api`**: HTTP proxy to Google APIs (`*.googleapis.com`).  
-  * `url`: Full URL (e.g. `https://www.googleapis.com/calendar/v3/calendars/primary/events?q=meeting`) or relative path with query parameters (e.g. `drive/v3/files?pageSize=10`).  
-  * `method`: `GET`, `POST`, `PUT`, `PATCH`, `DELETE` (defaults to `GET`).  
-  * `body`: Object or string body for POST/PUT/PATCH requests.  
-  * `headers`: Extra request headers (e.g. `{ "accept": "application/pdf" }`).  
+* **`<provider>_api`** (e.g. `google_api`, `stripe_api`): Dynamically exposed for each provider linked to the session.  
+	* `url`: Full HTTPS URL or relative path with query parameters (e.g. `drive/v3/files?pageSize=10` or `/v1/customers`).  
+	* `method`: `GET`, `POST`, `PUT`, `PATCH`, `DELETE` (defaults to `GET`).  
+	* `body`: Object or string payload for `POST`/`PUT`/`PATCH` requests.  
+	* `headers`: Optional extra request headers.  
+	* `account` / `appId`: Optional account identifier, app name, or app ID when multiple accounts for the same provider are linked.  
+* **`admin`**: Exposed only to sessions with `admin: true`.  
+	* `action`: `'whoami'`, `'list'`, `'get'`, `'create_session'`, `'update_session'`, `'revoke'`, `'list_apps'`, `'connect_app'`, `'disconnect_app'`, `'update_app'`, `'link_app'`, `'unlink_app'`, `'update_email'`, `'update_user'`.
 
 ## Endpoints
 ```
-POST   /mcp                                       # json-rpc mcp endpoint
-GET    /oauth/authorize                           # oauth scope selection & sign-in screen
-POST   /oauth/authorize/consent                   # consent submission -> google oauth redirect
-GET    /oauth/callback                            # oauth callback handler
-POST   /oauth/token                               # token exchange proxy
+POST   /mcp                                       # json-rpc mcp endpoint (also mounted at POST /)
+GET    /oauth/authorize                           # magic-link sign-in & session creation screen
+POST   /oauth/authorize/consent                   # magic-link request submission
+GET    /oauth/verify                              # magic-link verification confirmation screen
+POST   /oauth/verify                              # magic-link verification handler
+POST   /oauth/register                            # rfc 7591 dynamic client registration
+POST   /oauth/token                               # oauth 2.0 pkce token exchange
 POST   /oauth/revoke                              # rfc 7009 token revocation
+GET    /oauth/callback                            # upstream oauth callback handler
+GET    /providers/:provider/connect               # upstream oauth scope selection & re-auth screen
+POST   /providers/:provider/consent               # upstream oauth redirect
 GET    /.well-known/oauth-protected-resource      # rfc 9728 discovery
 GET    /.well-known/oauth-authorization-server    # rfc 8414 discovery
 GET    /api/health                                # health check
-GET    /api/whoami                                # inspect auth state, identity, scopes, policy & session
-GET    /api/sessions                              # list active sessions for authenticated user
+GET    /api/whoami                                # inspect auth state, user, session & linked apps
+GET    /api/sessions                              # list sessions (admin)
+POST   /api/sessions                              # create session (admin)
 DELETE /api/sessions                              # revoke current session (or ?allOthers=true)
-GET    /api/sessions/:id                          # get specific session details
-DELETE /api/sessions/:id                          # revoke specific session
-ALL    /api/google/*                              # transparent google api proxy
+GET    /api/sessions/:id                          # get session details
+PATCH  /api/sessions/:id                          # update session name, admin flag, or rotate token
+DELETE /api/sessions/:id                          # revoke session
+GET    /api/apps                                  # list connected upstream apps (admin)
+POST   /api/apps                                  # connect upstream app (admin)
+PATCH  /api/apps/:id                              # update upstream app metadata (admin)
+DELETE /api/apps/:id                              # disconnect upstream app (admin)
+POST   /api/links                                 # link upstream app to session with policy (admin)
+DELETE /api/links                                 # unlink upstream app from session (admin)
+ALL    /api/:provider/*                           # transparent policy-enforced rest proxy
 ```
 
-## Install
-```sh
-$ git clone https://github.com/jessetane/google-mcp.git
-$ cd google-mcp
-$ npm install
-$ cp .env.example .env
-```
-  
 ## Test
 ```sh
 $ npm test
@@ -112,4 +138,3 @@ $ npm test
 
 ## License
 MIT
-
