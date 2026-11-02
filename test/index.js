@@ -92,11 +92,40 @@ test('root endpoint', async () => {
 	assert.match(text, /href="\/oauth\/authorize"/)
 })
 
-test('mcp initialize & tools/list', async () => {
+test('mcp initialize & tools/list and RFC 9728 401 WWW-Authenticate when unauthenticated', async () => {
 	const addr = server.address()
-	const initRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+	const unauthRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			jsonrpc: '2.0',
+			id: 1,
+			method: 'initialize',
+			params: { protocolVersion: '2025-03-26' }
+		})
+	})
+	assert.equal(unauthRes.status, 401)
+	const wwwAuth = unauthRes.headers.get('www-authenticate') || ''
+	assert.match(wwwAuth, /Bearer/)
+	assert.match(wwwAuth, /\/\.well-known\/oauth-protected-resource/)
+	assert.match(wwwAuth, /\/oauth\/authorize/)
+	const expose = unauthRes.headers.get('access-control-expose-headers') || ''
+	assert.match(expose, /WWW-Authenticate/)
+	const getUnauthRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+		method: 'GET',
+		headers: { accept: 'text/event-stream' }
+	})
+	assert.equal(getUnauthRes.status, 401)
+	assert.match(getUnauthRes.headers.get('www-authenticate') || '', /\/\.well-known\/oauth-protected-resource/)
+	const user = db.users.upsert({ email: 'mcp-init@example.com' })
+	const bareSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+	const authHeaders = {
+		'content-type': 'application/json',
+		authorization: `Bearer ${bareSession.token}`
+	}
+	const initRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+		method: 'POST',
+		headers: authHeaders,
 		body: JSON.stringify({
 			jsonrpc: '2.0',
 			id: 1,
@@ -110,7 +139,7 @@ test('mcp initialize & tools/list', async () => {
 	assert.equal(initData.result.protocolVersion, '2025-03-26')
 	const rootInitRes = await fetch(`http://127.0.0.1:${addr.port}/`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		headers: authHeaders,
 		body: JSON.stringify({
 			jsonrpc: '2.0',
 			id: 1,
@@ -124,7 +153,7 @@ test('mcp initialize & tools/list', async () => {
 	assert.equal(rootInitData.result.protocolVersion, '2024-11-05')
 	const notifRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		headers: authHeaders,
 		body: JSON.stringify({
 			jsonrpc: '2.0',
 			method: 'notifications/initialized',
@@ -134,7 +163,7 @@ test('mcp initialize & tools/list', async () => {
 	assert.equal(notifRes.status, 202)
 	const listRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		headers: authHeaders,
 		body: JSON.stringify({
 			jsonrpc: '2.0',
 			id: 2,
@@ -149,52 +178,27 @@ test('mcp initialize & tools/list', async () => {
 })
 
 test('mcp admin tool without auth', async () => {
-	const addr = server.address()
-	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({
-			jsonrpc: '2.0',
-			id: 3,
-			method: 'tools/call',
-			params: {
-				name: 'admin',
-				arguments: { action: 'whoami' }
-			}
-		})
-	})
-	assert.equal(res.status, 200)
-	const data = await res.json()
-	const parsed = JSON.parse(data.result.content[0].text)
+	const res = await executeTool('admin', { action: 'whoami' }, null)
+	assert.equal(res.isError, undefined)
+	const parsed = JSON.parse(res.content[0].text)
 	assert.equal(parsed.authenticated, false)
 })
 
 test('mcp google_api tool requires auth', async () => {
-	const addr = server.address()
-	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({
-			jsonrpc: '2.0',
-			id: 4,
-			method: 'tools/call',
-			params: {
-				name: 'google_api',
-				arguments: { url: 'drive/v3/files' }
-			}
-		})
-	})
-	assert.equal(res.status, 200)
-	const data = await res.json()
-	assert.equal(data.result.isError, true)
-	assert.match(data.result.content[0].text, /Authentication required/)
+	const res = await executeTool('google_api', { url: 'drive/v3/files' }, null)
+	assert.equal(res.isError, true)
+	assert.match(res.content[0].text, /Authentication required/)
 })
 
 test('mcp rejects tool call without name', async () => {
 	const addr = server.address()
+	const { session } = createTestSession({ email: 'missing-name@example.com' })
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${session.token}`
+		},
 		body: JSON.stringify({
 			jsonrpc: '2.0',
 			id: 5,
@@ -212,9 +216,13 @@ test('mcp rejects tool call without name', async () => {
 
 test('mcp rejects unknown tool call', async () => {
 	const addr = server.address()
+	const { session } = createTestSession({ email: 'unknown-tool@example.com' })
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${session.token}`
+		},
 		body: JSON.stringify({
 			jsonrpc: '2.0',
 			id: 6,
@@ -322,14 +330,24 @@ test('well-known oauth discovery endpoints', async () => {
 	assert.equal(resResource.status, 200)
 	const resourceData = await resResource.json()
 	assert.ok(Array.isArray(resourceData.authorization_servers))
+	const resResourceMcp = await fetch(`http://127.0.0.1:${addr.port}/.well-known/oauth-protected-resource/mcp`)
+	assert.equal(resResourceMcp.status, 200)
+	assert.deepEqual(await resResourceMcp.json(), resourceData)
 	const resAuth = await fetch(`http://127.0.0.1:${addr.port}/.well-known/oauth-authorization-server`)
 	assert.equal(resAuth.status, 200)
 	const authData = await resAuth.json()
 	assert.ok(authData.authorization_endpoint.endsWith('/oauth/authorize'))
 	assert.ok(authData.token_endpoint.endsWith('/oauth/token'))
+	assert.ok(authData.registration_endpoint.endsWith('/oauth/register'))
 	assert.ok(authData.revocation_endpoint.endsWith('/oauth/revoke'))
 	assert.deepEqual(authData.code_challenge_methods_supported, ['S256'])
 	assert.equal(authData.client_id_metadata_document_supported, true)
+	const resAuthMcp = await fetch(`http://127.0.0.1:${addr.port}/.well-known/oauth-authorization-server/mcp`)
+	assert.equal(resAuthMcp.status, 200)
+	assert.deepEqual(await resAuthMcp.json(), authData)
+	const resOidc = await fetch(`http://127.0.0.1:${addr.port}/.well-known/openid-configuration/mcp`)
+	assert.equal(resOidc.status, 200)
+	assert.deepEqual(await resOidc.json(), authData)
 })
 
 test('oauth pkce flow with S256', async () => {
@@ -453,7 +471,7 @@ test('oauth consent html page, post consent, and scanner-safe two-step verify fl
 	assert.equal(pageRes.status, 200)
 	assert.equal(pageRes.headers.get('content-type'), 'text/html; charset=utf-8')
 	const html = await pageRes.text()
-	assert.match(html, /Generate Bearer Token/)
+	assert.match(html, /Generate bearer token/)
 	assert.match(html, /action="\/oauth\/authorize\/consent"/)
 	assert.match(html, /"redirect_uri":"https:\/\/chatgpt\.com\/callback"/)
 	assert.match(html, /"state":"client-state-123"/)
@@ -509,7 +527,7 @@ test('direct browser authorize without redirect_uri', async () => {
 	assert.equal(pageRes.status, 200)
 	assert.equal(pageRes.headers.get('content-type'), 'text/html; charset=utf-8')
 	const html = await pageRes.text()
-	assert.match(html, /Generate Bearer Token/)
+	assert.match(html, /Generate bearer token/)
 	assert.match(html, /action="\/oauth\/authorize\/consent"/)
 	const consentBody = new URLSearchParams({
 		email: 'browser@example.com',
@@ -547,7 +565,8 @@ test('google provider connect screen and consent flow', async () => {
 	const connectRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?session_id=sess_123`)
 	assert.equal(connectRes.status, 200)
 	const connectHtml = await connectRes.text()
-	assert.match(connectHtml, /Connect Google Account/)
+	assert.match(connectHtml, /Configure API services access/)
+	assert.match(connectHtml, /Sign in with Google/)
 	assert.match(connectHtml, /action="\/providers\/google\/consent"/)
 	const consentBody = new URLSearchParams({
 		session_id: 'sess_123',
@@ -606,9 +625,13 @@ test('not found returns 404 json', async () => {
 
 test('unknown rpc method returns -32601 error', async () => {
 	const addr = server.address()
+	const { session } = createTestSession({ email: 'unknown-rpc@example.com' })
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${session.token}`
+		},
 		body: JSON.stringify({
 			jsonrpc: '2.0',
 			id: 99,
@@ -624,9 +647,13 @@ test('unknown rpc method returns -32601 error', async () => {
 
 test('mcp invalid json returns jsonrpc parse error', async () => {
 	const addr = server.address()
+	const { session } = createTestSession({ email: 'invalid-json@example.com' })
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${session.token}`
+		},
 		body: '{"invalid_json'
 	})
 	const data = await res.json()
@@ -636,8 +663,10 @@ test('mcp invalid json returns jsonrpc parse error', async () => {
 
 test('mcp non-POST request returns 405 Method Not Allowed', async () => {
 	const addr = server.address()
+	const { session } = createTestSession({ email: 'non-post@example.com' })
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
-		method: 'GET'
+		method: 'GET',
+		headers: { authorization: `Bearer ${session.token}` }
 	})
 	assert.equal(res.status, 405)
 	const data = await res.json()
@@ -1238,14 +1267,23 @@ test('oauth consent flow with admin parameter', async () => {
 	assert.equal(rowNoAdmin.admin, 0)
 })
 
-test('magic link admin verification flow (/oauth/verify)', async () => {
+test('magic link admin verification flow (/oauth/verify) with connected app selection and JSON token exchange', async () => {
 	const addr = server.address()
+	const existingUser = db.users.upsert({ email: 'magic-admin@example.com' })
+	const existingApp = db.tokens.create({
+		userId: existingUser.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Personal Google',
+		credentials: { accessToken: 'ya29.existing', account: 'magic-admin@example.com' },
+		expiresAt: Date.now() + 3600000
+	})
 	const magicCode = 'test-magic-code-123'
 	db.tokens.createState({
 		email: 'magic-admin@example.com',
 		sessionName: 'Admin Magic Session',
 		admin: 1,
-		clientRedirectUri: 'https://chatgpt.com/callback',
+		clientRedirectUri: 'https://antigravity.google/oauth-callback',
 		clientState: 'magic-state-abc',
 		magicCode,
 		magicExpiresAt: Date.now() + 600000
@@ -1254,35 +1292,47 @@ test('magic link admin verification flow (/oauth/verify)', async () => {
 		redirect: 'manual'
 	})
 	assert.equal(getVerifyRes.status, 200)
+	const verifyHtml = await getVerifyRes.text()
+	assert.match(verifyHtml, /Link connected apps/)
+	assert.match(verifyHtml, /Personal Google/)
+	assert.match(verifyHtml, new RegExp(`value="${existingApp.id}" checked`))
+	const verifyBody = new URLSearchParams({
+		code: magicCode,
+		app_id: existingApp.id
+	})
 	const verifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ code: magicCode }).toString(),
+		body: verifyBody.toString(),
 		redirect: 'manual'
 	})
 	assert.equal(verifyRes.status, 302)
 	const targetLocation = verifyRes.headers.get('location')
 	assert.ok(targetLocation)
 	const targetUrl = new URL(targetLocation)
-	assert.equal(targetUrl.hostname, 'chatgpt.com')
+	assert.equal(targetUrl.hostname, 'antigravity.google')
 	assert.equal(targetUrl.searchParams.get('state'), 'magic-state-abc')
 	const authCode = targetUrl.searchParams.get('code')
 	assert.ok(authCode)
 	const tokenRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
 			code: authCode,
-			redirect_uri: 'https://chatgpt.com/callback',
+			redirect_uri: 'https://antigravity.google/oauth-callback',
 			grant_type: 'authorization_code'
-		}).toString()
+		})
 	})
 	assert.equal(tokenRes.status, 200)
+	assert.equal(tokenRes.headers.get('cache-control'), 'no-store')
 	const tokenData = await tokenRes.json()
 	assert.ok(tokenData.access_token)
 	const createdSession = db.tokens.getByToken(tokenData.access_token)
 	assert.equal(createdSession.admin, true)
 	assert.equal(createdSession.name, 'Admin Magic Session')
+	const sessionLinks = db.links.listBySessionId(createdSession.id)
+	assert.equal(sessionLinks.length, 1)
+	assert.equal(sessionLinks[0].appId, existingApp.id)
 	const createdUser = db.users.get(createdSession.userId)
 	assert.equal(createdUser.name, null)
 })

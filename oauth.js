@@ -19,14 +19,189 @@ export {
 	handleRevoke,
 	handleProtectedResourceMetadata,
 	handleAuthServerMetadata,
-	isAllowedRedirectUri
+	isAllowedRedirectUri,
+	deriveClientName,
+	getBaseUrl
 }
 
 const dirname = path.dirname(fileURLToPath(import.meta.url))
-const appUrl = process.env.APP_URL || 'http://localhost:8080'
+
+const KNOWN_CLIENT_NAMES = {
+	'antigravity.google': 'Google Antigravity',
+	'claude.ai': 'Claude',
+	'anthropic.com': 'Anthropic',
+	'chatgpt.com': 'ChatGPT',
+	'openai.com': 'OpenAI',
+	'cursor.sh': 'Cursor',
+	'cursor.com': 'Cursor',
+	'windsurf.com': 'Windsurf',
+	'codeium.com': 'Codeium',
+	'vscode.dev': 'VS Code',
+	'github.dev': 'GitHub'
+}
+
+const DISALLOWED_REDIRECT_SCHEMES = new Set([
+	'javascript:',
+	'data:',
+	'vbscript:',
+	'file:',
+	'blob:',
+	'about:'
+])
+
+function getBaseUrl (req) {
+	if (req && req.headers && (req.headers['x-forwarded-host'] || req.headers.host)) {
+		const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host).split(',')[0].trim()
+		if (rawHost && !rawHost.startsWith('localhost') && !rawHost.startsWith('127.0.0.1') && !rawHost.startsWith('[::1]')) {
+			const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim()
+			return `${proto}://${rawHost}`
+		}
+	}
+	return (process.env.APP_URL || 'http://localhost:8080').replace(/\/$/, '')
+}
 
 function getClientIp (req) {
 	return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || null
+}
+
+function escapeHtml (str) {
+	return String(str || '')
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+}
+
+function renderCardPage (title, subtitle, bodyHtml) {
+	return `<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset=utf-8>
+		<meta name="viewport" content="width=device-width,initial-scale=1">
+		<title>${escapeHtml(title)}</title>
+		<style>
+			* {
+				box-sizing: border-box;
+			}
+
+			html {
+				height: 100%;
+			}
+
+			body {
+				margin: 0;
+				height: 100%;
+				font-family: sans-serif;
+			}
+
+			.column {
+				display: flex;
+				flex-direction: column;
+			}
+
+			.view {
+				margin: auto;
+				width: 100%;
+				padding: 24px;
+			}
+
+			@media (min-width: 520px) {
+				.view {
+					max-width: 480px;
+				}
+			}
+
+			h1 {
+				font-size: 1.5rem;
+				text-align: center;
+				margin-top: 0.85rem;
+				margin-bottom: 0.85rem;
+			}
+
+			.subtitle {
+				color: #555;
+				font-size: 0.95rem;
+				line-height: 1.4;
+				text-align: center;
+				margin: 0 0 1.25rem;
+			}
+
+			.app-list {
+				margin-bottom: 1.5rem;
+				text-align: left;
+			}
+
+			.app-list-title {
+				font-size: 0.9rem;
+				font-weight: bold;
+				color: #333;
+				margin-bottom: 0.5rem;
+			}
+
+			.app-item {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				padding: 8px 6px;
+				border-bottom: 1px solid #eee;
+				font-size: 0.9rem;
+				cursor: pointer;
+				color: #333;
+			}
+
+			.app-item:hover {
+				background: #fafafa;
+			}
+
+			.app-meta {
+				color: #777;
+				font-size: 0.8rem;
+				margin-left: auto;
+			}
+
+			button[type=submit] {
+				width: 100%;
+				padding: 11px 16px;
+				background: #000;
+				color: #fff;
+				border: none;
+				border-radius: 6px;
+				font-size: 1rem;
+				cursor: pointer;
+				margin-bottom: 1.5rem;
+			}
+
+			button[type=submit]:hover {
+				opacity: 0.85;
+			}
+		</style>
+	</head>
+	<body class=column>
+		<div class="view column">
+			<h1>jump</h1>
+			<p class="subtitle">${subtitle}</p>
+			${bodyHtml}
+		</div>
+	</body>
+</html>`
+}
+
+function deriveClientName (clientId, explicitName) {
+	if (explicitName) return explicitName
+	if (!clientId || typeof clientId !== 'string' || !clientId.startsWith('https://')) return null
+	let parsed
+	try {
+		parsed = new URL(clientId)
+	} catch {
+		return null
+	}
+	const host = parsed.hostname.toLowerCase()
+	for (const [domain, label] of Object.entries(KNOWN_CLIENT_NAMES)) {
+		if (host === domain || host.endsWith(`.${domain}`)) {
+			return label
+		}
+	}
+	return host
 }
 
 function verifyCodeChallenge (verifier, challenge, method) {
@@ -42,23 +217,28 @@ function verifyCodeChallenge (verifier, challenge, method) {
 }
 
 function isAllowedRedirectUri (redirectUri) {
-	if (!redirectUri) return false
+	if (!redirectUri || typeof redirectUri !== 'string') return false
 	let url
 	try {
 		url = new URL(redirectUri)
 	} catch {
 		return false
 	}
-	const envDomains = process.env.ALLOWED_REDIRECT_DOMAINS || 'localhost,127.0.0.1,antigravity.google,antigravity,cursor,vscode'
-	const allowedDomains = envDomains.split(',').map(d => d.trim().toLowerCase()).filter(Boolean)
-	const hostname = url.hostname.toLowerCase()
+	if (url.hash) return false
 	const protocol = url.protocol.toLowerCase()
-	if (protocol !== 'http:' && protocol !== 'https:') {
+	if (DISALLOWED_REDIRECT_SCHEMES.has(protocol)) return false
+	const hostname = url.hostname.toLowerCase()
+	if (protocol === 'http:') {
+		return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+	}
+	if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === 'antigravity.google' || hostname.endsWith('.antigravity.google')) {
+		return true
+	}
+	const envDomains = process.env.ALLOWED_REDIRECT_DOMAINS || 'localhost,127.0.0.1,antigravity.google,claude.ai,anthropic.com,chatgpt.com,chat.openai.com,openai.com,cursor.sh,cursor.com,windsurf.com,codeium.com,vscode.dev,github.dev,antigravity,cursor,vscode'
+	const allowedDomains = envDomains.split(',').map(d => d.trim().toLowerCase()).filter(Boolean)
+	if (protocol !== 'https:') {
 		const scheme = protocol.replace(/:$/, '')
 		return allowedDomains.includes(scheme) || allowedDomains.includes(`${scheme}:`)
-	}
-	if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') {
-		return true
 	}
 	return allowedDomains.some(domain => {
 		if (domain.startsWith('*.')) {
@@ -70,10 +250,12 @@ function isAllowedRedirectUri (redirectUri) {
 }
 
 async function handleProtectedResourceMetadata (req, res) {
-	const base = appUrl.replace(/\/$/, '')
+	const base = getBaseUrl(req)
 	const meta = {
 		resource: `${base}/mcp`,
-		authorization_servers: [base]
+		authorization_servers: [base],
+		bearer_methods_supported: ['header'],
+		scopes_supported: ['mcp']
 	}
 	res.statusCode = 200
 	res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -81,7 +263,7 @@ async function handleProtectedResourceMetadata (req, res) {
 }
 
 async function handleAuthServerMetadata (req, res) {
-	const base = appUrl.replace(/\/$/, '')
+	const base = getBaseUrl(req)
 	const meta = {
 		issuer: base,
 		authorization_endpoint: `${base}/oauth/authorize`,
@@ -89,10 +271,12 @@ async function handleAuthServerMetadata (req, res) {
 		registration_endpoint: `${base}/oauth/register`,
 		revocation_endpoint: `${base}/oauth/revoke`,
 		response_types_supported: ['code'],
+		response_modes_supported: ['query'],
 		grant_types_supported: ['authorization_code'],
-		token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
-		revocation_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
+		token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
+		revocation_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
 		code_challenge_methods_supported: ['S256'],
+		scopes_supported: ['mcp', 'offline_access', 'openid', 'profile', 'email'],
 		client_id_metadata_document_supported: true
 	}
 	res.statusCode = 200
@@ -117,7 +301,14 @@ async function handleRegister (req, res) {
 		res.end(JSON.stringify({ error: 'invalid_client_metadata', error_description: 'Invalid JSON body' }))
 		return
 	}
-	const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris : []
+	const rawRedirects = body.redirect_uris
+	const redirectUris = Array.isArray(rawRedirects) ? rawRedirects : (rawRedirects ? [rawRedirects] : [])
+	if (redirectUris.length === 0) {
+		res.statusCode = 400
+		res.setHeader('content-type', 'application/json; charset=utf-8')
+		res.end(JSON.stringify({ error: 'invalid_client_metadata', error_description: 'redirect_uris is required' }))
+		return
+	}
 	for (const uri of redirectUris) {
 		if (!isAllowedRedirectUri(uri)) {
 			res.statusCode = 400
@@ -126,18 +317,26 @@ async function handleRegister (req, res) {
 			return
 		}
 	}
+	const authMethod = body.token_endpoint_auth_method || 'none'
 	const clientId = body.client_id || `client_${randomUUID()}`
-	res.statusCode = 201
-	res.setHeader('content-type', 'application/json; charset=utf-8')
-	res.end(JSON.stringify({
+	const needsSecret = authMethod === 'client_secret_basic' || authMethod === 'client_secret_post'
+	const clientSecret = body.client_secret || (needsSecret ? `cs_${randomBytes(24).toString('hex')}` : null)
+	const response = {
 		client_id: clientId,
 		client_id_issued_at: Math.floor(Date.now() / 1000),
 		client_name: body.client_name || 'MCP Client',
 		redirect_uris: redirectUris,
 		grant_types: body.grant_types || ['authorization_code'],
 		response_types: body.response_types || ['code'],
-		token_endpoint_auth_method: body.token_endpoint_auth_method || 'none'
-	}))
+		token_endpoint_auth_method: authMethod
+	}
+	if (clientSecret) {
+		response.client_secret = clientSecret
+		response.client_secret_expires_at = 0
+	}
+	res.statusCode = 201
+	res.setHeader('content-type', 'application/json; charset=utf-8')
+	res.end(JSON.stringify(response))
 }
 
 function validateAuthorizeParams (query) {
@@ -182,7 +381,11 @@ async function handleAuthorize (req, res, query) {
 		res.end(JSON.stringify({ error: err.code || 'invalid_request', error_description: err.message }))
 		return
 	}
-	const initData = { params: query }
+	const clientName = deriveClientName(query.client_id, query.client_name)
+	const initData = {
+		params: query,
+		...(clientName && { clientName })
+	}
 	const authorizeHtml = await fs.readFile(path.join(dirname, 'public/authorize.html'), 'utf8')
 	const html = authorizeHtml.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c'))
 	res.statusCode = 200
@@ -231,6 +434,8 @@ async function handleAuthorizeConsent (req, res) {
 	const { codeChallenge, codeChallengeMethod } = validation
 	const clientRedirectUri = query.redirect_uri || null
 	const clientState = query.state || null
+	const derivedName = deriveClientName(query.client_id, query.client_name)
+	const effectiveSessionName = sessionName || derivedName || null
 	const magicCode = randomBytes(24).toString('base64url')
 	const magicExpiresAt = Date.now() + (15 * 60 * 1000)
 	const ip = getClientIp(req)
@@ -239,23 +444,28 @@ async function handleAuthorizeConsent (req, res) {
 		clientState,
 		codeChallenge,
 		codeChallengeMethod,
-		sessionName,
+		sessionName: effectiveSessionName,
 		admin,
 		email,
 		magicCode,
 		magicExpiresAt,
 		ip
 	})
-	const verifyUrl = `${appUrl.replace(/\/$/, '')}/oauth/verify?code=${magicCode}`
+	const base = getBaseUrl(req)
+	const verifyUrl = `${base}/oauth/verify?code=${magicCode}`
 	await sendMail({
 		to: email,
-		subject: 'Sign in to jump Gateway',
+		subject: 'Sign in to jump',
 		text: `Click the link below to sign in and activate your MCP session token:\n\n${verifyUrl}\n\nThis link expires in 15 minutes.`,
 		html: `<p>Click the link below to sign in and activate your MCP session token:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p>This link expires in 15 minutes.</p>`
 	})
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/html; charset=utf-8')
-	res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:440px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;text-align:center;"><h2>Check your email</h2><p>A magic sign-in link has been sent to <strong>${email}</strong>.</p><p>Click the link in your email to activate your MCP session token.</p></body></html>`)
+	res.end(renderCardPage(
+		'jump sign in',
+		'Check your email',
+		`<p class="subtitle">A sign-in link has been sent to <strong>${escapeHtml(email)}</strong>.</p>`
+	))
 }
 
 async function handleVerify (req, res, query) {
@@ -274,9 +484,28 @@ async function handleVerify (req, res, query) {
 			res.end('Invalid or expired verification code')
 			return
 		}
+		const existingUser = state.email ? db.users.getByEmail(state.email) : null
+		const userApps = existingUser
+			? db.tokens.listByUserId(existingUser.id).filter(t => t.provider !== 'self')
+			: []
+		let appsHtml = ''
+		if (userApps.length > 0) {
+			const checkedAttr = state.admin ? ' checked' : ''
+			const items = userApps.map(app => {
+				const account = app.credentials?.account || app.credentials?.email || ''
+				const label = app.name || `${app.provider} app`
+				return `<label class="app-item"><input type="checkbox" name="app_id" value="${escapeHtml(app.id)}"${checkedAttr}><span>${escapeHtml(label)}</span>${account ? `<span class="app-meta">${escapeHtml(account)}</span>` : ''}</label>`
+			}).join('')
+			appsHtml = `<div class="app-list"><div class="app-list-title">Link connected apps</div>${items}</div>`
+		}
+		const autoSubmitScript = userApps.length === 0 ? '<script>document.forms[0].submit()</script>' : ''
 		res.statusCode = 200
 		res.setHeader('content-type', 'text/html; charset=utf-8')
-		res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:440px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;text-align:center;"><h2>Complete Sign In</h2><p>Click continue to activate your MCP session token.</p><form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${code}"><button type="submit" style="padding:10px 20px;background:#000;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:1rem;">Continue</button></form><script>document.forms[0].submit()</script></body></html>`)
+		res.end(renderCardPage(
+			'jump verify',
+			`Activate session for <strong>${escapeHtml(state.email || 'user')}</strong>`,
+			`<form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${escapeHtml(code)}">${appsHtml}<button type="submit">Continue</button></form>${autoSubmitScript}`
+		))
 		return
 	}
 	if (req.method !== 'POST') {
@@ -313,6 +542,16 @@ async function handleVerify (req, res, query) {
 		ip: state.ip || ip,
 		ua
 	})
+	const selectedAppIds = params.getAll('app_id')
+	for (const appId of selectedAppIds) {
+		const app = db.tokens.get(appId)
+		if (app && app.userId === user.id && app.provider !== 'self') {
+			db.links.create({
+				sessionId: session.id,
+				appId: app.id
+			})
+		}
+	}
 	if (state.clientRedirectUri) {
 		const authCode = db.tokens.createAuthCode({
 			sessionId: session.id,
@@ -342,7 +581,14 @@ async function handleProviderConnect (req, res, query, providerName = 'google') 
 	}
 	const initData = {
 		params: query,
-		provider: { id: provider.id, name: provider.name }
+		provider: { id: provider.id, name: provider.name },
+		...(provider.services && {
+			services: Object.values(provider.services).map(s => ({
+				id: s.id,
+				name: s.name,
+				...(s.enterprise && { enterprise: true })
+			}))
+		})
 	}
 	const connectHtml = await fs.readFile(path.join(dirname, 'public/connect.html'), 'utf8')
 	const html = connectHtml.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c'))
@@ -365,8 +611,18 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	}
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
-	const servicesList = params.getAll('services')
-	const writeList = params.getAll('write')
+	const servicesList = []
+	for (const v of params.getAll('services')) {
+		for (const s of v.split(',')) {
+			if (s.trim()) servicesList.push(s.trim())
+		}
+	}
+	const writeList = []
+	for (const v of params.getAll('write')) {
+		for (const s of v.split(',')) {
+			if (s.trim()) writeList.push(s.trim())
+		}
+	}
 	const sessionId = params.get('session_id') || null
 	const reauthAppId = params.get('reauth_app_id') || null
 	if (reauthAppId) {
@@ -381,7 +637,8 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	}
 	const rawAppName = params.get('app_name') || params.get('name') || ''
 	const sessionName = rawAppName ? String(rawAppName).trim() : null
-	const callbackUrl = `${appUrl.replace(/\/$/, '')}/oauth/callback`
+	const base = getBaseUrl(req)
+	const callbackUrl = `${base}/oauth/callback`
 	const ip = getClientIp(req)
 	const stateToken = db.tokens.createState({
 		sessionId,
@@ -426,7 +683,8 @@ async function handleCallback (req, res, query) {
 		return
 	}
 	const provider = getProvider(oauthState.provider || 'google')
-	const callbackUrl = `${appUrl.replace(/\/$/, '')}/oauth/callback`
+	const base = getBaseUrl(req)
+	const callbackUrl = `${base}/oauth/callback`
 	let exchanged
 	try {
 		exchanged = await provider.exchangeCode({ code, callbackUrl })
@@ -461,7 +719,11 @@ async function handleCallback (req, res, query) {
 		})
 		res.statusCode = 200
 		res.setHeader('content-type', 'text/html; charset=utf-8')
-		res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center;"><h2>${provider.name} App Re-authenticated</h2><p>${provider.name} app credentials have been successfully updated in place. Linked agent sessions will resume automatically.</p></body></html>`)
+		res.end(renderCardPage(
+			`${provider.name} Re-authenticated`,
+			`${escapeHtml(provider.name)} credentials updated`,
+			`<p class="subtitle">Linked sessions will resume automatically.</p>`
+		))
 		return
 	}
 	let targetUserId = null
@@ -499,7 +761,24 @@ async function handleCallback (req, res, query) {
 	}
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/html; charset=utf-8')
-	res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;text-align:center;"><h2>${provider.name} Account Connected!</h2><p>Connected ${provider.name} account <strong>${email}</strong>.</p><p>You can close this window and return to your MCP agent.</p></body></html>`)
+	res.end(renderCardPage(
+		`${provider.name} Connected`,
+		`Connected <strong>${escapeHtml(email)}</strong>`,
+		`<p class="subtitle">You can close this window and return to your agent.</p>`
+	))
+}
+
+function parseTokenParams (rawBody) {
+	if (!rawBody) return {}
+	const trimmed = rawBody.trim()
+	if (trimmed.startsWith('{')) {
+		try {
+			return JSON.parse(trimmed)
+		} catch {
+			return {}
+		}
+	}
+	return Object.fromEntries(new URLSearchParams(rawBody))
 }
 
 async function handleToken (req, res) {
@@ -509,10 +788,10 @@ async function handleToken (req, res) {
 		return
 	}
 	const rawBody = await getBody(req)
-	const params = new URLSearchParams(rawBody)
-	const code = params.get('code')
-	const redirectUri = params.get('redirect_uri')
-	const codeVerifier = params.get('code_verifier')
+	const params = parseTokenParams(rawBody)
+	const code = params.code
+	const redirectUri = params.redirect_uri
+	const codeVerifier = params.code_verifier
 	if (!code) {
 		console.warn('[oauth] Token exchange failed: Missing code')
 		res.statusCode = 400
@@ -567,11 +846,14 @@ async function handleToken (req, res) {
 		return
 	}
 	res.statusCode = 200
+	res.setHeader('cache-control', 'no-store')
+	res.setHeader('pragma', 'no-cache')
 	res.setHeader('content-type', 'application/json; charset=utf-8')
 	res.end(JSON.stringify({
 		access_token: session.token,
 		token_type: 'Bearer',
-		expires_in: 30 * 24 * 60 * 60
+		expires_in: 30 * 24 * 60 * 60,
+		scope: 'mcp'
 	}))
 }
 
@@ -614,8 +896,6 @@ async function handleRevoke (req, res) {
 }
 
 const routes = {
-	'/.well-known/oauth-protected-resource': (req, res) => handleProtectedResourceMetadata(req, res),
-	'/.well-known/oauth-authorization-server': (req, res) => handleAuthServerMetadata(req, res),
 	'/oauth/register': (req, res) => handleRegister(req, res),
 	'/oauth/authorize': (req, res, { query }) => handleAuthorize(req, res, query),
 	'/oauth/authorize/consent': (req, res) => handleAuthorizeConsent(req, res),
@@ -626,6 +906,19 @@ const routes = {
 }
 
 async function handleOauth (req, res, { pathname, query }) {
+	if (pathname === '/.well-known/oauth-protected-resource' || pathname.startsWith('/.well-known/oauth-protected-resource/')) {
+		await handleProtectedResourceMetadata(req, res)
+		return
+	}
+	if (
+		pathname === '/.well-known/oauth-authorization-server' ||
+		pathname.startsWith('/.well-known/oauth-authorization-server/') ||
+		pathname === '/.well-known/openid-configuration' ||
+		pathname.startsWith('/.well-known/openid-configuration/')
+	) {
+		await handleAuthServerMetadata(req, res)
+		return
+	}
 	const handler = routes[pathname]
 	if (handler) {
 		await handler(req, res, { query })

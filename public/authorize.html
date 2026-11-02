@@ -32,7 +32,7 @@
 
 			@media (min-width: 520px) {
 				.view {
-					max-width: 440px;
+					max-width: 480px;
 				}
 			}
 
@@ -40,7 +40,7 @@
 				font-size: 1.5rem;
 				text-align: center;
 				margin-top: 0.85rem;
-				margin-bottom: 0.5rem;
+				margin-bottom: 0.85rem;
 			}
 
 			.subtitle {
@@ -48,7 +48,7 @@
 				font-size: 0.95rem;
 				line-height: 1.4;
 				text-align: center;
-				margin: 0 0 1.5rem;
+				margin: 0 0 1.25rem;
 			}
 
 			.form-group {
@@ -74,10 +74,6 @@
 
 			.admin-section {
 				margin-bottom: 1.5rem;
-				padding: 12px;
-				background: #f8fafc;
-				border: 1px solid #e2e8f0;
-				border-radius: 6px;
 			}
 
 			.admin-label {
@@ -87,27 +83,27 @@
 				font-size: 0.9rem;
 				font-weight: bold;
 				cursor: pointer;
-				color: #1e293b;
+				color: #333;
 			}
 
 			.admin-hint {
-				font-size: 0.78rem;
-				color: #64748b;
-				margin-top: 0.35rem;
+				font-size: 0.75rem;
+				color: #777;
+				margin-top: 0.25rem;
 				margin-left: 21px;
-				line-height: 1.35;
+				line-height: 1.4;
 			}
 
 			button[type=submit] {
 				width: 100%;
-				padding: 12px 16px;
+				padding: 11px 16px;
 				background: #000;
 				color: #fff;
 				border: none;
 				border-radius: 6px;
 				font-size: 1rem;
 				cursor: pointer;
-				font-weight: 500;
+				margin-bottom: 1.5rem;
 			}
 
 			button[type=submit]:hover {
@@ -117,8 +113,8 @@
 	</head>
 	<body class=column>
 		<div class="view column">
-			<h1 id="page-title">Generate Bearer Token</h1>
-			<p class="subtitle" id="page-subtitle">Enter your email to receive a sign-in magic link and create an MCP session token</p>
+			<h1>jump</h1>
+			<p class="subtitle" id="page-subtitle">Generate bearer token</p>
 			<form id="consent-form" method="POST" action="/oauth/authorize/consent">
 				<div id="hidden-inputs"></div>
 				<div class="form-group" id="email-group">
@@ -132,11 +128,11 @@
 				<div class="admin-section" id="admin-group">
 					<label class="admin-label">
 						<input type="checkbox" name="admin" id="admin" value="true">
-						<span>Admin Privileges</span>
+						<span>Allow session administration (admin tool)</span>
 					</label>
-					<div class="admin-hint">Allows managing other sessions and connecting upstream apps via the <code>admin</code> tool.</div>
+					<div class="admin-hint">Grant permission to manage sessions, connect upstream apps, and configure routing policies. Leave unchecked for restricted or untrusted agents.</div>
 				</div>
-				<button type="submit" id="submit-btn">Send Magic Link</button>
+				<button type="submit" id="submit-btn">Send magic link</button>
 			</form>
 		</div>
 		<script>
@@ -144,13 +140,20 @@
 
 			function init () {
 				const params = initData.params || {}
+				const clientName = initData.clientName || null
 				if (params.email) {
 					const emailEl = document.getElementById('email')
 					if (emailEl) emailEl.value = params.email
 				}
-				if (params.session_name) {
-					const nameEl = document.getElementById('session_name')
-					if (nameEl) nameEl.value = params.session_name
+				const nameEl = document.getElementById('session_name')
+				if (params.session_name && nameEl) {
+					nameEl.value = params.session_name
+				} else if (clientName && nameEl) {
+					nameEl.value = clientName
+				}
+				if (clientName) {
+					const subEl = document.getElementById('page-subtitle')
+					if (subEl) subEl.textContent = 'Authorize ' + clientName
 				}
 				if (params.admin !== undefined) {
 					const adminEl = document.getElementById('admin')

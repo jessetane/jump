@@ -5,7 +5,7 @@ import http from 'node:http'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { handleOauth } from './oauth.js'
+import { handleOauth, getBaseUrl } from './oauth.js'
 import { handleMcp } from './mcp.js'
 import { handleRest } from './rest.js'
 
@@ -14,7 +14,6 @@ export { server }
 const dirname = path.dirname(fileURLToPath(import.meta.url))
 const host = process.env.HOST || '::1'
 const port = process.env.PORT || '8080'
-const appUrl = process.env.APP_URL || 'http://localhost:8080'
 const corsOrigin = process.env.CORS_ORIGIN || '*'
 
 function resolveToken (req) {
@@ -32,7 +31,8 @@ const server = http.createServer(async (req, res) => {
 	})
 	res.setHeader('access-control-allow-origin', corsOrigin)
 	res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-	res.setHeader('access-control-allow-headers', 'authorization, content-type, mcp-session-id, x-api-key, accept')
+	res.setHeader('access-control-allow-headers', 'authorization, content-type, mcp-session-id, mcp-protocol-version, last-event-id, x-api-key, accept')
+	res.setHeader('access-control-expose-headers', 'WWW-Authenticate, Mcp-Session-Id, MCP-Protocol-Version')
 	if (req.method === 'OPTIONS') {
 		res.statusCode = 204
 		res.end()
@@ -54,10 +54,11 @@ const server = http.createServer(async (req, res) => {
 				await handleMcp(req, res, token)
 				return
 			}
+			const base = getBaseUrl(req)
 			const indexHtml = await fs.readFile(path.join(dirname, 'public/index.html'), 'utf8')
 			res.statusCode = 200
 			res.setHeader('content-type', 'text/html; charset=utf-8')
-			res.end(indexHtml.replaceAll('{{APP_URL}}', appUrl.replace(/\/$/, '')))
+			res.end(indexHtml.replaceAll('{{APP_URL}}', base))
 			return
 		}
 		if (pathname.startsWith('/api/')) {
@@ -68,7 +69,7 @@ const server = http.createServer(async (req, res) => {
 			await handleMcp(req, res, token)
 			return
 		}
-		if (pathname.startsWith('/oauth/') || pathname.startsWith('/providers/') || pathname.startsWith('/.well-known/oauth-')) {
+		if (pathname.startsWith('/oauth/') || pathname.startsWith('/providers/') || pathname.startsWith('/.well-known/')) {
 			await handleOauth(req, res, { pathname, query })
 			return
 		}
