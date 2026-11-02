@@ -3,9 +3,6 @@ import fs from 'node:fs'
 import * as users from './users.js'
 import * as tokens from './tokens.js'
 import * as links from './links.js'
-import * as identities from './identities.js'
-import * as oauthStates from './oauth-states.js'
-import * as oauthCodes from './oauth-codes.js'
 
 const dbPath = process.env.DB_PATH || './data.db'
 
@@ -23,19 +20,13 @@ for (const ext of ['', '-wal', '-shm']) {
 }
 
 users.init()
-identities.init()
 tokens.init()
 links.init()
-oauthStates.init()
-oauthCodes.init()
 tokens.pruneDormant()
 
 export {
 	sqlite,
 	users,
-	identities,
 	tokens,
-	links,
-	oauthStates,
-	oauthCodes
+	links
 }
