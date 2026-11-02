@@ -1,7 +1,7 @@
 import * as auth from './auth.js'
-import * as google from './google.js'
+import * as proxy from './proxy.js'
 
 export {
 	auth,
-	google
+	proxy
 }

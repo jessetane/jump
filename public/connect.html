@@ -3,7 +3,7 @@
 	<head>
 		<meta charset=utf-8>
 		<meta name="viewport" content="width=device-width,initial-scale=1">
-		<title>Connect Google Account - google-mcp</title>
+		<title>Connect Account - jump</title>
 		<style>
 			* {
 				box-sizing: border-box;
@@ -130,11 +130,11 @@
 		<div class="view column">
 			<h1 id="page-title">Connect Google Account</h1>
 			<p class="subtitle" id="page-subtitle">Select Google services to grant to your MCP gateway</p>
-			<form id="google-connect-form" method="POST" action="/providers/google/consent">
+			<form id="connect-form" method="POST" action="/providers/google/consent">
 				<div id="hidden-inputs"></div>
 				<div class="form-group" id="app-name-group">
 					<label for="app-name">App Name / Label (optional)</label>
-					<input type="text" id="app-name" name="app_name" placeholder="e.g. Personal Google, Work Google">
+					<input type="text" id="app-name" name="app_name" placeholder="e.g. Personal Account, Work Account">
 				</div>
 				<table id="services-table">
 					<thead>
@@ -207,83 +207,101 @@
 
 			function init () {
 				const params = initData.params || {}
+				const provider = initData.provider || { id: 'google', name: 'Google' }
+				const formEl = document.getElementById('connect-form')
+				const titleEl = document.getElementById('page-title')
+				const subtitleEl = document.getElementById('page-subtitle')
+				const submitEl = document.getElementById('submit-btn')
+				const tableEl = document.getElementById('services-table')
 				const tbody = document.getElementById('services-body')
+				document.title = `Connect ${provider.name} Account - jump`
+				if (formEl) formEl.action = `/providers/${provider.id}/consent`
 				if (params.reauth_app_id) {
-					const titleEl = document.getElementById('page-title')
-					const subtitleEl = document.getElementById('page-subtitle')
-					const submitEl = document.getElementById('submit-btn')
 					const nameGroup = document.getElementById('app-name-group')
-					if (titleEl) titleEl.textContent = 'Re-authenticate Google App'
-					if (subtitleEl) subtitleEl.textContent = 'Renew upstream Google OAuth credentials'
-					if (submitEl) submitEl.textContent = 'Re-authenticate Google Account'
+					if (titleEl) titleEl.textContent = `Re-authenticate ${provider.name} App`
+					if (subtitleEl) subtitleEl.textContent = `Renew upstream ${provider.name} OAuth credentials`
+					if (submitEl) submitEl.textContent = `Re-authenticate ${provider.name} Account`
 					if (nameGroup) nameGroup.style.display = 'none'
+				} else {
+					if (titleEl) titleEl.textContent = `Connect ${provider.name} Account`
+					if (subtitleEl) {
+						subtitleEl.textContent = provider.id === 'google'
+							? 'Select Google services to grant to your MCP gateway'
+							: `Authorize ${provider.name} access for your MCP gateway`
+					}
+					if (submitEl) submitEl.textContent = `Connect ${provider.name} Account`
 				}
 				if (params.app_name || params.name) {
 					const nameInput = document.getElementById('app-name')
 					if (nameInput) nameInput.value = params.app_name || params.name
 				}
-				for (const s of serviceList) {
-					const tr = document.createElement('tr')
-					const tdSvc = document.createElement('td')
-					tdSvc.textContent = s.name
-					const tdRead = document.createElement('td')
-					tdRead.className = 'col-check'
-					const inputRead = document.createElement('input')
-					inputRead.type = 'checkbox'
-					inputRead.name = 'services'
-					inputRead.id = 'svc_' + s.id
-					inputRead.value = s.id
-					inputRead.checked = true
-					inputRead.addEventListener('change', function () {
-						onServiceToggle(s.id)
-					})
-					tdRead.appendChild(inputRead)
-					const tdWrite = document.createElement('td')
-					tdWrite.className = 'col-check'
-					const inputWrite = document.createElement('input')
-					inputWrite.type = 'checkbox'
-					inputWrite.name = 'write'
-					inputWrite.id = 'wr_' + s.id
-					inputWrite.value = s.id
-					inputWrite.checked = true
-					inputWrite.addEventListener('change', function () {
-						updateRowState()
-					})
-					tdWrite.appendChild(inputWrite)
-					tr.appendChild(tdSvc)
-					tr.appendChild(tdRead)
-					tr.appendChild(tdWrite)
-					tbody.appendChild(tr)
-				}
-				const allRead = document.getElementById('all-read')
-				const allWrite = document.getElementById('all-write')
-				if (allRead) {
-					allRead.checked = true
-					allRead.addEventListener('click', function () {
-						const checked = allRead.checked
-						const readInputs = document.querySelectorAll('input[name="services"]')
-						for (const r of readInputs) {
-							r.checked = checked
-							const w = document.getElementById('wr_' + r.value)
-							if (w) {
-								w.disabled = !checked
-								if (!checked) w.checked = false
+				if (provider.id === 'google') {
+					for (const s of serviceList) {
+						const tr = document.createElement('tr')
+						const tdSvc = document.createElement('td')
+						tdSvc.textContent = s.name
+						const tdRead = document.createElement('td')
+						tdRead.className = 'col-check'
+						const inputRead = document.createElement('input')
+						inputRead.type = 'checkbox'
+						inputRead.name = 'services'
+						inputRead.id = 'svc_' + s.id
+						inputRead.value = s.id
+						inputRead.checked = true
+						inputRead.addEventListener('change', function () {
+							onServiceToggle(s.id)
+						})
+						tdRead.appendChild(inputRead)
+						const tdWrite = document.createElement('td')
+						tdWrite.className = 'col-check'
+						const inputWrite = document.createElement('input')
+						inputWrite.type = 'checkbox'
+						inputWrite.name = 'write'
+						inputWrite.id = 'wr_' + s.id
+						inputWrite.value = s.id
+						inputWrite.checked = true
+						inputWrite.addEventListener('change', function () {
+							updateRowState()
+						})
+						tdWrite.appendChild(inputWrite)
+						tr.appendChild(tdSvc)
+						tr.appendChild(tdRead)
+						tr.appendChild(tdWrite)
+						tbody.appendChild(tr)
+					}
+					const allRead = document.getElementById('all-read')
+					const allWrite = document.getElementById('all-write')
+					if (allRead) {
+						allRead.checked = true
+						allRead.addEventListener('click', function () {
+							const checked = allRead.checked
+							const readInputs = document.querySelectorAll('input[name="services"]')
+							for (const r of readInputs) {
+								r.checked = checked
+								const w = document.getElementById('wr_' + r.value)
+								if (w) {
+									w.disabled = !checked
+									if (!checked) w.checked = false
+								}
 							}
-						}
-						updateRowState()
-					})
-				}
-				if (allWrite) {
-					allWrite.checked = true
-					allWrite.addEventListener('click', function () {
-						const checked = allWrite.checked
-						const readInputs = document.querySelectorAll('input[name="services"]')
-						for (const r of readInputs) {
-							const w = document.getElementById('wr_' + r.value)
-							if (w && r.checked) w.checked = checked
-						}
-						updateRowState()
-					})
+							updateRowState()
+						})
+					}
+					if (allWrite) {
+						allWrite.checked = true
+						allWrite.addEventListener('click', function () {
+							const checked = allWrite.checked
+							const readInputs = document.querySelectorAll('input[name="services"]')
+							for (const r of readInputs) {
+								const w = document.getElementById('wr_' + r.value)
+								if (w && r.checked) w.checked = checked
+							}
+							updateRowState()
+						})
+					}
+					updateRowState()
+				} else if (tableEl) {
+					tableEl.style.display = 'none'
 				}
 				const hiddenContainer = document.getElementById('hidden-inputs')
 				for (const [key, value] of Object.entries(params)) {
@@ -294,7 +312,6 @@
 					input.value = value
 					hiddenContainer.appendChild(input)
 				}
-				updateRowState()
 			}
 
 			init()

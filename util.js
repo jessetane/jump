@@ -35,7 +35,7 @@ async function sendMail (opts = {}) {
 	const { to, subject, html, text } = opts
 	const apiKey = process.env.MAILGUN_API_KEY
 	const domain = process.env.MAILGUN_DOMAIN
-	const sender = process.env.MAILGUN_SENDER || `MCP Gateway <admin@${domain || 'localhost'}>`
+	const sender = process.env.MAILGUN_SENDER || `jump <admin@${domain || 'localhost'}>`
 	if (!apiKey || !domain || process.env.NODE_ENV === 'test') {
 		if (process.env.NODE_ENV !== 'test') {
 			console.log(`[mailgun:dev] To: ${to} | Subject: ${subject} | Content: ${text || html}`)

@@ -19,7 +19,8 @@ fs.rmSync(`${testDbPath}-shm`, { force: true })
 
 const { server } = await import('../index.js')
 const db = await import('../db/index.js')
-const { readResponseBody, isGoogleApiUrl } = await import('../providers/google.js')
+const { isGoogleApiUrl } = await import('../providers/google.js')
+const { readResponseBody } = await import('../api/proxy.js')
 const { executeTool } = await import('../mcp.js')
 const { isAllowedRedirectUri } = await import('../oauth.js')
 const api = await import('../api/index.js')
@@ -86,7 +87,7 @@ test('root endpoint', async () => {
 	assert.equal(res.status, 200)
 	assert.equal(res.headers.get('content-type'), 'text/html; charset=utf-8')
 	const text = await res.text()
-	assert.match(text, /google-mcp/)
+	assert.match(text, /jump/)
 	assert.match(text, /\/mcp/)
 	assert.match(text, /href="\/oauth\/authorize"/)
 })
@@ -100,13 +101,13 @@ test('mcp initialize & tools/list', async () => {
 			jsonrpc: '2.0',
 			id: 1,
 			method: 'initialize',
-			params: {}
+			params: { protocolVersion: '2025-03-26' }
 		})
 	})
 	assert.equal(initRes.status, 200)
 	const initData = await initRes.json()
-	assert.equal(initData.result.serverInfo.name, 'google-mcp')
-
+	assert.equal(initData.result.serverInfo.name, 'jump')
+	assert.equal(initData.result.protocolVersion, '2025-03-26')
 	const rootInitRes = await fetch(`http://127.0.0.1:${addr.port}/`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -119,8 +120,8 @@ test('mcp initialize & tools/list', async () => {
 	})
 	assert.equal(rootInitRes.status, 200)
 	const rootInitData = await rootInitRes.json()
-	assert.equal(rootInitData.result.serverInfo.name, 'google-mcp')
-
+	assert.equal(rootInitData.result.serverInfo.name, 'jump')
+	assert.equal(rootInitData.result.protocolVersion, '2024-11-05')
 	const notifRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -131,7 +132,6 @@ test('mcp initialize & tools/list', async () => {
 		})
 	})
 	assert.equal(notifRes.status, 202)
-
 	const listRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -264,21 +264,21 @@ test('mcp google_api tool ignores body on GET requests', async () => {
 })
 
 test('oauth state flow', async () => {
-	const state = db.oauthStates.create({
+	const state = db.tokens.createState({
 		clientRedirectUri: 'https://example.com/oauth/return',
 		clientState: 'random-state',
 		ip: '127.0.0.1'
 	})
 	assert.ok(state)
-	const consumed = db.oauthStates.consume(state)
+	const consumed = db.tokens.consumeState(state)
 	assert.equal(consumed.clientState, 'random-state')
 	assert.equal(consumed.clientRedirectUri, 'https://example.com/oauth/return')
-	assert.equal(db.oauthStates.consume(state), null)
+	assert.equal(db.tokens.consumeState(state), null)
 })
 
 test('oauth code exchange flow', async () => {
 	const { session } = createTestSession({ email: 'test@example.com', name: 'Test User' })
-	const code = db.oauthCodes.create({
+	const code = db.tokens.createAuthCode({
 		sessionId: session.id,
 		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
@@ -296,8 +296,7 @@ test('oauth code exchange flow', async () => {
 	assert.equal(mismatchRes.status, 400)
 	const mismatchData = await mismatchRes.json()
 	assert.equal(mismatchData.error, 'invalid_grant')
-
-	const code2 = db.oauthCodes.create({
+	const code2 = db.tokens.createAuthCode({
 		sessionId: session.id,
 		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
@@ -314,7 +313,7 @@ test('oauth code exchange flow', async () => {
 	const data = await res.json()
 	assert.equal(data.access_token, session.token)
 	assert.equal(data.token_type, 'Bearer')
-	assert.equal(db.oauthCodes.consume(code2), null)
+	assert.equal(db.tokens.consumeAuthCode(code2), null)
 })
 
 test('well-known oauth discovery endpoints', async () => {
@@ -338,7 +337,7 @@ test('oauth pkce flow with S256', async () => {
 	const addr = server.address()
 	const verifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
 	const challenge = createHash('sha256').update(verifier).digest('base64url')
-	const codeMissing = db.oauthCodes.create({
+	const codeMissing = db.tokens.createAuthCode({
 		sessionId: session.id,
 		clientRedirectUri: 'https://chatgpt.com/callback',
 		codeChallenge: challenge,
@@ -356,7 +355,7 @@ test('oauth pkce flow with S256', async () => {
 	assert.equal(missingVerifierRes.status, 400)
 	const missingData = await missingVerifierRes.json()
 	assert.equal(missingData.error_description, 'Missing code_verifier')
-	const codeWrong = db.oauthCodes.create({
+	const codeWrong = db.tokens.createAuthCode({
 		sessionId: session.id,
 		clientRedirectUri: 'https://chatgpt.com/callback',
 		codeChallenge: challenge,
@@ -374,7 +373,7 @@ test('oauth pkce flow with S256', async () => {
 	assert.equal(wrongVerifierRes.status, 400)
 	const wrongData = await wrongVerifierRes.json()
 	assert.equal(wrongData.error_description, 'Invalid code_verifier')
-	const codeSuccess = db.oauthCodes.create({
+	const codeSuccess = db.tokens.createAuthCode({
 		sessionId: session.id,
 		clientRedirectUri: 'https://chatgpt.com/callback',
 		codeChallenge: challenge,
@@ -408,7 +407,7 @@ test('isAllowedRedirectUri exact and wildcard matching', () => {
 	assert.equal(isAllowedRedirectUri(null), false)
 })
 
-test('oauth pkce authorize endpoint validation and state propagation', async () => {
+test('oauth pkce authorize endpoint validation and stateless rendering', async () => {
 	const addr = server.address()
 	const methodWithoutChallengeRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?code_challenge_method=S256`)
 	assert.equal(methodWithoutChallengeRes.status, 400)
@@ -432,18 +431,22 @@ test('oauth pkce authorize endpoint validation and state propagation', async () 
 	const missingPkceData = await missingPkceRes.json()
 	assert.equal(missingPkceData.error, 'invalid_request')
 	assert.match(missingPkceData.error_description, /code_challenge required/)
+	const countBefore = db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE type = 'oauth_state'").get().count
 	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
 	const authRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?redirect_uri=https://chatgpt.com/callback&state=test-state&code_challenge=${challenge}&code_challenge_method=S256`)
 	assert.equal(authRes.status, 200)
 	assert.equal(authRes.headers.get('content-type'), 'text/html; charset=utf-8')
+	const countAfter = db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE type = 'oauth_state'").get().count
+	assert.equal(countAfter, countBefore, 'GET /oauth/authorize must not write oauth_state rows')
 	const authHtml = await authRes.text()
 	assert.match(authHtml, /"redirect_uri":"https:\/\/chatgpt\.com\/callback"/)
 	assert.match(authHtml, /"state":"test-state"/)
 	assert.match(authHtml, /"code_challenge":"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"/)
 	assert.match(authHtml, /"code_challenge_method":"S256"/)
+	assert.doesNotMatch(authHtml, /consent_token/)
 })
 
-test('oauth consent html page and post consent flow', async () => {
+test('oauth consent html page, post consent, and scanner-safe two-step verify flow', async () => {
 	const addr = server.address()
 	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
 	const pageRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?redirect_uri=https://chatgpt.com/callback&state=client-state-123&code_challenge=${challenge}&code_challenge_method=S256`)
@@ -454,7 +457,6 @@ test('oauth consent html page and post consent flow', async () => {
 	assert.match(html, /action="\/oauth\/authorize\/consent"/)
 	assert.match(html, /"redirect_uri":"https:\/\/chatgpt\.com\/callback"/)
 	assert.match(html, /"state":"client-state-123"/)
-
 	const consentBody = new URLSearchParams({
 		email: 'agent@example.com',
 		redirect_uri: 'https://chatgpt.com/callback',
@@ -463,7 +465,6 @@ test('oauth consent html page and post consent flow', async () => {
 		code_challenge_method: 'S256',
 		session_name: 'Coding Agent'
 	})
-
 	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -473,22 +474,33 @@ test('oauth consent html page and post consent flow', async () => {
 	assert.equal(consentRes.status, 200)
 	const consentText = await consentRes.text()
 	assert.match(consentText, /Check your email/)
-
-	const row = db.sqlite.prepare('SELECT * FROM oauth_states WHERE email = ?').get('agent@example.com')
+	const row = db.sqlite.prepare("SELECT * FROM tokens WHERE type = 'oauth_state' AND json_extract(credentials, '$.email') = ?").get('agent@example.com')
 	assert.ok(row)
-	assert.equal(row.client_redirect_uri, 'https://chatgpt.com/callback')
-	assert.equal(row.session_name, 'Coding Agent')
-
-	const verifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${row.magic_code}`, {
+	const stateObj = db.tokens.getState(row.id)
+	assert.equal(stateObj.clientRedirectUri, 'https://chatgpt.com/callback')
+	assert.equal(stateObj.sessionName, 'Coding Agent')
+	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${stateObj.magicCode}`, {
 		redirect: 'manual'
 	})
-	assert.equal(verifyRes.status, 302)
-	const location = verifyRes.headers.get('location')
+	assert.equal(getVerifyRes.status, 200)
+	assert.equal(getVerifyRes.headers.get('content-type'), 'text/html; charset=utf-8')
+	const getVerifyHtml = await getVerifyRes.text()
+	assert.match(getVerifyHtml, /<form method="POST" action="\/oauth\/verify">/)
+	assert.ok(db.tokens.findStateByMagicCode(stateObj.magicCode), 'GET /oauth/verify must not consume magicCode')
+	const postVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ code: stateObj.magicCode }).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(postVerifyRes.status, 302)
+	const location = postVerifyRes.headers.get('location')
 	const targetUrl = new URL(location)
 	assert.equal(targetUrl.hostname, 'chatgpt.com')
 	assert.equal(targetUrl.searchParams.get('state'), 'client-state-123')
 	const code = targetUrl.searchParams.get('code')
 	assert.ok(code)
+	assert.equal(db.tokens.findStateByMagicCode(stateObj.magicCode), null, 'POST /oauth/verify must consume magicCode')
 })
 
 test('direct browser authorize without redirect_uri', async () => {
@@ -499,7 +511,6 @@ test('direct browser authorize without redirect_uri', async () => {
 	const html = await pageRes.text()
 	assert.match(html, /Generate Bearer Token/)
 	assert.match(html, /action="\/oauth\/authorize\/consent"/)
-
 	const consentBody = new URLSearchParams({
 		email: 'browser@example.com',
 		session_name: 'Browser Session'
@@ -513,14 +524,20 @@ test('direct browser authorize without redirect_uri', async () => {
 	assert.equal(consentRes.status, 200)
 	const consentText = await consentRes.text()
 	assert.match(consentText, /Check your email/)
-
-	const row = db.sqlite.prepare('SELECT * FROM oauth_states WHERE email = ?').get('browser@example.com')
+	const row = db.sqlite.prepare("SELECT * FROM tokens WHERE type = 'oauth_state' AND json_extract(credentials, '$.email') = ?").get('browser@example.com')
 	assert.ok(row)
-	assert.equal(row.session_name, 'Browser Session')
-
-	const verifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${row.magic_code}`)
-	assert.equal(verifyRes.status, 200)
-	const verifyText = await verifyRes.text()
+	const stateObj = db.tokens.getState(row.id)
+	assert.equal(stateObj.sessionName, 'Browser Session')
+	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${stateObj.magicCode}`)
+	assert.equal(getVerifyRes.status, 200)
+	assert.match(await getVerifyRes.text(), /<form method="POST" action="\/oauth\/verify">/)
+	const postVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ code: stateObj.magicCode }).toString()
+	})
+	assert.equal(postVerifyRes.status, 200)
+	const verifyText = await postVerifyRes.text()
 	assert.match(verifyText, /user: browser@example.com/)
 	assert.match(verifyText, /Authorization: Bearer/)
 })
@@ -532,7 +549,6 @@ test('google provider connect screen and consent flow', async () => {
 	const connectHtml = await connectRes.text()
 	assert.match(connectHtml, /Connect Google Account/)
 	assert.match(connectHtml, /action="\/providers\/google\/consent"/)
-
 	const consentBody = new URLSearchParams({
 		session_id: 'sess_123',
 		app_name: 'Custom Work Google'
@@ -540,7 +556,6 @@ test('google provider connect screen and consent flow', async () => {
 	consentBody.append('services', 'drive')
 	consentBody.append('services', 'calendar')
 	consentBody.append('write', 'calendar')
-
 	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -554,29 +569,17 @@ test('google provider connect screen and consent flow', async () => {
 	assert.match(targetUrl.searchParams.get('scope'), /drive\.readonly/)
 	assert.match(targetUrl.searchParams.get('scope'), /calendar\b/)
 	assert.doesNotMatch(targetUrl.searchParams.get('scope'), /gmail/)
-
 	const stateParam = targetUrl.searchParams.get('state')
 	assert.ok(stateParam)
-	const stateRow = db.oauthStates.consume(stateParam)
+	const stateRow = db.tokens.consumeState(stateParam)
 	assert.equal(stateRow.sessionId, 'sess_123')
 	assert.equal(stateRow.sessionName, 'Custom Work Google')
 	assert.equal(stateRow.provider, 'google')
 })
 
-test('authorize page with policy and service query params', async () => {
+test('provider connect page with repeated query parameters', async () => {
 	const addr = server.address()
-	const policyJson = JSON.stringify([{ action: 'allow', path: '/drive/**' }])
-	const res = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?services=drive,calendar&write=calendar&policy=${encodeURIComponent(policyJson)}`)
-	assert.equal(res.status, 200)
-	const html = await res.text()
-	assert.match(html, /"policy":/)
-	assert.match(html, /"services":"drive,calendar"/)
-	assert.match(html, /"write":"calendar"/)
-})
-
-test('authorize page with repeated query parameters', async () => {
-	const addr = server.address()
-	const res = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?services=drive&services=calendar&write=drive&write=calendar`)
+	const res = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?services=drive&services=calendar&write=drive&write=calendar`)
 	assert.equal(res.status, 200)
 	const html = await res.text()
 	assert.match(html, /"services":"drive,calendar"/)
@@ -691,7 +694,6 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 		body: new URLSearchParams({ token: 'nonexistent-token' }).toString()
 	})
 	assert.equal(unknownRes.status, 200)
-
 	const { session } = createTestSession({ email: 'revoke-endpoint@example.com' })
 	assert.ok(db.tokens.get(session.id))
 	const revokeRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
@@ -701,7 +703,6 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 	})
 	assert.equal(revokeRes.status, 200)
 	assert.equal(db.tokens.get(session.id), null)
-
 	const { session: sessionJson } = createTestSession({ email: 'revoke-json@example.com' })
 	assert.ok(db.tokens.get(sessionJson.id))
 	const revokeJsonRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
@@ -739,7 +740,6 @@ test('mcp auth whoami, list, and revoke', async () => {
 	})
 	db.links.create({ sessionTokenId: session1.id, appTokenId: app.id })
 	db.links.create({ sessionTokenId: session2.id, appTokenId: app.id })
-
 	const listResult = await executeTool('admin', { action: 'list' }, session1.token)
 	assert.equal(listResult.isError, undefined)
 	const listParsed = JSON.parse(listResult.content[0].text)
@@ -752,7 +752,6 @@ test('mcp auth whoami, list, and revoke', async () => {
 	assert.equal(other.id, session2.id)
 	assert.equal(other.ip, '10.0.0.5')
 	assert.equal(other.ua, 'ChatGPT/2.0')
-
 	const revokeOtherResult = await executeTool('admin', { action: 'revoke', allOthers: true }, session1.token)
 	assert.equal(revokeOtherResult.isError, undefined)
 	const revokeOtherParsed = JSON.parse(revokeOtherResult.content[0].text)
@@ -760,7 +759,6 @@ test('mcp auth whoami, list, and revoke', async () => {
 	assert.equal(revokeOtherParsed.count, 1)
 	assert.equal(db.tokens.get(session2.id), null)
 	assert.ok(db.tokens.get(session1.id))
-
 	const revokeCurrentResult = await executeTool('admin', { action: 'revoke' }, session1.token)
 	assert.equal(revokeCurrentResult.isError, undefined)
 	const revokeCurrentParsed = JSON.parse(revokeCurrentResult.content[0].text)
@@ -837,49 +835,41 @@ test('evaluatePolicy sequential evaluation for calendar allowlist (default deny)
 			path: '/calendar/v3/calendars/team-schedule@group.calendar.google.com/events/**'
 		}
 	]
-
 	const allowedGetCal = evaluatePolicy(policy, {
 		url: 'https://www.googleapis.com/calendar/v3/calendars/team-schedule@group.calendar.google.com',
 		method: 'GET'
 	})
 	assert.equal(allowedGetCal.allowed, true)
-
 	const deniedDeleteCal = evaluatePolicy(policy, {
 		url: 'https://www.googleapis.com/calendar/v3/calendars/team-schedule@group.calendar.google.com',
 		method: 'DELETE'
 	})
 	assert.equal(deniedDeleteCal.allowed, false)
-
 	const allowedGetEvents = evaluatePolicy(policy, {
 		url: '/calendar/v3/calendars/team-schedule@group.calendar.google.com/events',
 		method: 'GET'
 	})
 	assert.equal(allowedGetEvents.allowed, true)
-
 	const allowedPostEvents = evaluatePolicy(policy, {
 		url: '/calendar/v3/calendars/team-schedule@group.calendar.google.com/events',
 		method: 'POST'
 	})
 	assert.equal(allowedPostEvents.allowed, true)
-
 	const allowedDeleteEvents = evaluatePolicy(policy, {
 		url: '/calendar/v3/calendars/team-schedule@group.calendar.google.com/events/evt123',
 		method: 'DELETE'
 	})
 	assert.equal(allowedDeleteEvents.allowed, true)
-
 	const deniedOtherCal = evaluatePolicy(policy, {
 		url: '/calendar/v3/calendars/other-team@group.calendar.google.com/events',
 		method: 'GET'
 	})
 	assert.equal(deniedOtherCal.allowed, false)
-
 	const allowedEncodedEvents = evaluatePolicy(policy, {
 		url: '/calendar/v3/calendars/team-schedule%40group.calendar.google.com/events',
 		method: 'GET'
 	})
 	assert.equal(allowedEncodedEvents.allowed, true)
-
 	const deniedEncodedOtherCal = evaluatePolicy(policy, {
 		url: '/calendar/v3/calendars/other-team%40group.calendar.google.com/events',
 		method: 'GET'
@@ -887,20 +877,19 @@ test('evaluatePolicy sequential evaluation for calendar allowlist (default deny)
 	assert.equal(deniedEncodedOtherCal.allowed, false)
 })
 
-test('evaluatePolicy matches relative paths and origin-scoped rules', () => {
+test('evaluatePolicy matches relative paths and origin-scoped rules without google default', () => {
 	const relPolicy = [
 		{ action: 'allow', path: 'calendar/**' }
 	]
 	assert.equal(evaluatePolicy(relPolicy, { url: '/drive/v3/files/123', method: 'GET' }).allowed, false)
 	assert.equal(evaluatePolicy(relPolicy, { url: '/calendar/v3/calendars', method: 'GET' }).allowed, true)
-
 	const originPolicy = [
 		{ action: 'allow', origin: 'https://sheets.googleapis.com', path: '/v4/spreadsheets/**' }
 	]
 	assert.equal(evaluatePolicy(originPolicy, { url: 'https://sheets.googleapis.com/v4/spreadsheets/123', method: 'GET' }).allowed, true)
 	assert.equal(evaluatePolicy(originPolicy, { url: 'https://docs.googleapis.com/v4/spreadsheets/123', method: 'GET' }).allowed, false)
 	assert.equal(evaluatePolicy(originPolicy, { url: 'https://www.googleapis.com/drive/v3/files', method: 'GET' }).allowed, false)
-
+	assert.equal(evaluatePolicy([{ action: 'allow', origin: 'https://www.googleapis.com', path: '/drive/**' }], { url: '/drive/v3/files', method: 'GET' }).allowed, false, 'Bare path without baseUrl must not default to googleapis.com')
 	const traversalResult = evaluatePolicy(originPolicy, { url: 'https://sheets.googleapis.com/v4/spreadsheets/public/%2e%2e/secret', method: 'GET' })
 	assert.equal(traversalResult.allowed, false)
 	assert.match(traversalResult.reason, /path traversal/i)
@@ -930,18 +919,15 @@ test('executeTool google_api enforces link policy and auth tools decode policy',
 		admin: true,
 		policy: policyObj
 	})
-
 	const statusRes = await executeTool('admin', { action: 'whoami' }, session.token)
 	assert.equal(statusRes.isError, undefined)
 	const statusParsed = JSON.parse(statusRes.content[0].text)
 	assert.deepEqual(statusParsed.session.apps[0].policy, policyObj)
-
 	const listRes = await executeTool('admin', { action: 'list' }, session.token)
 	assert.equal(listRes.isError, undefined)
 	const listParsed = JSON.parse(listRes.content[0].text)
 	const foundSession = listParsed.sessions.find(s => s.id === session.id)
 	assert.deepEqual(foundSession.apps[0].policy, policyObj)
-
 	const deniedDeleteRes = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/calendar/v3/calendars/work/events/123',
 		method: 'DELETE'
@@ -949,7 +935,6 @@ test('executeTool google_api enforces link policy and auth tools decode policy',
 	assert.equal(deniedDeleteRes.isError, true)
 	assert.match(deniedDeleteRes.content[0].text, /Policy violation/)
 	assert.match(deniedDeleteRes.content[0].text, /Deletions are forbidden/)
-
 	const deniedPathRes = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/calendar/v3/calendars/personal/events',
 		method: 'GET'
@@ -957,56 +942,6 @@ test('executeTool google_api enforces link policy and auth tools decode policy',
 	assert.equal(deniedPathRes.isError, true)
 	assert.match(deniedPathRes.content[0].text, /Policy violation/)
 	assert.match(deniedPathRes.content[0].text, /did not match any allow rule/)
-})
-
-test('oauth consent flow with policy', async () => {
-	const addr = server.address()
-	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
-	const policyStr = JSON.stringify([
-		{ action: 'deny', methods: ['DELETE'] },
-		{ action: 'allow', path: '/calendar/v3/calendars/my-cal/**' }
-	])
-	const consentBody = new URLSearchParams({
-		email: 'policy-test@example.com',
-		redirect_uri: 'https://chatgpt.com/callback',
-		state: 'client-state-policy',
-		code_challenge: challenge,
-		code_challenge_method: 'S256',
-		policy: policyStr
-	})
-	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: consentBody.toString(),
-		redirect: 'manual'
-	})
-	assert.equal(consentRes.status, 200)
-	const row = db.sqlite.prepare('SELECT * FROM oauth_states WHERE email = ?').get('policy-test@example.com')
-	assert.ok(row)
-	assert.equal(row.policy, policyStr)
-})
-
-test('oauth consent flow rejects invalid json policy', async () => {
-	const addr = server.address()
-	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
-	const consentBody = new URLSearchParams({
-		email: 'policy-invalid@example.com',
-		redirect_uri: 'https://chatgpt.com/callback',
-		state: 'client-state-policy',
-		code_challenge: challenge,
-		code_challenge_method: 'S256',
-		policy: '{ invalid-json'
-	})
-
-	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: consentBody.toString()
-	})
-	assert.equal(consentRes.status, 400)
-	const data = await consentRes.json()
-	assert.equal(data.error, 'invalid_request')
-	assert.match(data.error_description, /Invalid JSON policy/)
 })
 
 test('validatePolicy validates schema and fails fast on errors', () => {
@@ -1058,29 +993,6 @@ test('validatePolicy validates schema and fails fast on errors', () => {
 	assert.equal(validatePolicy([{ action: 'allow', origin: 'https://sheets.googleapis.com/' }]).valid, true)
 })
 
-test('oauth consent flow rejects invalid schema policy', async () => {
-	const addr = server.address()
-	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
-	const consentBody = new URLSearchParams({
-		email: 'policy-schema-invalid@example.com',
-		redirect_uri: 'https://chatgpt.com/callback',
-		state: 'client-state-policy-invalid',
-		code_challenge: challenge,
-		code_challenge_method: 'S256',
-		policy: JSON.stringify([{ action: 'allow', method: 'GET' }])
-	})
-
-	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: consentBody.toString()
-	})
-	assert.equal(consentRes.status, 400)
-	const data = await consentRes.json()
-	assert.equal(data.error, 'invalid_request')
-	assert.match(data.error_description, /unknown property "method"/)
-})
-
 test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	const addr = server.address()
 	const unauthRes = await fetch(`http://127.0.0.1:${addr.port}/api/whoami`)
@@ -1088,10 +1000,8 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	const unauthData = await unauthRes.json()
 	assert.equal(unauthData.authenticated, false)
 	assert.match(unauthData.signInUrl, /\/oauth\/authorize/)
-
 	const unauthSessions = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`)
 	assert.equal(unauthSessions.status, 401)
-
 	const user = db.users.upsert({ email: 'rest-test@example.com' })
 	const session1 = db.tokens.create({
 		userId: user.id,
@@ -1113,7 +1023,6 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	})
 	db.links.create({ sessionTokenId: session1.id, appTokenId: app.id })
 	db.links.create({ sessionTokenId: session2.id, appTokenId: app.id })
-
 	const whoamiRes = await fetch(`http://127.0.0.1:${addr.port}/api/whoami`, {
 		headers: { authorization: `Bearer ${session1.token}` }
 	})
@@ -1123,14 +1032,12 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	assert.equal(whoamiData.user.id, user.id)
 	assert.equal(whoamiData.user.email, 'rest-test@example.com')
 	assert.equal(whoamiData.session.id, session1.id)
-
 	const listRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
 		headers: { authorization: `Bearer ${session1.token}` }
 	})
 	assert.equal(listRes.status, 200)
 	const listData = await listRes.json()
 	assert.equal(listData.sessions.length, 2)
-
 	const getRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${session2.id}`, {
 		headers: { authorization: `Bearer ${session1.token}` }
 	})
@@ -1138,7 +1045,15 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	const getData = await getRes.json()
 	assert.equal(getData.session.id, session2.id)
 	assert.equal(getData.session.token, undefined)
-
+	const invalidJsonRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${session1.token}`,
+			'content-type': 'application/json'
+		},
+		body: '{bad-json'
+	})
+	assert.equal(invalidJsonRes.status, 400)
 	const delSpecificRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${session2.id}`, {
 		method: 'DELETE',
 		headers: { authorization: `Bearer ${session1.token}` }
@@ -1147,7 +1062,6 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	const delData = await delSpecificRes.json()
 	assert.equal(delData.revoked, true)
 	assert.equal(db.tokens.get(session2.id), null)
-
 	const delAllRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
 		method: 'DELETE',
 		headers: { authorization: `Bearer ${session1.token}` }
@@ -1165,7 +1079,6 @@ test('mcp admin tool with whoami and get actions', async () => {
 	assert.equal(parsedWhoami.user.id, user.id)
 	assert.equal(parsedWhoami.user.email, 'mcp-whoami@example.com')
 	assert.equal(parsedWhoami.session.id, session.id)
-
 	const getResult = await executeTool('admin', { action: 'get', sessionId: session.id }, session.token)
 	assert.equal(getResult.isError, undefined)
 	const parsedGet = JSON.parse(getResult.content[0].text)
@@ -1180,10 +1093,8 @@ test('transparent rest proxy /api/google/*', async () => {
 		headers: { authorization: `Bearer ${session.token}` }
 	})
 	assert.equal(notFoundRes.status, 404)
-
 	const unauthRes = await fetch(`http://127.0.0.1:${addr.port}/api/google/drive/v3/files`)
 	assert.equal(unauthRes.status, 401)
-
 	const forbiddenDomainRes = await fetch(`http://127.0.0.1:${addr.port}/api/google/https://evil.com/leak`, {
 		headers: { authorization: `Bearer ${session.token}` }
 	})
@@ -1212,7 +1123,6 @@ test('mcp tools/list filtering based on session admin status', async () => {
 	})
 	db.links.create({ sessionTokenId: adminSession.id, appTokenId: app.id })
 	db.links.create({ sessionTokenId: workerSession.id, appTokenId: app.id })
-
 	const adminRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: {
@@ -1229,7 +1139,6 @@ test('mcp tools/list filtering based on session admin status', async () => {
 	assert.equal(adminRes.status, 200)
 	const adminData = await adminRes.json()
 	assert.deepEqual(adminData.result.tools.map(t => t.name), ['admin', 'google_api'])
-
 	const workerRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: {
@@ -1260,36 +1169,29 @@ test('non-admin session auth restrictions and self-management', async () => {
 		provider: 'self',
 		admin: 0
 	})
-
 	const whoamiResult = await executeTool('admin', { action: 'whoami' }, session1.token)
 	assert.equal(whoamiResult.isError, undefined)
 	const whoamiParsed = JSON.parse(whoamiResult.content[0].text)
 	assert.equal(whoamiParsed.authenticated, true)
 	assert.equal(whoamiParsed.session.admin, false)
-
 	const listResult = await executeTool('admin', { action: 'list' }, session1.token)
 	assert.equal(listResult.isError, true)
 	assert.match(listResult.content[0].text, /requires admin privileges/)
-
 	const getOtherResult = await executeTool('admin', { action: 'get', sessionId: session2.id }, session1.token)
 	assert.equal(getOtherResult.isError, true)
 	assert.match(getOtherResult.content[0].text, /requires admin privileges/)
-
 	const getSelfResult = await executeTool('admin', { action: 'get', sessionId: session1.id }, session1.token)
 	assert.equal(getSelfResult.isError, undefined)
 	const getSelfParsed = JSON.parse(getSelfResult.content[0].text)
 	assert.equal(getSelfParsed.session.id, session1.id)
-
 	const revokeOthersResult = await executeTool('admin', { action: 'revoke', allOthers: true }, session1.token)
 	assert.equal(revokeOthersResult.isError, true)
 	assert.match(revokeOthersResult.content[0].text, /requires admin privileges/)
 	assert.ok(db.tokens.get(session2.id))
-
 	const revokeOtherIdResult = await executeTool('admin', { action: 'revoke', sessionId: session2.id }, session1.token)
 	assert.equal(revokeOtherIdResult.isError, true)
 	assert.match(revokeOtherIdResult.content[0].text, /requires admin privileges/)
 	assert.ok(db.tokens.get(session2.id))
-
 	const revokeSelfResult = await executeTool('admin', { action: 'revoke', sessionId: session1.id }, session1.token)
 	assert.equal(revokeSelfResult.isError, undefined)
 	assert.equal(db.tokens.get(session1.id), null)
@@ -1299,7 +1201,6 @@ test('non-admin session auth restrictions and self-management', async () => {
 test('oauth consent flow with admin parameter', async () => {
 	const addr = server.address()
 	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
-
 	const consentAdmin = new URLSearchParams({
 		email: 'admin-param@example.com',
 		redirect_uri: 'https://chatgpt.com/callback',
@@ -1315,10 +1216,9 @@ test('oauth consent flow with admin parameter', async () => {
 		redirect: 'manual'
 	})
 	assert.equal(consentAdminRes.status, 200)
-	const rowAdmin = db.sqlite.prepare('SELECT * FROM oauth_states WHERE email = ?').get('admin-param@example.com')
+	const rowAdmin = db.sqlite.prepare("SELECT * FROM tokens WHERE type = 'oauth_state' AND json_extract(credentials, '$.email') = ?").get('admin-param@example.com')
 	assert.ok(rowAdmin)
 	assert.equal(rowAdmin.admin, 1)
-
 	const consentNoAdmin = new URLSearchParams({
 		email: 'no-admin-param@example.com',
 		redirect_uri: 'https://chatgpt.com/callback',
@@ -1333,7 +1233,7 @@ test('oauth consent flow with admin parameter', async () => {
 		redirect: 'manual'
 	})
 	assert.equal(consentNoAdminRes.status, 200)
-	const rowNoAdmin = db.sqlite.prepare('SELECT * FROM oauth_states WHERE email = ?').get('no-admin-param@example.com')
+	const rowNoAdmin = db.sqlite.prepare("SELECT * FROM tokens WHERE type = 'oauth_state' AND json_extract(credentials, '$.email') = ?").get('no-admin-param@example.com')
 	assert.ok(rowNoAdmin)
 	assert.equal(rowNoAdmin.admin, 0)
 })
@@ -1341,7 +1241,7 @@ test('oauth consent flow with admin parameter', async () => {
 test('magic link admin verification flow (/oauth/verify)', async () => {
 	const addr = server.address()
 	const magicCode = 'test-magic-code-123'
-	db.oauthStates.create({
+	db.tokens.createState({
 		email: 'magic-admin@example.com',
 		sessionName: 'Admin Magic Session',
 		admin: 1,
@@ -1350,8 +1250,14 @@ test('magic link admin verification flow (/oauth/verify)', async () => {
 		magicCode,
 		magicExpiresAt: Date.now() + 600000
 	})
-
-	const verifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${magicCode}`, {
+	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${magicCode}`, {
+		redirect: 'manual'
+	})
+	assert.equal(getVerifyRes.status, 200)
+	const verifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ code: magicCode }).toString(),
 		redirect: 'manual'
 	})
 	assert.equal(verifyRes.status, 302)
@@ -1362,7 +1268,6 @@ test('magic link admin verification flow (/oauth/verify)', async () => {
 	assert.equal(targetUrl.searchParams.get('state'), 'magic-state-abc')
 	const authCode = targetUrl.searchParams.get('code')
 	assert.ok(authCode)
-
 	const tokenRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -1375,7 +1280,6 @@ test('magic link admin verification flow (/oauth/verify)', async () => {
 	assert.equal(tokenRes.status, 200)
 	const tokenData = await tokenRes.json()
 	assert.ok(tokenData.access_token)
-
 	const createdSession = db.tokens.getByToken(tokenData.access_token)
 	assert.equal(createdSession.admin, true)
 	assert.equal(createdSession.name, 'Admin Magic Session')
@@ -1402,9 +1306,7 @@ test('30-day dormancy pruning scopes only provider = self', () => {
 	})
 	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, dormantSession.id)
 	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, upstreamApp.id)
-
 	db.tokens.pruneDormant(30 * 24 * 60 * 60 * 1000)
-
 	assert.equal(db.tokens.get(dormantSession.id), null)
 	assert.ok(db.tokens.get(activeSession.id))
 	assert.ok(db.tokens.get(upstreamApp.id), 'Upstream apps must not be pruned by dormancy')
@@ -1424,21 +1326,29 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 		name: 'Main Google',
 		expiresAt: Date.now() + 3600000
 	})
-
+	const missingBaseRes = await executeTool('admin', {
+		action: 'connect_app',
+		provider: 'stripe',
+		name: 'Stripe Missing Base',
+		apiKey: 'sk_test_12345'
+	}, adminSession.token)
+	assert.equal(missingBaseRes.isError, true)
+	assert.match(missingBaseRes.content[0].text, /Valid https:\/\/ baseUrl is required/)
 	const connectRes = await executeTool('admin', {
 		action: 'connect_app',
 		provider: 'stripe',
 		name: 'Stripe Prod',
 		account: 'acct_stripe_prod_123',
-		apiKey: 'sk_test_12345'
+		apiKey: 'sk_test_12345',
+		baseUrl: 'https://api.stripe.com/'
 	}, adminSession.token)
 	assert.equal(connectRes.isError, undefined)
 	const connectData = JSON.parse(connectRes.content[0].text)
 	assert.equal(connectData.connected, true)
 	assert.equal(connectData.app.provider, 'stripe')
 	assert.equal(connectData.app.account, 'acct_stripe_prod_123')
+	assert.equal(connectData.app.baseUrl, 'https://api.stripe.com')
 	const stripeAppId = connectData.app.id
-
 	const reauthRes = await executeTool('admin', {
 		action: 'connect_app',
 		appId: googleApp.id
@@ -1447,12 +1357,10 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	const reauthData = JSON.parse(reauthRes.content[0].text)
 	assert.equal(reauthData.actionRequired, 'oauth_flow')
 	assert.ok(reauthData.connectUrl.includes(`reauth_app_id=${googleApp.id}`))
-
 	const appsRes = await executeTool('admin', { action: 'list_apps' }, adminSession.token)
 	assert.equal(appsRes.isError, undefined)
 	const appsData = JSON.parse(appsRes.content[0].text)
 	assert.equal(appsData.apps.length, 2)
-
 	const newSessRes = await executeTool('admin', {
 		action: 'create_session',
 		name: 'Chef Agent',
@@ -1464,7 +1372,6 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(newSessData.created, true)
 	assert.equal(newSessData.session.name, 'Chef Agent')
 	const chefSessionId = newSessData.session.id
-
 	const linkRes = await executeTool('admin', {
 		action: 'link_app',
 		sessionId: chefSessionId,
@@ -1474,7 +1381,6 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(linkRes.isError, undefined)
 	const linkData = JSON.parse(linkRes.content[0].text)
 	assert.equal(linkData.linked, true)
-
 	const unlinkRes = await executeTool('admin', {
 		action: 'unlink_app',
 		sessionId: chefSessionId,
@@ -1483,7 +1389,6 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(unlinkRes.isError, undefined)
 	const unlinkData = JSON.parse(unlinkRes.content[0].text)
 	assert.equal(unlinkData.unlinked, true)
-
 	const disconnectRes = await executeTool('admin', {
 		action: 'disconnect_app',
 		appId: stripeAppId,
@@ -1519,7 +1424,6 @@ test('multi-account disambiguation in google_api tool', async () => {
 	})
 	db.links.create({ sessionTokenId: session.id, appTokenId: personalApp.id, policy: [{ action: 'allow', path: '/drive/**' }] })
 	db.links.create({ sessionTokenId: session.id, appTokenId: workApp.id, policy: [{ action: 'allow', path: '/calendar/**' }] })
-
 	const resWithAppId = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
 		appId: workApp.id
@@ -1528,12 +1432,19 @@ test('multi-account disambiguation in google_api tool', async () => {
 	assert.doesNotMatch(resWithAppId.content[0].text, /Policy violation/)
 })
 
-test('in-place upstream re-auth flow updates app credentials without changing session token', async () => {
+test('in-place upstream re-auth flow enforces ownership and updates app credentials without changing session token', async () => {
+	const addr = server.address()
 	const user = db.users.upsert({ email: 'reauth@example.com' })
+	const otherUser = db.users.upsert({ email: 'attacker@example.com' })
 	const session = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
 		name: 'Persistent Agent Session'
+	})
+	const attackerSession = db.tokens.create({
+		userId: otherUser.id,
+		provider: 'self',
+		name: 'Attacker Session'
 	})
 	const app = db.tokens.create({
 		userId: user.id,
@@ -1544,20 +1455,41 @@ test('in-place upstream re-auth flow updates app credentials without changing se
 		expiresAt: Date.now() - 1000
 	})
 	db.links.create({ sessionTokenId: session.id, appTokenId: app.id })
-
-	const initialSessionToken = session.token
-	const state = db.oauthStates.create({
-		userId: user.id,
-		reauthAppId: app.id,
-		clientRedirectUri: 'https://chatgpt.com/callback'
+	const crossUserConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			session_id: attackerSession.id,
+			reauth_app_id: app.id
+		}).toString(),
+		redirect: 'manual'
 	})
-
+	assert.equal(crossUserConsentRes.status, 403)
+	const noSessionConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			reauth_app_id: app.id
+		}).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(noSessionConsentRes.status, 403)
+	const validConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			session_id: session.id,
+			reauth_app_id: app.id
+		}).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(validConsentRes.status, 302)
+	const initialSessionToken = session.token
 	const updatedCreds = { accessToken: 'ya29.new-fresh-token', refreshToken: '1//new-refresh' }
 	db.tokens.updateCredentials(app.id, {
 		credentials: updatedCreds,
 		expiresAt: Date.now() + 3600000
 	})
-
 	const reloadedApp = db.tokens.get(app.id)
 	assert.equal(reloadedApp.credentials.accessToken, 'ya29.new-fresh-token')
 	const reloadedSession = db.tokens.get(session.id)
@@ -1572,7 +1504,6 @@ test('rest api /api/apps and /api/links endpoints', async () => {
 		provider: 'self',
 		admin: 1
 	})
-
 	const postAppRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
 		method: 'POST',
 		headers: {
@@ -1582,21 +1513,20 @@ test('rest api /api/apps and /api/links endpoints', async () => {
 		body: JSON.stringify({
 			provider: 'anthropic',
 			name: 'Anthropic Key',
-			apiKey: 'sk-ant-12345'
+			apiKey: 'sk-ant-12345',
+			baseUrl: 'https://api.anthropic.com'
 		})
 	})
 	assert.equal(postAppRes.status, 201)
 	const postAppData = await postAppRes.json()
 	assert.equal(postAppData.connected, true)
 	const newAppId = postAppData.app.id
-
 	const getAppsRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
 		headers: { authorization: `Bearer ${adminSession.token}` }
 	})
 	assert.equal(getAppsRes.status, 200)
 	const getAppsData = await getAppsRes.json()
 	assert.ok(getAppsData.apps.some(a => a.id === newAppId))
-
 	const postLinkRes = await fetch(`http://127.0.0.1:${addr.port}/api/links`, {
 		method: 'POST',
 		headers: {
@@ -1612,7 +1542,6 @@ test('rest api /api/apps and /api/links endpoints', async () => {
 	assert.equal(postLinkRes.status, 201)
 	const postLinkData = await postLinkRes.json()
 	assert.equal(postLinkData.linked, true)
-
 	const deleteLinkRes = await fetch(`http://127.0.0.1:${addr.port}/api/links?sessionId=${adminSession.id}&appId=${newAppId}`, {
 		method: 'DELETE',
 		headers: { authorization: `Bearer ${adminSession.token}` }
@@ -1620,7 +1549,6 @@ test('rest api /api/apps and /api/links endpoints', async () => {
 	assert.equal(deleteLinkRes.status, 200)
 	const deleteLinkData = await deleteLinkRes.json()
 	assert.equal(deleteLinkData.unlinked, true)
-
 	const deleteAppRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${newAppId}?revoke=false`, {
 		method: 'DELETE',
 		headers: { authorization: `Bearer ${adminSession.token}` }
@@ -1643,29 +1571,25 @@ test('admin update_email action', async () => {
 		provider: 'self',
 		admin: 0
 	})
-	const user2 = db.users.upsert({ email: 'taken@example.com', name: 'Other User' })
-
+	db.users.upsert({ email: 'taken@example.com', name: 'Other User' })
 	const nonAdminRes = await executeTool('admin', {
 		action: 'update_email',
 		email: 'new-email@example.com'
 	}, workerSession.token)
 	assert.equal(nonAdminRes.isError, true)
 	assert.match(nonAdminRes.content[0].text, /requires admin privileges/)
-
 	const invalidEmailRes = await executeTool('admin', {
 		action: 'update_email',
 		email: 'not-an-email'
 	}, adminSession.token)
 	assert.equal(invalidEmailRes.isError, true)
 	assert.match(invalidEmailRes.content[0].text, /Valid new email address is required/)
-
 	const conflictRes = await executeTool('admin', {
 		action: 'update_email',
 		email: 'taken@example.com'
 	}, adminSession.token)
 	assert.equal(conflictRes.isError, true)
 	assert.match(conflictRes.content[0].text, /already registered/)
-
 	const successRes = await executeTool('admin', {
 		action: 'update_email',
 		email: 'updated-email@example.com'
@@ -1675,14 +1599,8 @@ test('admin update_email action', async () => {
 	assert.equal(successData.updated, true)
 	assert.equal(successData.user.id, user1.id)
 	assert.equal(successData.user.email, 'updated-email@example.com')
-
 	const updatedUser = db.users.get(user1.id)
 	assert.equal(updatedUser.email, 'updated-email@example.com')
-
-	const ident = db.identities.getByIdentifier('email', 'updated-email@example.com')
-	assert.ok(ident)
-	assert.equal(ident.userId, user1.id)
-
 	const whoamiRes = await executeTool('admin', { action: 'whoami' }, adminSession.token)
 	const whoamiData = JSON.parse(whoamiRes.content[0].text)
 	assert.equal(whoamiData.user.email, 'updated-email@example.com')
@@ -1700,14 +1618,12 @@ test('admin update_user action', async () => {
 		provider: 'self',
 		admin: 0
 	})
-
 	const nonAdminRes = await executeTool('admin', {
 		action: 'update_user',
 		name: 'Hacker Name'
 	}, workerSession.token)
 	assert.equal(nonAdminRes.isError, true)
 	assert.match(nonAdminRes.content[0].text, /requires admin privileges/)
-
 	const updateRes = await executeTool('admin', {
 		action: 'update_user',
 		id: 'fake-id-attempt',
@@ -1720,7 +1636,6 @@ test('admin update_user action', async () => {
 	assert.equal(updateData.user.id, user.id)
 	assert.equal(updateData.user.email, 'user-props@example.com')
 	assert.equal(updateData.user.name, 'Jesse Tane')
-
 	const whoamiRes = await executeTool('admin', { action: 'whoami' }, adminSession.token)
 	const whoamiData = JSON.parse(whoamiRes.content[0].text)
 	assert.equal(whoamiData.user.name, 'Jesse Tane')
@@ -1750,7 +1665,6 @@ test('admin update_app action', async () => {
 		},
 		expiresAt: Date.now() + 3600000
 	})
-
 	const nonAdminRes = await executeTool('admin', {
 		action: 'update_app',
 		appId: app.id,
@@ -1758,7 +1672,6 @@ test('admin update_app action', async () => {
 	}, workerSession.token)
 	assert.equal(nonAdminRes.isError, true)
 	assert.match(nonAdminRes.content[0].text, /requires admin privileges/)
-
 	const notFoundRes = await executeTool('admin', {
 		action: 'update_app',
 		appId: 'non-existent-app-id',
@@ -1766,7 +1679,6 @@ test('admin update_app action', async () => {
 	}, adminSession.token)
 	assert.equal(notFoundRes.isError, true)
 	assert.match(notFoundRes.content[0].text, /App not found/)
-
 	const updateRes = await executeTool('admin', {
 		action: 'update_app',
 		appId: app.id,
@@ -1778,7 +1690,6 @@ test('admin update_app action', async () => {
 	assert.equal(updateData.app.id, app.id)
 	assert.equal(updateData.app.name, 'Personal Google Workspace')
 	assert.equal(updateData.app.account, 'owner@gmail.com')
-
 	const dbApp = db.tokens.get(app.id)
 	assert.equal(dbApp.name, 'Personal Google Workspace')
 })
@@ -1797,7 +1708,6 @@ test('admin update_session action', async () => {
 		name: 'Worker Initial',
 		admin: 0
 	})
-
 	const selfRenameRes = await executeTool('admin', {
 		action: 'update_session',
 		name: 'Worker Renamed'
@@ -1805,14 +1715,12 @@ test('admin update_session action', async () => {
 	assert.equal(selfRenameRes.isError, undefined)
 	const selfRenameData = JSON.parse(selfRenameRes.content[0].text)
 	assert.equal(selfRenameData.session.name, 'Worker Renamed')
-
 	const nonAdminEscalateRes = await executeTool('admin', {
 		action: 'update_session',
 		admin: true
 	}, workerSession.token)
 	assert.equal(nonAdminEscalateRes.isError, true)
 	assert.match(nonAdminEscalateRes.content[0].text, /requires admin privileges/)
-
 	const adminPromoteRes = await executeTool('admin', {
 		action: 'update_session',
 		sessionId: workerSession.id,
@@ -1825,7 +1733,6 @@ test('admin update_session action', async () => {
 	assert.equal(adminPromoteData.session.admin, true)
 	assert.equal(adminPromoteData.session.token, undefined, 'Plaintext token is not returned when not rotated')
 	assert.equal(db.tokens.get(workerSession.id).admin, true)
-
 	const oldWorkerToken = workerSession.token
 	const rotateRes = await executeTool('admin', {
 		action: 'update_session',
@@ -1837,17 +1744,15 @@ test('admin update_session action', async () => {
 	assert.ok(rotateData.session.token, 'New token is returned on rotation')
 	assert.notEqual(rotateData.session.token, oldWorkerToken, 'New token differs from old token')
 	const newWorkerToken = rotateData.session.token
-
 	const oldAuthCheck = await executeTool('admin', { action: 'whoami' }, oldWorkerToken)
 	const oldAuthData = JSON.parse(oldAuthCheck.content[0].text)
 	assert.equal(oldAuthData.authenticated, false, 'Old token is invalidated immediately')
-
 	const newAuthCheck = await executeTool('admin', { action: 'whoami' }, newWorkerToken)
 	const newAuthData = JSON.parse(newAuthCheck.content[0].text)
 	assert.equal(newAuthData.authenticated, true, 'New token authenticates successfully')
 })
 
-test('google_api fail-loud on unlinked session or missing appId', async () => {
+test('provider_api fail-loud on unlinked session or missing appId', async () => {
 	const user = db.users.upsert({ email: 'unlinked-fail@example.com' })
 	const sessionNoApps = db.tokens.create({
 		userId: user.id,
@@ -1858,18 +1763,22 @@ test('google_api fail-loud on unlinked session or missing appId', async () => {
 	}, sessionNoApps.token)
 	assert.equal(noAppRes.isError, true)
 	assert.match(noAppRes.content[0].text, /No Google app linked to session/)
-
-	const { session, app } = createTestSession({ email: 'linked-fail@example.com' })
+	const noStripeRes = await executeTool('stripe_api', {
+		url: '/v1/customers'
+	}, sessionNoApps.token)
+	assert.equal(noStripeRes.isError, true)
+	assert.match(noStripeRes.content[0].text, /No Stripe app linked to session/)
+	const { session } = createTestSession({ email: 'linked-fail@example.com' })
 	const invalidAppRes = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/drive/v3/files',
 		appId: 'non-existent-app-id'
 	}, session.token)
 	assert.equal(invalidAppRes.isError, true)
 	assert.match(invalidAppRes.content[0].text, /App not linked to session or not found: non-existent-app-id/)
-
 	await assert.rejects(
 		async () => {
-			await api.google.request({
+			await api.proxy.request({
+				provider: 'google',
 				url: 'https://www.googleapis.com/drive/v3/files',
 				appId: 'non-existent-app-id'
 			}, session.token)
@@ -1880,10 +1789,10 @@ test('google_api fail-loud on unlinked session or missing appId', async () => {
 			return true
 		}
 	)
-
 	await assert.rejects(
 		async () => {
-			await api.google.request({
+			await api.proxy.request({
+				provider: 'google',
 				url: 'https://www.googleapis.com/drive/v3/files'
 			}, sessionNoApps.token)
 		},
@@ -1893,6 +1802,105 @@ test('google_api fail-loud on unlinked session or missing appId', async () => {
 			return true
 		}
 	)
+})
+
+test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* proxy, and RFC 7591 DCR', async () => {
+	const http = await import('node:http')
+	const upstreamRequests = []
+	const mockUpstream = http.createServer((req, res) => {
+		upstreamRequests.push({
+			method: req.method,
+			url: req.url,
+			auth: req.headers.authorization
+		})
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.end(JSON.stringify({ ok: true, path: req.url, auth: req.headers.authorization }))
+	})
+	await new Promise(resolve => mockUpstream.listen(0, '127.0.0.1', resolve))
+	const upstreamPort = mockUpstream.address().port
+	const baseUrl = `http://127.0.0.1:${upstreamPort}`
+	try {
+		const addr = server.address()
+		const regRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/register`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				client_name: 'Test MCP Agent',
+				redirect_uris: ['http://localhost:9999/cb']
+			})
+		})
+		assert.equal(regRes.status, 201)
+		const regData = await regRes.json()
+		assert.ok(regData.client_id)
+		assert.equal(regData.client_name, 'Test MCP Agent')
+		const user = db.users.upsert({ email: 'multi-provider@example.com' })
+		const session = db.tokens.create({
+			userId: user.id,
+			provider: 'self',
+			admin: 1
+		})
+		const connectRes = await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'stripe',
+			name: 'Stripe Test',
+			account: 'acct_test_1',
+			apiKey: 'sk_test_mock_999',
+			baseUrl
+		}, session.token)
+		assert.equal(connectRes.isError, undefined)
+		const connectData = JSON.parse(connectRes.content[0].text)
+		const stripeAppId = connectData.app.id
+		assert.equal(connectData.app.baseUrl, baseUrl)
+		await executeTool('admin', {
+			action: 'link_app',
+			sessionId: session.id,
+			appId: stripeAppId,
+			policy: [
+				{ action: 'allow', methods: ['GET'], path: '/v1/customers/**' }
+			]
+		}, session.token)
+		const toolsRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				authorization: `Bearer ${session.token}`
+			},
+			body: JSON.stringify({
+				jsonrpc: '2.0',
+				id: 200,
+				method: 'tools/list',
+				params: {}
+			})
+		})
+		const toolsData = await toolsRes.json()
+		const toolNames = toolsData.result.tools.map(t => t.name)
+		assert.deepEqual(toolNames, ['admin', 'stripe_api'])
+		const allowedRes = await executeTool('stripe_api', {
+			url: '/v1/customers/cus_123',
+			account: 'acct_test_1'
+		}, session.token)
+		assert.equal(allowedRes.isError, undefined)
+		const allowedBody = JSON.parse(allowedRes.content[0].text)
+		assert.equal(allowedBody.ok, true)
+		assert.equal(allowedBody.path, '/v1/customers/cus_123')
+		assert.equal(allowedBody.auth, 'Bearer sk_test_mock_999')
+		const deniedMethodRes = await executeTool('stripe_api', {
+			url: '/v1/customers/cus_123',
+			method: 'DELETE'
+		}, session.token)
+		assert.equal(deniedMethodRes.isError, true)
+		assert.match(deniedMethodRes.content[0].text, /Policy violation/)
+		const restRes = await fetch(`http://127.0.0.1:${addr.port}/api/stripe/v1/customers/cus_456/?expand=subscriptions&account=acct_test_1&app_id=${stripeAppId}`, {
+			headers: { authorization: `Bearer ${session.token}` }
+		})
+		assert.equal(restRes.status, 200)
+		const restData = await restRes.json()
+		assert.equal(restData.ok, true)
+		assert.equal(restData.path, '/v1/customers/cus_456/?expand=subscriptions')
+	} finally {
+		await new Promise(resolve => mockUpstream.close(resolve))
+	}
 })
 
 test('teardown server', (t, done) => {

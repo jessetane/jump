@@ -17,28 +17,59 @@ function sendBinary (res, data, mimeType = 'application/octet-stream') {
 	res.end(Buffer.from(data, 'base64'))
 }
 
-async function handleGoogle (req, res, pathname, url, token) {
-	const targetPath = pathname.slice('/api/google/'.length)
+async function parseJsonBody (req) {
+	const rawBody = await getBody(req)
+	if (!rawBody || !rawBody.trim()) return {}
+	try {
+		return JSON.parse(rawBody)
+	} catch {
+		const err = new Error('Invalid JSON body')
+		err.code = 400
+		err.status = 400
+		throw err
+	}
+}
+
+async function handleProviderProxy (req, res, provider, targetPath, url, token) {
 	if (!targetPath) {
 		const err = new Error('not found')
 		err.code = 404
 		throw err
 	}
-	const search = url?.search || ''
+	const appId = url?.searchParams?.get('app_id') || undefined
+	const account = url?.searchParams?.get('account') || undefined
+	const forwardParams = new URLSearchParams(url?.searchParams)
+	forwardParams.delete('app_id')
+	forwardParams.delete('account')
+	const qs = forwardParams.toString()
+	const search = qs ? `?${qs}` : ''
 	const targetUrl = `${targetPath}${search}`
 	let body = undefined
 	if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
-		body = await getBody(req)
-		if (typeof body === 'string' && (body.trim().startsWith('{') || body.trim().startsWith('['))) {
-			try {
-				body = JSON.parse(body)
-			} catch {}
+		const rawBody = await getBody(req)
+		if (rawBody && rawBody.trim()) {
+			const contentType = (req.headers['content-type'] || '').toLowerCase()
+			if (contentType.includes('application/json') || rawBody.trim().startsWith('{') || rawBody.trim().startsWith('[')) {
+				try {
+					body = JSON.parse(rawBody)
+				} catch {
+					const err = new Error('Invalid JSON body')
+					err.code = 400
+					err.status = 400
+					throw err
+				}
+			} else {
+				body = rawBody
+			}
 		}
 	}
-	const result = await api.google.request({
+	const result = await api.proxy.request({
+		provider,
 		url: targetUrl,
 		method: req.method,
-		body
+		body,
+		appId,
+		account
 	}, token)
 	if (result?.binary) {
 		sendBinary(res, result.data, result.mimeType)
@@ -67,11 +98,7 @@ const routes = {
 			sendJson(res, result)
 		},
 		async POST (req, res, { token }) {
-			const rawBody = await getBody(req)
-			let body = {}
-			try {
-				body = JSON.parse(rawBody)
-			} catch {}
+			const body = await parseJsonBody(req)
 			const result = await api.auth.createSession(token, body)
 			sendJson(res, result, 201)
 		},
@@ -86,22 +113,14 @@ const routes = {
 			sendJson(res, result)
 		},
 		async POST (req, res, { token }) {
-			const rawBody = await getBody(req)
-			let body = {}
-			try {
-				body = JSON.parse(rawBody)
-			} catch {}
+			const body = await parseJsonBody(req)
 			const result = await api.auth.connectApp(token, body)
 			sendJson(res, result, 201)
 		}
 	},
 	'/api/links': {
 		async POST (req, res, { token }) {
-			const rawBody = await getBody(req)
-			let body = {}
-			try {
-				body = JSON.parse(rawBody)
-			} catch {}
+			const body = await parseJsonBody(req)
 			const result = await api.auth.linkApp(token, body)
 			sendJson(res, result, 201)
 		},
@@ -116,10 +135,6 @@ const routes = {
 }
 
 async function handleRest (req, res, { pathname, url, query, token }) {
-	if (pathname.startsWith('/api/google/')) {
-		await handleGoogle(req, res, pathname, url, token)
-		return
-	}
 	if (pathname.startsWith('/api/sessions/')) {
 		const sessionId = pathname.slice('/api/sessions/'.length)
 		if (req.method === 'GET') {
@@ -133,11 +148,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 			return
 		}
 		if (req.method === 'PATCH' || req.method === 'PUT') {
-			const rawBody = await getBody(req)
-			let body = {}
-			try {
-				body = JSON.parse(rawBody)
-			} catch {}
+			const body = await parseJsonBody(req)
 			const result = await api.auth.updateSession(token, { ...body, sessionId })
 			sendJson(res, result)
 			return
@@ -149,11 +160,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 	if (pathname.startsWith('/api/apps/')) {
 		const appId = pathname.slice('/api/apps/'.length)
 		if (req.method === 'PATCH' || req.method === 'PUT') {
-			const rawBody = await getBody(req)
-			let body = {}
-			try {
-				body = JSON.parse(rawBody)
-			} catch {}
+			const body = await parseJsonBody(req)
 			const result = await api.auth.updateApp(token, { ...body, appId })
 			sendJson(res, result)
 			return
@@ -169,16 +176,24 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 		throw err
 	}
 	const route = routes[pathname]
-	if (!route) {
-		const err = new Error('not found')
-		err.code = 404
-		throw err
+	if (route) {
+		const handler = route[req.method]
+		if (!handler) {
+			const err = new Error('Method Not Allowed')
+			err.code = 405
+			throw err
+		}
+		await handler(req, res, { token, query })
+		return
 	}
-	const handler = route[req.method]
-	if (!handler) {
-		const err = new Error('Method Not Allowed')
-		err.code = 405
-		throw err
+	const rawPathname = url?.pathname || pathname
+	const restMatch = rawPathname.match(/^\/api\/([a-z0-9_-]+)\/(.+)$/i)
+	if (restMatch) {
+		const [, provider, targetPath] = restMatch
+		await handleProviderProxy(req, res, provider.toLowerCase(), targetPath, url, token)
+		return
 	}
-	await handler(req, res, { token, query })
+	const err = new Error('not found')
+	err.code = 404
+	throw err
 }

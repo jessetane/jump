@@ -1,13 +1,17 @@
 import RpcEngine from 'rpc-engine'
 import * as api from './api/index.js'
 import * as db from './db/index.js'
+import { getProvider } from './providers/index.js'
 import { getBody } from './util.js'
 
 export {
-	tools,
+	buildProviderTool,
+	getAvailableTools,
 	executeTool,
 	handleMcp
 }
+
+const SUPPORTED_PROTOCOL_VERSIONS = ['2025-03-26', '2024-11-05']
 
 const adminTool = {
 	name: 'admin',
@@ -39,8 +43,10 @@ const adminTool = {
 			appId: { type: 'string', description: 'Target upstream app token ID (used for connect_app, update_app, disconnect_app, link_app, unlink_app).' },
 			name: { type: 'string', description: 'Human-readable label or user display name.' },
 			account: { type: 'string', description: 'Upstream account or tenant identifier (e.g. email, username, account ID).' },
+			baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or API-key providers (e.g. "https://api.stripe.com").' },
+			apiKey: { type: 'string', description: 'Upstream API key or bearer secret when connecting an API-key provider.' },
 			email: { type: 'string', description: 'New email address (for update_email action).' },
-			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe").' },
+			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe", "github").' },
 			policy: {
 				type: 'array',
 				description: 'Ordered list of policy rules evaluated top-to-bottom (first match wins, default deny). Best practice: write a minimal allowlist of specific paths (e.g. "/calendar/v3/calendars/xyz/events/**"); unlisted paths are automatically denied. Do NOT duplicate rules for URL-encoding—paths are automatically decoded (use literal "@" rather than "%40").',
@@ -81,38 +87,49 @@ const adminTool = {
 	}
 }
 
-const googleApiTool = {
-	name: 'google_api',
-	description: 'Make HTTP requests directly to Google APIs (e.g. Drive, Docs, Sheets, Calendar, Gmail, Tasks) restricted to *.googleapis.com. Automatically attaches the user\'s Google OAuth Bearer token.',
-	inputSchema: {
-		type: 'object',
-		properties: {
-			url: {
-				type: 'string',
-				description: 'Full https://*.googleapis.com URL or relative path with optional query parameters (e.g. "drive/v3/files?pageSize=10", "calendar/v3/calendars/primary/events", or "https://sheets.googleapis.com/v4/spreadsheets/ID").'
+function buildProviderTool (providerName, providerLinks = []) {
+	const provider = getProvider(providerName)
+	const id = provider.id
+	const accounts = providerLinks
+		.map(l => l.app?.credentials?.account || l.app?.credentials?.email || l.app?.name)
+		.filter(Boolean)
+	const accountHint = accounts.length > 0 ? ` Linked accounts: ${accounts.join(', ')}.` : ''
+	const baseHint = providerLinks.find(l => l.app?.credentials?.baseUrl)?.app?.credentials?.baseUrl || provider.baseUrl
+	return {
+		name: `${id}_api`,
+		description: `${provider.toolDescription(baseHint)}${accountHint}`,
+		inputSchema: {
+			type: 'object',
+			properties: {
+				url: {
+					type: 'string',
+					description: provider.urlParamDescription(baseHint)
+				},
+				method: {
+					type: 'string',
+					description: 'HTTP method (GET, POST, PUT, PATCH, DELETE). Defaults to GET.'
+				},
+				body: {
+					type: ['object', 'string'],
+					description: 'JSON body object or string payload for POST/PUT/PATCH requests.'
+				},
+				headers: {
+					type: 'object',
+					description: 'Optional additional HTTP headers to include with the request.'
+				},
+				appId: {
+					type: 'string',
+					description: `Optional target ${provider.name} app token ID if multiple accounts are linked.`
+				},
+				account: {
+					type: 'string',
+					description: `Optional target account identifier or app name if multiple ${provider.name} accounts are linked.`
+				}
 			},
-			method: {
-				type: 'string',
-				description: 'HTTP method (GET, POST, PUT, PATCH, DELETE). Defaults to GET.'
-			},
-			body: {
-				type: ['object', 'string'],
-				description: 'JSON body object or string payload for POST/PUT/PATCH requests.'
-			},
-			headers: {
-				type: 'object',
-				description: 'Optional additional HTTP headers to include with the request.'
-			},
-			appId: {
-				type: 'string',
-				description: 'Optional target Google app token ID if multiple Google accounts are linked.'
-			}
-		},
-		required: ['url']
+			required: ['url']
+		}
 	}
 }
-
-const tools = [adminTool, googleApiTool]
 
 const adminActions = {
 	whoami: (args, token) => api.auth.whoami(token),
@@ -129,23 +146,6 @@ const adminActions = {
 	unlink_app: (args, token) => api.auth.unlinkApp(token, args),
 	update_email: (args, token) => api.auth.updateEmail(token, args),
 	update_user: (args, token) => api.auth.updateUser(token, args)
-}
-
-const toolHandlers = {
-	admin (args, token) {
-		const action = args.action || 'whoami'
-		const handle = adminActions[action]
-		if (!handle) {
-			console.warn(`[mcp] admin action rejected: Unknown action "${action}"`)
-			const err = new Error(`Unknown action: ${action}`)
-			err.status = 400
-			throw err
-		}
-		return handle(args, token)
-	},
-	google_api (args, token) {
-		return api.google.request(args, token)
-	}
 }
 
 function formatContent (result) {
@@ -180,13 +180,17 @@ function formatError (err, toolName = 'tool') {
 		}
 	} else if (err.message?.startsWith('Authentication required:')) {
 		console.warn(`[mcp] ${toolName} rejected: Authentication required`)
-	} else if (err.message?.startsWith('Failed to refresh Google access token:')) {
+	} else if (err.message?.startsWith('Failed to refresh ')) {
 		console.warn(`[mcp] ${err.message}`)
 	} else if (err.status) {
 		console.warn(`[mcp] ${toolName} error (${err.status}): ${err.message}`)
+		const providerMatch = toolName.match(/^([a-z0-9_-]+)_api$/i)
+		const prefix = providerMatch
+			? `${getProvider(providerMatch[1]).name} API Error (${err.status}): `
+			: ''
 		return {
 			isError: true,
-			content: [{ type: 'text', text: toolName === 'google_api' ? `Google API Error (${err.status}): ${err.message}` : err.message }]
+			content: [{ type: 'text', text: `${prefix}${err.message}` }]
 		}
 	}
 	return {
@@ -200,14 +204,27 @@ async function executeTool (name, args = {}, token) {
 		console.warn('[mcp] tools/call rejected: Missing tool name')
 		return { isError: true, content: [{ type: 'text', text: 'Tool name is required' }] }
 	}
-	const handler = toolHandlers[name]
-	if (!handler) {
+	try {
+		if (name === 'admin') {
+			const action = args.action || 'whoami'
+			const handle = adminActions[action]
+			if (!handle) {
+				console.warn(`[mcp] admin action rejected: Unknown action "${action}"`)
+				const err = new Error(`Unknown action: ${action}`)
+				err.status = 400
+				throw err
+			}
+			const result = await handle(args, token)
+			return { content: formatContent(result) }
+		}
+		const apiMatch = name.match(/^([a-z0-9_-]+)_api$/i)
+		if (apiMatch) {
+			const provider = apiMatch[1].toLowerCase()
+			const result = await api.proxy.request({ ...args, provider }, token)
+			return { content: formatContent(result) }
+		}
 		console.warn(`[mcp] tools/call rejected: Unknown tool "${name}"`)
 		return { isError: true, content: [{ type: 'text', text: `Unknown tool: ${name}` }] }
-	}
-	try {
-		const result = await handler(args, token)
-		return { content: formatContent(result) }
 	} catch (err) {
 		return formatError(err, name)
 	}
@@ -223,22 +240,33 @@ function getAvailableTools (token) {
 	if (session.admin) {
 		list.push(adminTool)
 	}
-	if (links.some(l => l.app?.provider === 'google')) {
-		list.push(googleApiTool)
+	const grouped = new Map()
+	for (const link of links) {
+		const p = link.app?.provider
+		if (!p || p === 'self') continue
+		if (!grouped.has(p)) grouped.set(p, [])
+		grouped.get(p).push(link)
+	}
+	for (const [providerName, providerLinks] of grouped.entries()) {
+		list.push(buildProviderTool(providerName, providerLinks))
 	}
 	return list
 }
 
 const rpcMethods = {
 	initialize: params => {
+		const requested = params?.protocolVersion
+		const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
+			? requested
+			: '2024-11-05'
 		if (process.env.NODE_ENV !== 'test') {
 			const client = params?.clientInfo ? `${params.clientInfo.name || 'unknown'}/${params.clientInfo.version || ''}` : 'unknown'
-			console.log(`[mcp] initialize (client: ${client}, protocol: ${params?.protocolVersion || 'unknown'})`)
+			console.log(`[mcp] initialize (client: ${client}, protocol: ${requested || 'unknown'} -> ${protocolVersion})`)
 		}
 		return {
-			protocolVersion: '2024-11-05',
+			protocolVersion,
 			capabilities: { tools: { listChanged: false } },
-			serverInfo: { name: 'google-mcp', version: '1.0.0' }
+			serverInfo: { name: 'jump', version: '1.0.0' }
 		}
 	},
 	'notifications/initialized': () => {

@@ -39,12 +39,14 @@ const server = http.createServer(async (req, res) => {
 		return
 	}
 	const url = new URL(req.url, 'http://localhost')
-	const query = Object.fromEntries(url.searchParams)
-	for (const key of ['services', 'write']) {
-		const all = url.searchParams.getAll(key)
-		if (all.length > 1) query[key] = all.join(',')
-	}
 	const pathname = url.pathname.replace(/\/+$/, '') || '/'
+	const query = Object.fromEntries(url.searchParams)
+	if (pathname.startsWith('/providers/')) {
+		for (const key of ['services', 'write']) {
+			const all = url.searchParams.getAll(key)
+			if (all.length > 1) query[key] = all.join(',')
+		}
+	}
 	const token = resolveToken(req)
 	try {
 		if (pathname === '/') {
@@ -90,6 +92,6 @@ const server = http.createServer(async (req, res) => {
 
 if (process.env.NODE_ENV !== 'test') {
 	server.listen(port, host, () => {
-		console.log(`google-mcp listening on ${host}:${port}`)
+		console.log(`jump listening on ${host}:${port}`)
 	})
 }

@@ -1,9 +1,12 @@
 {
-	"name": "google-mcp",
+	"name": "jump",
 	"version": "0.0.1",
 	"type": "module",
-	"description": "MCP proxy for Google HTTP APIs",
+	"description": "MCP jump host for upstream REST APIs",
 	"main": "index.js",
+	"bin": {
+		"jump": "./index.js"
+	},
 	"scripts": {
 		"start": "node index.js",
 		"test": "node --test test/index.js"

@@ -1,19 +1,19 @@
-import { createHash, timingSafeEqual, randomBytes } from 'node:crypto'
+import { createHash, timingSafeEqual, randomBytes, randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as db from './db/index.js'
-import { getUserInfo, revokeGoogleToken, baseScopes, allScopes, services, buildScopesFromSelection } from './providers/google.js'
+import { getProvider } from './providers/index.js'
 import { getBody, sendMail } from './util.js'
-import { validatePolicy } from './policy.js'
 
 export {
 	handleOauth,
+	handleRegister,
 	handleAuthorize,
 	handleAuthorizeConsent,
 	handleVerify,
-	handleGoogleConnect,
-	handleGoogleConsent,
+	handleProviderConnect,
+	handleProviderConsent,
 	handleCallback,
 	handleToken,
 	handleRevoke,
@@ -23,10 +23,7 @@ export {
 }
 
 const dirname = path.dirname(fileURLToPath(import.meta.url))
-
 const appUrl = process.env.APP_URL || 'http://localhost:8080'
-const clientId = process.env.GOOGLE_CLIENT_ID
-const clientSecret = process.env.GOOGLE_CLIENT_SECRET
 
 function getClientIp (req) {
 	return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || null
@@ -72,7 +69,6 @@ function isAllowedRedirectUri (redirectUri) {
 	})
 }
 
-
 async function handleProtectedResourceMetadata (req, res) {
 	const base = appUrl.replace(/\/$/, '')
 	const meta = {
@@ -90,6 +86,7 @@ async function handleAuthServerMetadata (req, res) {
 		issuer: base,
 		authorization_endpoint: `${base}/oauth/authorize`,
 		token_endpoint: `${base}/oauth/token`,
+		registration_endpoint: `${base}/oauth/register`,
 		revocation_endpoint: `${base}/oauth/revoke`,
 		response_types_supported: ['code'],
 		grant_types_supported: ['authorization_code'],
@@ -101,6 +98,46 @@ async function handleAuthServerMetadata (req, res) {
 	res.statusCode = 200
 	res.setHeader('content-type', 'application/json; charset=utf-8')
 	res.end(JSON.stringify(meta, null, '\t'))
+}
+
+async function handleRegister (req, res) {
+	if (req.method !== 'POST') {
+		res.statusCode = 405
+		res.setHeader('content-type', 'application/json; charset=utf-8')
+		res.end(JSON.stringify({ error: 'method_not_allowed' }))
+		return
+	}
+	const rawBody = await getBody(req)
+	let body = {}
+	try {
+		body = rawBody ? JSON.parse(rawBody) : {}
+	} catch {
+		res.statusCode = 400
+		res.setHeader('content-type', 'application/json; charset=utf-8')
+		res.end(JSON.stringify({ error: 'invalid_client_metadata', error_description: 'Invalid JSON body' }))
+		return
+	}
+	const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris : []
+	for (const uri of redirectUris) {
+		if (!isAllowedRedirectUri(uri)) {
+			res.statusCode = 400
+			res.setHeader('content-type', 'application/json; charset=utf-8')
+			res.end(JSON.stringify({ error: 'invalid_redirect_uri', error_description: `redirect_uri is not allowed: ${uri}` }))
+			return
+		}
+	}
+	const clientId = body.client_id || `client_${randomUUID()}`
+	res.statusCode = 201
+	res.setHeader('content-type', 'application/json; charset=utf-8')
+	res.end(JSON.stringify({
+		client_id: clientId,
+		client_id_issued_at: Math.floor(Date.now() / 1000),
+		client_name: body.client_name || 'MCP Client',
+		redirect_uris: redirectUris,
+		grant_types: body.grant_types || ['authorization_code'],
+		response_types: body.response_types || ['code'],
+		token_endpoint_auth_method: body.token_endpoint_auth_method || 'none'
+	}))
 }
 
 function validateAuthorizeParams (query) {
@@ -137,31 +174,15 @@ function validateAuthorizeParams (query) {
 }
 
 async function handleAuthorize (req, res, query) {
-	let validation
 	try {
-		validation = validateAuthorizeParams(query)
+		validateAuthorizeParams(query)
 	} catch (err) {
 		res.statusCode = err.status || 400
 		res.setHeader('content-type', 'application/json; charset=utf-8')
 		res.end(JSON.stringify({ error: err.code || 'invalid_request', error_description: err.message }))
 		return
 	}
-	const { codeChallenge, codeChallengeMethod } = validation
-	const consentToken = db.oauthStates.create({
-		clientRedirectUri: query.redirect_uri || null,
-		clientState: query.state || null,
-		codeChallenge,
-		codeChallengeMethod,
-		policy: query.policy || null,
-		sessionName: query.session_name || null,
-		admin: query.admin === 'true' || query.admin === '1' || query.admin === 'on' ? 1 : 0
-	})
-	const initData = {
-		params: {
-			...query,
-			consent_token: consentToken
-		}
-	}
+	const initData = { params: query }
 	const authorizeHtml = await fs.readFile(path.join(dirname, 'public/authorize.html'), 'utf8')
 	const html = authorizeHtml.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c'))
 	res.statusCode = 200
@@ -177,19 +198,10 @@ async function handleAuthorizeConsent (req, res) {
 	}
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
-
-	const consentToken = params.get('consent_token')
-	let consentState = null
-	if (consentToken) {
-		consentState = db.oauthStates.consume(consentToken)
-	}
-
 	const query = {}
 	let email = null
-	let sessionName = consentState?.sessionName || null
-	let admin = consentState?.admin ? 1 : 0
-	let policy = consentState?.policy || null
-
+	let sessionName = null
+	let admin = 0
 	for (const [key, value] of params.entries()) {
 		if (key === 'email') {
 			email = value.trim().toLowerCase() || null
@@ -197,93 +209,95 @@ async function handleAuthorizeConsent (req, res) {
 			sessionName = value.trim() || null
 		} else if (key === 'admin') {
 			admin = value === 'true' || value === '1' || value === 'on' ? 1 : 0
-		} else if (key === 'policy') {
-			policy = value.trim() || null
-		} else if (key !== 'consent_token') {
+		} else {
 			query[key] = value
 		}
 	}
-
 	if (!email || !email.includes('@')) {
 		res.statusCode = 400
 		res.setHeader('content-type', 'application/json; charset=utf-8')
 		res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Valid email address is required' }))
 		return
 	}
-
-	if (policy) {
-		const policyValidation = validatePolicy(policy)
-		if (!policyValidation.valid) {
-			res.statusCode = 400
-			res.setHeader('content-type', 'application/json; charset=utf-8')
-			res.end(JSON.stringify({ error: 'invalid_request', error_description: policyValidation.error }))
-			return
-		}
+	let validation
+	try {
+		validation = validateAuthorizeParams(query)
+	} catch (err) {
+		res.statusCode = err.status || 400
+		res.setHeader('content-type', 'application/json; charset=utf-8')
+		res.end(JSON.stringify({ error: err.code || 'invalid_request', error_description: err.message }))
+		return
 	}
-
-	const clientRedirectUri = consentState?.clientRedirectUri || query.redirect_uri || null
-	const clientState = consentState?.clientState || query.state || null
-	let codeChallenge = consentState?.codeChallenge || null
-	let codeChallengeMethod = consentState?.codeChallengeMethod || null
-
-	if (!consentState) {
-		let validation
-		try {
-			validation = validateAuthorizeParams(query)
-		} catch (err) {
-			res.statusCode = err.status || 400
-			res.setHeader('content-type', 'application/json; charset=utf-8')
-			res.end(JSON.stringify({ error: err.code || 'invalid_request', error_description: err.message }))
-			return
-		}
-		codeChallenge = validation.codeChallenge
-		codeChallengeMethod = validation.codeChallengeMethod
-	}
-
+	const { codeChallenge, codeChallengeMethod } = validation
+	const clientRedirectUri = query.redirect_uri || null
+	const clientState = query.state || null
 	const magicCode = randomBytes(24).toString('base64url')
 	const magicExpiresAt = Date.now() + (15 * 60 * 1000)
 	const ip = getClientIp(req)
-
-	db.oauthStates.create({
+	db.tokens.createState({
 		clientRedirectUri,
 		clientState,
 		codeChallenge,
 		codeChallengeMethod,
 		sessionName,
 		admin,
-		policy,
 		email,
 		magicCode,
 		magicExpiresAt,
 		ip
 	})
-
 	const verifyUrl = `${appUrl.replace(/\/$/, '')}/oauth/verify?code=${magicCode}`
 	await sendMail({
 		to: email,
-		subject: 'Sign in to google-mcp Gateway',
+		subject: 'Sign in to jump Gateway',
 		text: `Click the link below to sign in and activate your MCP session token:\n\n${verifyUrl}\n\nThis link expires in 15 minutes.`,
 		html: `<p>Click the link below to sign in and activate your MCP session token:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p>This link expires in 15 minutes.</p>`
 	})
-
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/html; charset=utf-8')
 	res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:440px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;text-align:center;"><h2>Check your email</h2><p>A magic sign-in link has been sent to <strong>${email}</strong>.</p><p>Click the link in your email to activate your MCP session token.</p></body></html>`)
 }
 
 async function handleVerify (req, res, query) {
-	const code = query.code
+	if (req.method === 'GET') {
+		const code = query.code
+		if (!code || !/^[a-zA-Z0-9_-]+$/.test(code)) {
+			res.statusCode = 400
+			res.setHeader('content-type', 'text/plain')
+			res.end('Invalid or expired verification code')
+			return
+		}
+		const state = db.tokens.findStateByMagicCode(code)
+		if (!state) {
+			res.statusCode = 400
+			res.setHeader('content-type', 'text/plain')
+			res.end('Invalid or expired verification code')
+			return
+		}
+		res.statusCode = 200
+		res.setHeader('content-type', 'text/html; charset=utf-8')
+		res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:440px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;text-align:center;"><h2>Complete Sign In</h2><p>Click continue to activate your MCP session token.</p><form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${code}"><button type="submit" style="padding:10px 20px;background:#000;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:1rem;">Continue</button></form><script>document.forms[0].submit()</script></body></html>`)
+		return
+	}
+	if (req.method !== 'POST') {
+		res.statusCode = 405
+		res.end('Method Not Allowed')
+		return
+	}
+	const rawBody = await getBody(req)
+	const params = new URLSearchParams(rawBody)
+	const code = params.get('code') || query.code
 	if (!code) {
 		res.statusCode = 400
 		res.setHeader('content-type', 'text/plain')
 		res.end('Missing verification code.')
 		return
 	}
-	const state = db.oauthStates.consumeMagicCode(code)
+	const state = db.tokens.consumeMagicCode(code)
 	if (!state) {
-		res.statusCode = 403
+		res.statusCode = 400
 		res.setHeader('content-type', 'text/plain')
-		res.end('Invalid or expired verification link.')
+		res.end('Invalid or expired verification code')
 		return
 	}
 	const email = state.email || 'user@localhost'
@@ -299,9 +313,8 @@ async function handleVerify (req, res, query) {
 		ip: state.ip || ip,
 		ua
 	})
-
 	if (state.clientRedirectUri) {
-		const authCode = db.oauthCodes.create({
+		const authCode = db.tokens.createAuthCode({
 			sessionId: session.id,
 			clientRedirectUri: state.clientRedirectUri,
 			codeChallenge: state.codeChallenge,
@@ -315,67 +328,84 @@ async function handleVerify (req, res, query) {
 		res.end()
 		return
 	}
-
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/plain; charset=utf-8')
 	res.end(`user: ${email}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
 }
 
-async function handleGoogleConnect (req, res, query) {
-	const initData = {
-		params: query
+async function handleProviderConnect (req, res, query, providerName = 'google') {
+	const provider = getProvider(providerName)
+	if (!provider || provider.type !== 'oauth') {
+		const err = new Error('not found')
+		err.code = 404
+		throw err
 	}
-	const connectHtml = await fs.readFile(path.join(dirname, 'public/google-connect.html'), 'utf8')
+	const initData = {
+		params: query,
+		provider: { id: provider.id, name: provider.name }
+	}
+	const connectHtml = await fs.readFile(path.join(dirname, 'public/connect.html'), 'utf8')
 	const html = connectHtml.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c'))
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/html; charset=utf-8')
 	res.end(html)
 }
 
-async function handleGoogleConsent (req, res) {
+async function handleProviderConsent (req, res, providerName = 'google') {
 	if (req.method !== 'POST') {
 		res.statusCode = 405
 		res.end('Method Not Allowed')
 		return
 	}
-	if (!clientId) {
-		res.statusCode = 500
-		res.setHeader('content-type', 'text/plain')
-		res.end('GOOGLE_CLIENT_ID environment variable is missing')
-		return
+	const provider = getProvider(providerName)
+	if (!provider || provider.type !== 'oauth' || !provider.buildAuthUrl) {
+		const err = new Error('not found')
+		err.code = 404
+		throw err
 	}
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
-
 	const servicesList = params.getAll('services')
 	const writeList = params.getAll('write')
 	const sessionId = params.get('session_id') || null
 	const reauthAppId = params.get('reauth_app_id') || null
+	if (reauthAppId) {
+		const session = sessionId ? db.tokens.get(sessionId) : null
+		const existingApp = db.tokens.get(reauthAppId)
+		if (!session || session.provider !== 'self' || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: unauthorized re-authentication request.')
+			return
+		}
+	}
 	const rawAppName = params.get('app_name') || params.get('name') || ''
 	const sessionName = rawAppName ? String(rawAppName).trim() : null
-
-	const scopes = buildScopesFromSelection(servicesList, writeList)
 	const callbackUrl = `${appUrl.replace(/\/$/, '')}/oauth/callback`
 	const ip = getClientIp(req)
-
-	const stateToken = db.oauthStates.create({
+	const stateToken = db.tokens.createState({
 		sessionId,
 		reauthAppId,
 		sessionName,
-		provider: 'google',
+		provider: provider.id,
 		ip
 	})
-
-	const u = new URL('https://accounts.google.com/o/oauth2/v2/auth')
-	u.searchParams.set('client_id', clientId)
-	u.searchParams.set('redirect_uri', callbackUrl)
-	u.searchParams.set('response_type', 'code')
-	u.searchParams.set('scope', scopes)
-	u.searchParams.set('access_type', 'offline')
-	u.searchParams.set('prompt', 'consent')
-	u.searchParams.set('state', stateToken)
+	let authUrl
+	try {
+		authUrl = provider.buildAuthUrl({
+			state: stateToken,
+			callbackUrl,
+			services: servicesList,
+			write: writeList
+		})
+	} catch (err) {
+		res.statusCode = err.status || 500
+		res.setHeader('content-type', 'text/plain')
+		res.end(err.message)
+		return
+	}
 	res.statusCode = 302
-	res.setHeader('location', u.toString())
+	res.setHeader('location', authUrl)
 	res.end()
 }
 
@@ -385,68 +415,55 @@ async function handleCallback (req, res, query) {
 	if (!code) {
 		res.statusCode = 400
 		res.setHeader('content-type', 'text/plain')
-		res.end(`Google Auth Error: ${query.error || 'no code'}`)
+		res.end(`OAuth Error: ${query.error || 'no code'}`)
 		return
 	}
-	const oauthState = db.oauthStates.consume(rawState)
+	const oauthState = db.tokens.consumeState(rawState)
 	if (!oauthState) {
 		res.statusCode = 403
 		res.setHeader('content-type', 'text/plain')
-		res.end('Invalid or expired OAuth state (CSRF verification failed). Please try connecting Google again.')
+		res.end('Invalid or expired OAuth state (CSRF verification failed). Please try connecting again.')
 		return
 	}
+	const provider = getProvider(oauthState.provider || 'google')
 	const callbackUrl = `${appUrl.replace(/\/$/, '')}/oauth/callback`
-	const params = new URLSearchParams({
-		code,
-		client_id: clientId,
-		client_secret: clientSecret,
-		redirect_uri: callbackUrl,
-		grant_type: 'authorization_code'
-	})
-	const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-		method: 'POST',
-		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: params.toString()
-	})
-	const tokenData = await tokenRes.json()
-	if (!tokenRes.ok) {
-		console.error('Google token exchange failed:', tokenData)
-		res.statusCode = 502
+	let exchanged
+	try {
+		exchanged = await provider.exchangeCode({ code, callbackUrl })
+	} catch (err) {
+		console.error(`${provider.name} token exchange failed:`, err.data || err.message)
+		res.statusCode = err.status || 502
 		res.setHeader('content-type', 'text/plain')
-		res.end('Failed to exchange authorization code with Google')
+		res.end(err.message)
 		return
 	}
-	const googleUser = await getUserInfo(tokenData.access_token)
-	const email = (googleUser.email || '').toLowerCase()
-	if (!email) {
-		res.statusCode = 400
-		res.setHeader('content-type', 'text/plain')
-		res.end('Could not retrieve user email from Google account.')
-		return
-	}
-
+	const { accessToken, refreshToken, expiresAt, scopes, email, account, userName } = exchanged
 	if (oauthState.reauthAppId) {
+		const session = oauthState.sessionId ? db.tokens.get(oauthState.sessionId) : null
 		const existingApp = db.tokens.get(oauthState.reauthAppId)
-		if (existingApp) {
-			const updatedCreds = {
-				...existingApp.credentials,
-				accessToken: tokenData.access_token,
-				refreshToken: tokenData.refresh_token || existingApp.credentials?.refreshToken,
-				email,
-				account: email
-			}
-			db.tokens.updateCredentials(existingApp.id, {
-				credentials: updatedCreds,
-				expiresAt: Date.now() + ((tokenData.expires_in || 3600) * 1000),
-				scopes: tokenData.scope || existingApp.scopes
-			})
-			res.statusCode = 200
-			res.setHeader('content-type', 'text/html; charset=utf-8')
-			res.end('<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center;"><h2>Google App Re-authenticated</h2><p>Google app credentials have been successfully updated in place. Linked agent sessions will resume automatically.</p></body></html>')
+		if (!session || session.provider !== 'self' || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: unauthorized re-authentication request.')
 			return
 		}
+		const updatedCreds = {
+			...existingApp.credentials,
+			accessToken,
+			refreshToken: refreshToken || existingApp.credentials?.refreshToken,
+			email,
+			account
+		}
+		db.tokens.updateCredentials(existingApp.id, {
+			credentials: updatedCreds,
+			expiresAt,
+			scopes: scopes || existingApp.scopes
+		})
+		res.statusCode = 200
+		res.setHeader('content-type', 'text/html; charset=utf-8')
+		res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center;"><h2>${provider.name} App Re-authenticated</h2><p>${provider.name} app credentials have been successfully updated in place. Linked agent sessions will resume automatically.</p></body></html>`)
+		return
 	}
-
 	let targetUserId = null
 	if (oauthState.sessionId) {
 		const session = db.tokens.get(oauthState.sessionId)
@@ -455,37 +472,34 @@ async function handleCallback (req, res, query) {
 	if (!targetUserId) {
 		const user = db.users.upsert({
 			email,
-			name: googleUser.name || null
+			name: userName || null
 		})
 		targetUserId = user.id
 	}
-
-	const appName = oauthState.sessionName || `${googleUser.name || email} Google`
+	const appName = oauthState.sessionName || `${userName || email} ${provider.name}`
 	const appToken = db.tokens.create({
 		userId: targetUserId,
-		provider: 'google',
+		provider: provider.id,
 		type: 'oauth',
 		name: appName,
 		credentials: {
-			accessToken: tokenData.access_token,
-			refreshToken: tokenData.refresh_token || null,
+			accessToken,
+			refreshToken: refreshToken || null,
 			email,
-			account: email
+			account
 		},
-		expiresAt: Date.now() + ((tokenData.expires_in || 3600) * 1000),
-		scopes: tokenData.scope || null
+		expiresAt,
+		scopes: scopes || null
 	})
-
 	if (oauthState.sessionId) {
 		db.links.create({
 			sessionTokenId: oauthState.sessionId,
 			appTokenId: appToken.id
 		})
 	}
-
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/html; charset=utf-8')
-	res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;text-align:center;"><h2>Google Account Connected!</h2><p>Connected Google account <strong>${email}</strong>.</p><p>You can close this window and return to your MCP agent.</p></body></html>`)
+	res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;padding:24px;border:1px solid #e2e8f0;border-radius:8px;text-align:center;"><h2>${provider.name} Account Connected!</h2><p>Connected ${provider.name} account <strong>${email}</strong>.</p><p>You can close this window and return to your MCP agent.</p></body></html>`)
 }
 
 async function handleToken (req, res) {
@@ -499,7 +513,6 @@ async function handleToken (req, res) {
 	const code = params.get('code')
 	const redirectUri = params.get('redirect_uri')
 	const codeVerifier = params.get('code_verifier')
-
 	if (!code) {
 		console.warn('[oauth] Token exchange failed: Missing code')
 		res.statusCode = 400
@@ -507,7 +520,7 @@ async function handleToken (req, res) {
 		res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Missing code' }))
 		return
 	}
-	const authCode = db.oauthCodes.consume(code)
+	const authCode = db.tokens.consumeAuthCode(code)
 	if (!authCode) {
 		console.warn('[oauth] Token exchange failed: Invalid or expired authorization code')
 		res.statusCode = 400
@@ -588,9 +601,9 @@ async function handleRevoke (req, res) {
 	if (session) {
 		const links = db.links.listBySessionId(session.id)
 		for (const link of links) {
-			if (link.app?.provider === 'google') {
-				const upstreamToken = link.app.credentials?.refreshToken || link.app.credentials?.accessToken
-				if (upstreamToken) await revokeGoogleToken(upstreamToken)
+			const provider = getProvider(link.app?.provider)
+			if (provider?.revokeToken) {
+				await provider.revokeToken(link.app)
 			}
 		}
 		db.tokens.remove(session.id)
@@ -603,23 +616,39 @@ async function handleRevoke (req, res) {
 const routes = {
 	'/.well-known/oauth-protected-resource': (req, res) => handleProtectedResourceMetadata(req, res),
 	'/.well-known/oauth-authorization-server': (req, res) => handleAuthServerMetadata(req, res),
+	'/oauth/register': (req, res) => handleRegister(req, res),
 	'/oauth/authorize': (req, res, { query }) => handleAuthorize(req, res, query),
 	'/oauth/authorize/consent': (req, res) => handleAuthorizeConsent(req, res),
 	'/oauth/verify': (req, res, { query }) => handleVerify(req, res, query),
 	'/oauth/callback': (req, res, { query }) => handleCallback(req, res, query),
 	'/oauth/token': (req, res) => handleToken(req, res),
-	'/oauth/revoke': (req, res) => handleRevoke(req, res),
-	'/providers/google/connect': (req, res, { query }) => handleGoogleConnect(req, res, query),
-	'/providers/google/consent': (req, res) => handleGoogleConsent(req, res),
-	'/providers/google/callback': (req, res, { query }) => handleCallback(req, res, query)
+	'/oauth/revoke': (req, res) => handleRevoke(req, res)
 }
 
 async function handleOauth (req, res, { pathname, query }) {
 	const handler = routes[pathname]
-	if (!handler) {
-		const err = new Error('not found')
-		err.code = 404
-		throw err
+	if (handler) {
+		await handler(req, res, { query })
+		return
 	}
-	await handler(req, res, { query })
+	const providerMatch = pathname.match(/^\/providers\/([a-z0-9_-]+)\/(connect|consent|callback)$/i)
+	if (providerMatch) {
+		const [, providerName, action] = providerMatch
+		const id = providerName.toLowerCase()
+		if (action === 'connect') {
+			await handleProviderConnect(req, res, query, id)
+			return
+		}
+		if (action === 'consent') {
+			await handleProviderConsent(req, res, id)
+			return
+		}
+		if (action === 'callback') {
+			await handleCallback(req, res, query)
+			return
+		}
+	}
+	const err = new Error('not found')
+	err.code = 404
+	throw err
 }

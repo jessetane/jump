@@ -1,6 +1,7 @@
 export {
 	evaluatePolicy,
 	matchPattern,
+	normalizeUrl,
 	parsePolicy,
 	validatePolicy
 }
@@ -75,7 +76,7 @@ function validatePolicy (policy) {
 		}
 		if (rule.origin !== undefined) {
 			if (typeof rule.origin !== 'string' || !rule.origin.startsWith('https://')) {
-				return { valid: false, error: `Rule at index ${i} origin must be an HTTPS origin (e.g. "https://sheets.googleapis.com" or "https://*.googleapis.com")` }
+				return { valid: false, error: `Rule at index ${i} origin must be an HTTPS origin (e.g. "https://api.stripe.com" or "https://*.googleapis.com")` }
 			}
 			const stripped = rule.origin.trim().replace(/\/+$/, '')
 			const hostPart = stripped.slice('https://'.length)
@@ -128,7 +129,7 @@ function matchPattern (pattern, str) {
 	}
 }
 
-function normalizeUrl (targetUrl) {
+function normalizeUrl (targetUrl, baseUrl = null) {
 	if (!targetUrl || typeof targetUrl !== 'string') return null
 	let clean = targetUrl.trim()
 	if (clean.startsWith('https:/') && !clean.startsWith('https://')) {
@@ -137,9 +138,8 @@ function normalizeUrl (targetUrl) {
 	let fullUrl = clean
 	if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
 		const noLeadingSlash = clean.replace(/^\/+/, '')
-		fullUrl = /^[a-zA-Z0-9-]+\.googleapis\.com(\/|$)/i.test(noLeadingSlash)
-			? `https://${noLeadingSlash}`
-			: `https://www.googleapis.com/${noLeadingSlash}`
+		const cleanBase = (baseUrl || 'http://localhost').replace(/\/+$/, '')
+		fullUrl = `${cleanBase}/${noLeadingSlash}`
 	}
 	try {
 		return new URL(fullUrl)
@@ -164,7 +164,7 @@ function evaluatePolicy (policy, req = {}) {
 	if (typeof req.url === 'string' && (/(?:%2e%2e|%2e\.|%2E%2E|%2E\.|\.%2e|\.%2E)(?:[/?#]|$)/i.test(req.url) || /\/\.\.(?:[/?#]|$)/.test(req.url))) {
 		return { allowed: false, reason: 'Invalid path: path traversal is not permitted' }
 	}
-	const parsedUrl = req.url ? normalizeUrl(req.url) : null
+	const parsedUrl = req.url ? normalizeUrl(req.url, req.baseUrl) : null
 	if (!parsedUrl) {
 		return { allowed: false, reason: 'Invalid or missing target URL' }
 	}

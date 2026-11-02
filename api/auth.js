@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { revokeGoogleToken } from '../providers/google.js'
+import { getProvider } from '../providers/index.js'
 import { parsePolicy } from '../policy.js'
 
 export {
@@ -16,7 +16,24 @@ export {
 	linkApp,
 	unlinkApp,
 	updateEmail,
-	updateUser
+	updateUser,
+	validateBaseUrl
+}
+
+function validateBaseUrl (baseUrl) {
+	if (!baseUrl || typeof baseUrl !== 'string') return null
+	let parsed
+	try {
+		parsed = new URL(baseUrl.trim())
+	} catch {
+		return null
+	}
+	const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '[::1]'
+	if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLocal)) {
+		return null
+	}
+	const pathname = parsed.pathname.replace(/\/+$/, '')
+	return `${parsed.origin}${pathname}`
 }
 
 async function whoami (token) {
@@ -267,7 +284,7 @@ async function listApps (token) {
 }
 
 async function connectApp (token, opts = {}) {
-	let { provider, name, apiKey, account, credentials, appId } = opts
+	let { provider, name, apiKey, account, baseUrl, credentials, appId } = opts
 	const appUrl = process.env.APP_URL || 'http://localhost:8080'
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
@@ -284,19 +301,37 @@ async function connectApp (token, opts = {}) {
 		const existing = db.tokens.get(appId)
 		if (existing) provider = existing.provider
 	}
-	provider = provider || 'google'
-	if (provider === 'google' && !apiKey && !credentials) {
+	provider = (provider || 'google').toLowerCase()
+	const providerDef = getProvider(provider)
+	if (providerDef?.type === 'oauth' && !apiKey && !credentials) {
 		const reauthParam = appId ? `&reauth_app_id=${encodeURIComponent(appId)}` : ''
 		return {
 			actionRequired: 'oauth_flow',
-			connectUrl: `${appUrl.replace(/\/$/, '')}/providers/google/connect?session_id=${session.id}${reauthParam}`
+			connectUrl: `${appUrl.replace(/\/$/, '')}/providers/${providerDef.id}/connect?session_id=${session.id}${reauthParam}`
 		}
 	}
-	let creds = credentials
-	if (!creds && apiKey) {
-		creds = { apiKey, ...(account && { account: String(account).trim() }) }
-	} else if (!creds && account) {
-		creds = { account: String(account).trim() }
+	const rawBase = baseUrl || credentials?.baseUrl || providerDef?.baseUrl || null
+	const normalizedBaseUrl = rawBase ? validateBaseUrl(rawBase) : null
+	if ((apiKey || providerDef?.type === 'api_key') && !normalizedBaseUrl) {
+		const error = new Error('Valid https:// baseUrl is required for api_key apps')
+		error.status = 400
+		throw error
+	}
+	if (baseUrl !== undefined && !normalizedBaseUrl) {
+		const error = new Error('Valid https:// baseUrl is required for api_key apps')
+		error.status = 400
+		throw error
+	}
+	let creds = credentials ? { ...credentials } : null
+	if (creds && normalizedBaseUrl) {
+		creds.baseUrl = normalizedBaseUrl
+	}
+	if (!creds && (apiKey || account || normalizedBaseUrl)) {
+		creds = {
+			...(apiKey && { apiKey }),
+			...(account && { account: String(account).trim() }),
+			...(normalizedBaseUrl && { baseUrl: normalizedBaseUrl })
+		}
 	}
 	const app = db.tokens.create({
 		userId: session.userId,
@@ -312,7 +347,8 @@ async function connectApp (token, opts = {}) {
 			provider: app.provider,
 			type: app.type,
 			name: app.name,
-			account: app.credentials?.account || app.credentials?.email || null
+			account: app.credentials?.account || app.credentials?.email || null,
+			...(app.credentials?.baseUrl ? { baseUrl: app.credentials.baseUrl } : {})
 		}
 	}
 }
@@ -338,9 +374,11 @@ async function disconnectApp (token, opts = {}) {
 		throw error
 	}
 	const shouldRevoke = revoke !== false && revoke !== 'false' && revoke !== 0
-	if (shouldRevoke && targetApp.provider === 'google') {
-		const upstream = targetApp.credentials?.refreshToken || targetApp.credentials?.accessToken
-		if (upstream) await revokeGoogleToken(upstream)
+	if (shouldRevoke) {
+		const providerDef = getProvider(targetApp.provider)
+		if (providerDef?.revokeToken) {
+			await providerDef.revokeToken(targetApp)
+		}
 	}
 	db.tokens.remove(targetApp.id)
 	return {
@@ -471,7 +509,7 @@ async function updateUser (token, opts = {}) {
 }
 
 async function updateApp (token, opts = {}) {
-	const { appId, name, account } = opts
+	const { appId, name, account, baseUrl } = opts
 	const appUrl = process.env.APP_URL || 'http://localhost:8080'
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
@@ -495,13 +533,23 @@ async function updateApp (token, opts = {}) {
 		error.status = 404
 		throw error
 	}
+	let normalizedBaseUrl
+	if (baseUrl !== undefined) {
+		normalizedBaseUrl = validateBaseUrl(baseUrl)
+		if (!normalizedBaseUrl) {
+			const error = new Error('Valid https:// baseUrl is required for api_key apps')
+			error.status = 400
+			throw error
+		}
+	}
 	if (name !== undefined) {
 		db.tokens.updateName(appId, name)
 	}
-	if (account !== undefined) {
+	if (account !== undefined || baseUrl !== undefined) {
 		const updatedCreds = {
 			...(targetApp.credentials || {}),
-			account: account ? String(account).trim() : null
+			...(account !== undefined ? { account: account ? String(account).trim() : null } : {}),
+			...(baseUrl !== undefined ? { baseUrl: normalizedBaseUrl } : {})
 		}
 		db.tokens.updateCredentials(appId, { credentials: updatedCreds })
 	}
@@ -514,6 +562,7 @@ async function updateApp (token, opts = {}) {
 			type: updated.type,
 			name: updated.name,
 			account: updated.credentials?.account || updated.credentials?.email || null,
+			...(updated.credentials?.baseUrl ? { baseUrl: updated.credentials.baseUrl } : {}),
 			scopes: updated.scopes,
 			expiresAt: updated.expiresAt,
 			created: updated.created,
