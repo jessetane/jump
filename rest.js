@@ -1,4 +1,5 @@
 import * as api from './api/index.js'
+import { getBaseUrl } from './oauth.js'
 import { getBody } from './util.js'
 
 export {
@@ -69,7 +70,8 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 		method: req.method,
 		body,
 		appId,
-		account
+		account,
+		appUrl: getBaseUrl(req)
 	}, token)
 	if (result?.binary) {
 		sendBinary(res, result.data, result.mimeType)
@@ -87,19 +89,19 @@ const routes = {
 		}
 	},
 	'/api/whoami': {
-		async GET (req, res, { token }) {
-			const result = await api.auth.whoami(token)
+		async GET (req, res, { token, appUrl }) {
+			const result = await api.auth.whoami(token, { appUrl })
 			sendJson(res, result)
 		}
 	},
 	'/api/sessions': {
-		async GET (req, res, { token }) {
-			const result = await api.auth.list(token)
+		async GET (req, res, { token, appUrl }) {
+			const result = await api.auth.list(token, { appUrl })
 			sendJson(res, result)
 		},
-		async POST (req, res, { token }) {
+		async POST (req, res, { token, appUrl }) {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.createSession(token, body)
+			const result = await api.auth.createSession(token, { ...body, appUrl })
 			sendJson(res, result, 201)
 		},
 		async DELETE (req, res, { token, query }) {
@@ -108,26 +110,27 @@ const routes = {
 		}
 	},
 	'/api/apps': {
-		async GET (req, res, { token }) {
-			const result = await api.auth.listApps(token)
+		async GET (req, res, { token, appUrl }) {
+			const result = await api.auth.listApps(token, { appUrl })
 			sendJson(res, result)
 		},
-		async POST (req, res, { token }) {
+		async POST (req, res, { token, appUrl }) {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.connectApp(token, body)
+			const result = await api.auth.connectApp(token, { ...body, appUrl })
 			sendJson(res, result, 201)
 		}
 	},
 	'/api/links': {
-		async POST (req, res, { token }) {
+		async POST (req, res, { token, appUrl }) {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.linkApp(token, body)
+			const result = await api.auth.linkApp(token, { ...body, appUrl })
 			sendJson(res, result, 201)
 		},
-		async DELETE (req, res, { token, query }) {
+		async DELETE (req, res, { token, query, appUrl }) {
 			const result = await api.auth.unlinkApp(token, {
 				sessionId: query.sessionId,
-				appId: query.appId
+				appId: query.appId,
+				appUrl
 			})
 			sendJson(res, result)
 		}
@@ -135,10 +138,11 @@ const routes = {
 }
 
 async function handleRest (req, res, { pathname, url, query, token }) {
+	const appUrl = getBaseUrl(req)
 	if (pathname.startsWith('/api/sessions/')) {
 		const sessionId = pathname.slice('/api/sessions/'.length)
 		if (req.method === 'GET') {
-			const result = await api.auth.get(token, sessionId)
+			const result = await api.auth.get(token, sessionId, { appUrl })
 			sendJson(res, result)
 			return
 		}
@@ -149,7 +153,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 		}
 		if (req.method === 'PATCH' || req.method === 'PUT') {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.updateSession(token, { ...body, sessionId })
+			const result = await api.auth.updateSession(token, { ...body, sessionId, appUrl })
 			sendJson(res, result)
 			return
 		}
@@ -161,13 +165,13 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 		const appId = pathname.slice('/api/apps/'.length)
 		if (req.method === 'PATCH' || req.method === 'PUT') {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.updateApp(token, { ...body, appId })
+			const result = await api.auth.updateApp(token, { ...body, appId, appUrl })
 			sendJson(res, result)
 			return
 		}
 		if (req.method === 'DELETE') {
 			const revoke = query?.revoke !== 'false' && query?.revoke !== '0'
-			const result = await api.auth.disconnectApp(token, { appId, revoke })
+			const result = await api.auth.disconnectApp(token, { appId, revoke, appUrl })
 			sendJson(res, result)
 			return
 		}
@@ -183,7 +187,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 			err.code = 405
 			throw err
 		}
-		await handler(req, res, { token, query })
+		await handler(req, res, { token, query, appUrl })
 		return
 	}
 	const rawPathname = url?.pathname || pathname

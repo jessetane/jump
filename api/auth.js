@@ -36,13 +36,13 @@ function validateBaseUrl (baseUrl) {
 	return `${parsed.origin}${pathname}`
 }
 
-async function whoami (token) {
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
+async function whoami (token, opts = {}) {
+	const appUrl = (opts.appUrl || 'http://localhost:8080').replace(/\/$/, '')
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
 		return {
 			authenticated: false,
-			signInUrl: `${appUrl.replace(/\/$/, '')}/oauth/authorize`,
+			signInUrl: `${appUrl}/oauth/authorize`,
 			message: 'Missing or expired Bearer token.'
 		}
 	}
@@ -77,14 +77,19 @@ async function whoami (token) {
 	}
 }
 
-async function list (token) {
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
+function requireSession (token, opts = {}) {
+	const appUrl = (opts.appUrl || 'http://localhost:8080').replace(/\/$/, '')
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
+		const error = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
 		error.status = 401
 		throw error
 	}
+	return { session, appUrl }
+}
+
+async function list (token, opts = {}) {
+	const { session } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: session administration requires admin privileges')
 		error.status = 403
@@ -115,14 +120,8 @@ async function list (token) {
 	return { sessions }
 }
 
-async function get (token, sessionId) {
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+async function get (token, sessionId, opts = {}) {
+	const { session } = requireSession(token, opts)
 	if (!session.admin && sessionId !== session.id) {
 		const error = new Error('Access denied: session administration requires admin privileges')
 		error.status = 403
@@ -159,13 +158,7 @@ async function get (token, sessionId) {
 
 async function createSession (token, opts = {}) {
 	const { name = 'New Session', admin = false, linkAppIds = [], policy = null } = opts
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+	const { session } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: session administration requires admin privileges')
 		error.status = 403
@@ -255,14 +248,8 @@ async function revoke (token, { sessionId, allOthers } = {}) {
 	}
 }
 
-async function listApps (token) {
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+async function listApps (token, opts = {}) {
+	const { session } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: app administration requires admin privileges')
 		error.status = 403
@@ -285,13 +272,7 @@ async function listApps (token) {
 
 async function connectApp (token, opts = {}) {
 	let { provider, name, apiKey, account, baseUrl, credentials, appId } = opts
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+	const { session, appUrl } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: app administration requires admin privileges')
 		error.status = 403
@@ -307,7 +288,7 @@ async function connectApp (token, opts = {}) {
 		const reauthParam = appId ? `&reauth_app_id=${encodeURIComponent(appId)}` : ''
 		return {
 			actionRequired: 'oauth_flow',
-			connectUrl: `${appUrl.replace(/\/$/, '')}/providers/${providerDef.id}/connect?session_id=${session.id}${reauthParam}`
+			connectUrl: `${appUrl}/providers/${providerDef.id}/connect?session_id=${session.id}${reauthParam}`
 		}
 	}
 	const rawBase = baseUrl || credentials?.baseUrl || providerDef?.baseUrl || null
@@ -355,13 +336,7 @@ async function connectApp (token, opts = {}) {
 
 async function disconnectApp (token, opts = {}) {
 	const { appId, revoke = true } = opts
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+	const { session } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: app administration requires admin privileges')
 		error.status = 403
@@ -387,14 +362,9 @@ async function disconnectApp (token, opts = {}) {
 	}
 }
 
-async function linkApp (token, { sessionId, appId, policy = null } = {}) {
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+async function linkApp (token, opts = {}) {
+	const { sessionId, appId, policy = null } = opts
+	const { session } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: link administration requires admin privileges')
 		error.status = 403
@@ -425,14 +395,9 @@ async function linkApp (token, { sessionId, appId, policy = null } = {}) {
 	}
 }
 
-async function unlinkApp (token, { sessionId, appId } = {}) {
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+async function unlinkApp (token, opts = {}) {
+	const { sessionId, appId } = opts
+	const { session } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: link administration requires admin privileges')
 		error.status = 403
@@ -448,13 +413,7 @@ async function unlinkApp (token, { sessionId, appId } = {}) {
 
 async function updateEmail (token, opts = {}) {
 	const newEmail = opts.email || opts.newEmail
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+	const { session } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: updating account email requires admin privileges')
 		error.status = 403
@@ -484,19 +443,13 @@ async function updateEmail (token, opts = {}) {
 }
 
 async function updateUser (token, opts = {}) {
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+	const { session } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: updating user profile requires admin privileges')
 		error.status = 403
 		throw error
 	}
-	const { id, email, ...updates } = opts
+	const { id, email, appUrl, ...updates } = opts
 	const user = db.users.updateUser(session.userId, updates)
 	return {
 		updated: true,
@@ -510,13 +463,7 @@ async function updateUser (token, opts = {}) {
 
 async function updateApp (token, opts = {}) {
 	const { appId, name, account, baseUrl } = opts
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+	const { session } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: app administration requires admin privileges')
 		error.status = 403
@@ -573,13 +520,7 @@ async function updateApp (token, opts = {}) {
 
 async function updateSession (token, opts = {}) {
 	const { sessionId, name, admin, rotateToken } = opts
-	const appUrl = process.env.APP_URL || 'http://localhost:8080'
-	const session = token ? db.tokens.getByToken(token) : null
-	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl.replace(/\/$/, '')}/oauth/authorize`)
-		error.status = 401
-		throw error
-	}
+	const { session } = requireSession(token, opts)
 	const targetId = sessionId || session.id
 	if (!session.admin && targetId !== session.id) {
 		const error = new Error('Access denied: session administration requires admin privileges')

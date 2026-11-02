@@ -133,20 +133,20 @@ function buildProviderTool (providerName, providerLinks = []) {
 }
 
 const adminActions = {
-	whoami: (args, token) => api.auth.whoami(token),
-	list: (args, token) => api.auth.list(token),
-	get: (args, token) => api.auth.get(token, args.sessionId),
-	create_session: (args, token) => api.auth.createSession(token, args),
-	update_session: (args, token) => api.auth.updateSession(token, args),
+	whoami: (args, token, appUrl) => api.auth.whoami(token, { appUrl }),
+	list: (args, token, appUrl) => api.auth.list(token, { appUrl }),
+	get: (args, token, appUrl) => api.auth.get(token, args.sessionId, { appUrl }),
+	create_session: (args, token, appUrl) => api.auth.createSession(token, { ...args, appUrl }),
+	update_session: (args, token, appUrl) => api.auth.updateSession(token, { ...args, appUrl }),
 	revoke: (args, token) => api.auth.revoke(token, args),
-	list_apps: (args, token) => api.auth.listApps(token),
-	connect_app: (args, token) => api.auth.connectApp(token, args),
-	disconnect_app: (args, token) => api.auth.disconnectApp(token, args),
-	update_app: (args, token) => api.auth.updateApp(token, args),
-	link_app: (args, token) => api.auth.linkApp(token, args),
-	unlink_app: (args, token) => api.auth.unlinkApp(token, args),
-	update_email: (args, token) => api.auth.updateEmail(token, args),
-	update_user: (args, token) => api.auth.updateUser(token, args)
+	list_apps: (args, token, appUrl) => api.auth.listApps(token, { appUrl }),
+	connect_app: (args, token, appUrl) => api.auth.connectApp(token, { ...args, appUrl }),
+	disconnect_app: (args, token, appUrl) => api.auth.disconnectApp(token, { ...args, appUrl }),
+	update_app: (args, token, appUrl) => api.auth.updateApp(token, { ...args, appUrl }),
+	link_app: (args, token, appUrl) => api.auth.linkApp(token, { ...args, appUrl }),
+	unlink_app: (args, token, appUrl) => api.auth.unlinkApp(token, { ...args, appUrl }),
+	update_email: (args, token, appUrl) => api.auth.updateEmail(token, { ...args, appUrl }),
+	update_user: (args, token, appUrl) => api.auth.updateUser(token, { ...args, appUrl })
 }
 
 function formatContent (result) {
@@ -200,7 +200,7 @@ function formatError (err, toolName = 'tool') {
 	}
 }
 
-async function executeTool (name, args = {}, token) {
+async function executeTool (name, args = {}, token, appUrl) {
 	if (!name || typeof name !== 'string') {
 		console.warn('[mcp] tools/call rejected: Missing tool name')
 		return { isError: true, content: [{ type: 'text', text: 'Tool name is required' }] }
@@ -215,13 +215,13 @@ async function executeTool (name, args = {}, token) {
 				err.status = 400
 				throw err
 			}
-			const result = await handle(args, token)
+			const result = await handle(args, token, appUrl)
 			return { content: formatContent(result) }
 		}
 		const apiMatch = name.match(/^([a-z0-9_-]+)_api$/i)
 		if (apiMatch) {
 			const provider = apiMatch[1].toLowerCase()
-			const result = await api.proxy.request({ ...args, provider }, token)
+			const result = await api.proxy.request({ ...args, provider, appUrl }, token)
 			return { content: formatContent(result) }
 		}
 		console.warn(`[mcp] tools/call rejected: Unknown tool "${name}"`)
@@ -288,21 +288,21 @@ const rpcMethods = {
 		}
 		return { tools: getAvailableTools(token) }
 	},
-	'tools/call': (params, token) => {
+	'tools/call': (params, token, appUrl) => {
 		const name = params?.name
 		const args = { ...params?.arguments }
 		if (process.env.NODE_ENV !== 'test') {
 			console.log(`[mcp] tools/call: name=${name || '(missing)'} args=${JSON.stringify(args)}`)
 		}
 		if (token) db.tokens.touchByToken(token)
-		return executeTool(name, args, token)
+		return executeTool(name, args, token, appUrl)
 	}
 }
 
 async function handleMcp (req, res, token) {
+	const base = getBaseUrl(req)
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
-		const base = getBaseUrl(req)
 		res.statusCode = 401
 		res.setHeader(
 			'www-authenticate',
@@ -353,7 +353,7 @@ async function handleMcp (req, res, token) {
 	rpc.methods = {
 		...rpcMethods,
 		'tools/list': params => rpcMethods['tools/list'](params, token),
-		'tools/call': params => rpcMethods['tools/call'](params, token)
+		'tools/call': params => rpcMethods['tools/call'](params, token, base)
 	}
 	const request = await getBody(req)
 	await rpc.receive(request)

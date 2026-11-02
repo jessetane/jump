@@ -1,5 +1,5 @@
 # jump
-MCP jump host for upstream REST APIs.
+MCP jump host for HTTP APIs.
 
 ## Why
 

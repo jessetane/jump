@@ -5,22 +5,15 @@ export {
 	name,
 	type,
 	baseUrl,
+	services,
 	toolDescription,
 	urlParamDescription,
-	getFreshToken,
-	refreshAppToken,
-	getUserInfo,
-	revokeToken,
-	revokeGoogleToken,
 	buildAuthUrl,
 	exchangeCode,
+	getFreshToken,
+	revokeToken,
 	normalizeTargetUrl,
-	isAllowedUrl,
-	isGoogleApiUrl,
-	baseScopes,
-	allScopes,
-	services,
-	buildScopesFromSelection
+	isAllowedUrl
 }
 
 const id = 'google'
@@ -152,8 +145,6 @@ function buildScopesFromSelection (selectedServices = [], writeServiceIds = []) 
 	}
 	return Array.from(scopeSet).join(' ')
 }
-
-const allScopes = buildScopesFromSelection(Object.keys(services), Object.keys(services))
 
 function buildAuthUrl ({ state, callbackUrl, services: selectedServices = [], write = [] }) {
 	if (!clientId) {

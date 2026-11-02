@@ -19,7 +19,7 @@ fs.rmSync(`${testDbPath}-shm`, { force: true })
 
 const { server } = await import('../index.js')
 const db = await import('../db/index.js')
-const { isGoogleApiUrl } = await import('../providers/google.js')
+const { isAllowedUrl: isGoogleAllowedUrl } = await import('../providers/google.js')
 const { readResponseBody } = await import('../api/proxy.js')
 const { executeTool } = await import('../mcp.js')
 const { isAllowedRedirectUri } = await import('../oauth.js')
@@ -239,17 +239,17 @@ test('mcp rejects unknown tool call', async () => {
 	assert.equal(data.result.content[0].text, 'Unknown tool: non_existent_tool')
 })
 
-test('isGoogleApiUrl domain restrictions', () => {
-	assert.equal(isGoogleApiUrl('https://www.googleapis.com/drive/v3/files'), true)
-	assert.equal(isGoogleApiUrl('https://sheets.googleapis.com/v4/spreadsheets'), true)
-	assert.equal(isGoogleApiUrl('https://docs.googleapis.com/v1/documents'), true)
-	assert.equal(isGoogleApiUrl('https://calendar.googleapis.com/calendar/v3/events'), true)
-	assert.equal(isGoogleApiUrl('https://googleapis.com/test'), true)
-	assert.equal(isGoogleApiUrl('http://www.googleapis.com/test'), false)
-	assert.equal(isGoogleApiUrl('https://evil.com'), false)
-	assert.equal(isGoogleApiUrl('https://evilgoogleapis.com'), false)
-	assert.equal(isGoogleApiUrl('https://localhost:8080'), false)
-	assert.equal(isGoogleApiUrl('not-a-url'), false)
+test('google.isAllowedUrl domain restrictions', () => {
+	assert.equal(isGoogleAllowedUrl('https://www.googleapis.com/drive/v3/files').allowed, true)
+	assert.equal(isGoogleAllowedUrl('https://sheets.googleapis.com/v4/spreadsheets').allowed, true)
+	assert.equal(isGoogleAllowedUrl('https://docs.googleapis.com/v1/documents').allowed, true)
+	assert.equal(isGoogleAllowedUrl('https://calendar.googleapis.com/calendar/v3/events').allowed, true)
+	assert.equal(isGoogleAllowedUrl('https://googleapis.com/test').allowed, true)
+	assert.equal(isGoogleAllowedUrl('http://www.googleapis.com/test').allowed, false)
+	assert.equal(isGoogleAllowedUrl('https://evil.com').allowed, false)
+	assert.equal(isGoogleAllowedUrl('https://evilgoogleapis.com').allowed, false)
+	assert.equal(isGoogleAllowedUrl('https://localhost:8080').allowed, false)
+	assert.equal(isGoogleAllowedUrl('not-a-url').allowed, false)
 })
 
 test('rejects non-googleapis URLs in google_api tool', async () => {

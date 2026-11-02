@@ -52,12 +52,13 @@ const DISALLOWED_REDIRECT_SCHEMES = new Set([
 function getBaseUrl (req) {
 	if (req && req.headers && (req.headers['x-forwarded-host'] || req.headers.host)) {
 		const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host).split(',')[0].trim()
-		if (rawHost && !rawHost.startsWith('localhost') && !rawHost.startsWith('127.0.0.1') && !rawHost.startsWith('[::1]')) {
-			const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim()
+		if (rawHost) {
+			const isLocal = rawHost.startsWith('localhost') || rawHost.startsWith('127.0.0.1') || rawHost.startsWith('[::1]')
+			const proto = String(req.headers['x-forwarded-proto'] || (isLocal ? 'http' : 'https')).split(',')[0].trim()
 			return `${proto}://${rawHost}`
 		}
 	}
-	return (process.env.APP_URL || 'http://localhost:8080').replace(/\/$/, '')
+	return 'http://localhost:8080'
 }
 
 function getClientIp (req) {

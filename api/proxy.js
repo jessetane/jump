@@ -97,13 +97,13 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 	return result
 }
 
-async function request ({ provider: providerName = 'google', url, method = 'GET', body, headers, appId, account } = {}, token) {
+async function request ({ provider: providerName = 'google', url, method = 'GET', body, headers, appId, account, appUrl: rawAppUrl } = {}, token) {
 	if (!url) {
 		const err = new Error('URL is required')
 		err.status = 400
 		throw err
 	}
-	const appUrl = (process.env.APP_URL || 'http://localhost:8080').replace(/\/$/, '')
+	const appUrl = (rawAppUrl || 'http://localhost:8080').replace(/\/$/, '')
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
 		const err = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
