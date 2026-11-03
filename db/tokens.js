@@ -172,7 +172,8 @@ function getByToken (token) {
 }
 
 function findRevocable (token) {
-	if (!token) return null
+	if (!token || typeof token !== 'string') return null
+	pruneDormant()
 	const row = sqlite.prepare(`
 		SELECT tokens.*, users.email, users.name AS user_name
 		FROM tokens
@@ -186,11 +187,11 @@ function findRevocable (token) {
 function issueOauthTokens (id) {
 	if (!id) return null
 	const session = get(id)
-	if (!session) return null
+	if (!session || session.provider !== 'self' || session.type !== 'bearer') return null
 	const now = Date.now()
 	const token = session.token || randomUUID()
 	const expiresAt = now + 3600 * 1000
-	const refreshToken = randomUUID()
+	const refreshToken = session.credentials?.refreshToken || randomUUID()
 	const credentials = JSON.stringify({
 		...(session.credentials || {}),
 		refreshToken
@@ -217,19 +218,15 @@ function refreshOauthSession (refreshToken) {
 	const session = formatToken(row)
 	if (!session) return null
 	const now = Date.now()
-	const newAccessToken = randomUUID()
-	const newRefreshToken = randomUUID()
-	const newExpiresAt = now + 3600 * 1000
-	const credentials = JSON.stringify({
-		...(session.credentials || {}),
-		refreshToken: newRefreshToken
-	})
 	const nowIso = new Date(now).toISOString()
+	const isFresh = Boolean(session.token && session.expiresAt && (session.expiresAt - now > (3600 - 60) * 1000))
+	const accessToken = isFresh ? session.token : randomUUID()
+	const expiresAt = isFresh ? session.expiresAt : now + 3600 * 1000
 	sqlite.prepare(`
 		UPDATE tokens
-		SET token = ?, credentials = ?, expires_at = ?, updated = ?
+		SET token = ?, expires_at = ?, updated = ?
 		WHERE id = ?
-	`).run(newAccessToken, credentials, newExpiresAt, nowIso, session.id)
+	`).run(accessToken, expiresAt, nowIso, session.id)
 	return get(session.id)
 }
 
@@ -249,6 +246,7 @@ function listByUserId (userId, opts = {}) {
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.user_id = ? AND tokens.type NOT IN ('oauth_state', 'oauth_code')
+			AND NOT (tokens.provider = 'self' AND tokens.type = 'bearer' AND tokens.token IS NULL)
 	`
 	const params = [userId]
 	if (opts.provider) {
@@ -291,8 +289,15 @@ function setAdmin (id, admin = true) {
 
 function rotateToken (id, newToken = randomUUID()) {
 	if (!id) return null
-	const now = new Date().toISOString()
-	sqlite.prepare('UPDATE tokens SET token = ?, updated = ? WHERE id = ?').run(newToken, now, id)
+	const nowMs = Date.now()
+	const now = new Date(nowMs).toISOString()
+	sqlite.prepare(`
+		UPDATE tokens
+		SET token = ?,
+			expires_at = CASE WHEN expires_at IS NOT NULL THEN ? ELSE NULL END,
+			updated = ?
+		WHERE id = ? AND provider = 'self' AND type = 'bearer'
+	`).run(newToken, nowMs + 3600 * 1000, now, id)
 	return get(id)
 }
 

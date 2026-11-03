@@ -327,7 +327,16 @@ test('oauth code exchange flow', async () => {
 	assert.equal(db.tokens.consumeAuthCode(code2), null)
 	const issuedSession = db.tokens.get(session.id)
 	assert.ok(issuedSession.expiresAt > Date.now())
-	assert.deepEqual(issuedSession.credentials, { refreshToken: data.refresh_token })
+	assert.equal(issuedSession.credentials.refreshToken, data.refresh_token)
+	const nonSelfApp = db.tokens.create({
+		userId: issuedSession.userId,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Non-self App'
+	})
+	assert.equal(db.tokens.issueOauthTokens(nonSelfApp.id), null, 'issueOauthTokens must return null on non-self/bearer row')
+	const reissuedSession = db.tokens.issueOauthTokens(session.id)
+	assert.equal(reissuedSession.credentials.refreshToken, data.refresh_token, 'Re-issuing OAuth tokens preserves existing refreshToken')
 })
 
 test('oauth refresh_token grant rotation, access_token expiration, and embedded session indefinite TTL', async () => {
@@ -399,12 +408,12 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	const rotatedTokens = await refreshRes.json()
 	assert.ok(rotatedTokens.access_token)
 	assert.ok(rotatedTokens.refresh_token)
-	assert.notEqual(rotatedTokens.access_token, initialTokens.access_token, 'Access token must rotate on refresh')
-	assert.notEqual(rotatedTokens.refresh_token, initialTokens.refresh_token, 'Refresh token must rotate on refresh')
+	assert.notEqual(rotatedTokens.access_token, initialTokens.access_token, 'Access token must rotate when expired')
+	assert.equal(rotatedTokens.refresh_token, initialTokens.refresh_token, 'Refresh token must remain stable across refreshes')
 	assert.equal(rotatedTokens.token_type, 'Bearer')
 	assert.equal(rotatedTokens.expires_in, 3600)
 	assert.equal(rotatedTokens.scope, 'mcp')
-	const replayOldRefreshRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+	const concurrentRefreshRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({
@@ -412,16 +421,32 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 			refresh_token: initialTokens.refresh_token
 		})
 	})
-	assert.equal(replayOldRefreshRes.status, 400, 'Replaying old refresh_token must fail with 400')
-	const replayData = await replayOldRefreshRes.json()
-	assert.equal(replayData.error, 'invalid_grant')
+	assert.equal(concurrentRefreshRes.status, 200, 'Concurrent refresh with stable refresh_token must succeed')
+	const concurrentData = await concurrentRefreshRes.json()
+	assert.equal(concurrentData.access_token, rotatedTokens.access_token, 'Concurrent refresh within 60s window must return the same access_token')
+	assert.equal(concurrentData.refresh_token, initialTokens.refresh_token, 'Concurrent refresh must return the same refresh_token')
+	assert.ok(concurrentData.expires_in > 3500 && concurrentData.expires_in <= 3600)
+	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id = ?').run(Date.now() + 9000, session.id)
+	const proactiveRefreshRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			grant_type: 'refresh_token',
+			refresh_token: initialTokens.refresh_token
+		})
+	})
+	assert.equal(proactiveRefreshRes.status, 200, 'Proactive refresh 9s before expiry must succeed')
+	const proactiveTokens = await proactiveRefreshRes.json()
+	assert.notEqual(proactiveTokens.access_token, rotatedTokens.access_token, 'Proactive refresh past 60s dedup window must rotate access_token')
+	assert.equal(proactiveTokens.refresh_token, initialTokens.refresh_token, 'Proactive refresh must keep refresh_token stable')
+	assert.equal(proactiveTokens.expires_in, 3600, 'Proactive refresh must reset expires_in to 3600')
 	const oldTouchTime = new Date(Date.now() - 120000).toISOString()
 	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldTouchTime, session.id)
 	const validMcpRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: {
 			'content-type': 'application/json',
-			authorization: `Bearer ${rotatedTokens.access_token}`
+			authorization: `Bearer ${proactiveTokens.access_token}`
 		},
 		body: JSON.stringify({
 			jsonrpc: '2.0',
@@ -436,14 +461,14 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 		action: 'create_session',
 		name: 'Embedded Worker',
 		admin: false
-	}, rotatedTokens.access_token)
+	}, proactiveTokens.access_token)
 	assert.equal(embeddedRes.isError, undefined)
 	const embeddedData = JSON.parse(embeddedRes.content[0].text)
 	assert.equal(embeddedData.session.expiresAt, null)
 	const embeddedRow = db.tokens.get(embeddedData.session.id)
 	assert.equal(embeddedRow.expiresAt, null, 'Embedded session created via create_session must have expiresAt: null')
 	assert.equal(embeddedRow.credentials, null, 'Embedded session must not have refresh token credentials')
-	const whoamiRes = await executeTool('admin', { action: 'whoami' }, rotatedTokens.access_token)
+	const whoamiRes = await executeTool('admin', { action: 'whoami' }, proactiveTokens.access_token)
 	const whoamiData = JSON.parse(whoamiRes.content[0].text)
 	assert.ok(typeof whoamiData.session.expiresAt === 'number', 'whoami must expose expiresAt for OAuth session')
 	const dormantDate = new Date(Date.now() - 31 * 86400 * 1000).toISOString()
@@ -660,9 +685,13 @@ test('oauth consent html page, post consent, and scanner-safe two-step verify fl
 	assert.equal(db.tokens.findStateByMagicCode(stateObj.magicCode), null, 'POST /oauth/verify must consume magicCode')
 	const agentUser = db.users.getByEmail('agent@example.com')
 	const unexchangedSessions = db.tokens.listByUserId(agentUser.id, { provider: 'self' })
-	assert.equal(unexchangedSessions.length, 1)
-	assert.equal(unexchangedSessions[0].token, null, 'Unexchanged OAuth session must have token: null until /oauth/token is called')
-	assert.ok(unexchangedSessions[0].expiresAt > Date.now(), 'Unexchanged OAuth session must have temporary 10m expiresAt')
+	assert.deepEqual(unexchangedSessions, [], 'listByUserId must filter out unexchanged pending self sessions')
+	const codeRow = db.sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_code'").get(code)
+	const codeMeta = JSON.parse(codeRow.credentials)
+	const pendingSession = db.tokens.get(codeMeta.sessionId)
+	assert.ok(pendingSession)
+	assert.equal(pendingSession.token, null, 'Unexchanged OAuth session must have token: null until /oauth/token is called')
+	assert.ok(pendingSession.expiresAt > Date.now(), 'Unexchanged OAuth session must have temporary 10m expiresAt')
 })
 
 test('direct browser authorize without redirect_uri', async () => {
@@ -888,14 +917,23 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 	assert.equal(missingRes.status, 400)
 	const missingData = await missingRes.json()
 	assert.equal(missingData.error, 'invalid_request')
+	const nonStringTokenRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ token: 123 })
+	})
+	assert.equal(nonStringTokenRes.status, 400, 'Non-string token parameter must return 400 invalid_request')
+	const nonStringData = await nonStringTokenRes.json()
+	assert.equal(nonStringData.error, 'invalid_request')
 	const unknownRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({ token: 'nonexistent-token' }).toString()
 	})
 	assert.equal(unknownRes.status, 200)
-	const { session } = createTestSession({ email: 'revoke-endpoint@example.com' })
+	const { session, app: sharedApp } = createTestSession({ email: 'revoke-endpoint@example.com' })
 	assert.ok(db.tokens.get(session.id))
+	assert.ok(db.tokens.get(sharedApp.id))
 	const revokeRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -903,6 +941,7 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 	})
 	assert.equal(revokeRes.status, 200)
 	assert.equal(db.tokens.get(session.id), null)
+	assert.ok(db.tokens.get(sharedApp.id), 'Revoking a session via /oauth/revoke must not delete shared upstream app credentials')
 	const { session: sessionJson } = createTestSession({ email: 'revoke-json@example.com' })
 	assert.ok(db.tokens.get(sessionJson.id))
 	const revokeJsonRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
@@ -912,16 +951,18 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 	})
 	assert.equal(revokeJsonRes.status, 200)
 	assert.equal(db.tokens.get(sessionJson.id), null)
-	const { session: sessionRefreshRevoke } = createTestSession({ email: 'revoke-refresh@example.com' })
+	const { session: sessionRefreshRevoke, app: refreshSharedApp } = createTestSession({ email: 'revoke-refresh@example.com' })
 	const issuedRefresh = db.tokens.issueOauthTokens(sessionRefreshRevoke.id)
 	assert.ok(issuedRefresh.credentials?.refreshToken)
+	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id = ?').run(Date.now() - 5000, sessionRefreshRevoke.id)
 	const revokeByRefreshRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({ token: issuedRefresh.credentials.refreshToken }).toString()
 	})
 	assert.equal(revokeByRefreshRes.status, 200)
-	assert.equal(db.tokens.get(sessionRefreshRevoke.id), null, 'Revoking by refresh_token must delete the session')
+	assert.equal(db.tokens.get(sessionRefreshRevoke.id), null, 'Revoking by refresh_token must delete the session even if access_token expired')
+	assert.ok(db.tokens.get(refreshSharedApp.id), 'Revoking by refresh_token must preserve shared upstream app')
 })
 
 test('mcp auth whoami, list, and revoke', async () => {
@@ -962,6 +1003,9 @@ test('mcp auth whoami, list, and revoke', async () => {
 	assert.equal(other.id, session2.id)
 	assert.equal(other.ip, '10.0.0.5')
 	assert.equal(other.ua, 'ChatGPT/2.0')
+	const revokeAppAsSessionResult = await api.auth.revoke(session1.token, { sessionId: app.id })
+	assert.equal(revokeAppAsSessionResult.revoked, false, 'api.auth.revoke must reject non-self app IDs')
+	assert.ok(db.tokens.get(app.id), 'api.auth.revoke must not delete upstream app token')
 	const revokeOtherResult = await executeTool('admin', { action: 'revoke', allOthers: true }, session1.token)
 	assert.equal(revokeOtherResult.isError, undefined)
 	const revokeOtherParsed = JSON.parse(revokeOtherResult.content[0].text)
@@ -2131,6 +2175,22 @@ test('admin update_session action', async () => {
 	const newAuthCheck = await executeTool('admin', { action: 'whoami' }, newWorkerToken)
 	const newAuthData = JSON.parse(newAuthCheck.content[0].text)
 	assert.equal(newAuthData.authenticated, true, 'New token authenticates successfully')
+	assert.equal(newAuthData.session.expiresAt, null, 'Rotating embedded session token keeps expiresAt: null')
+	const oauthSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		name: 'Expiring OAuth Session',
+		expiresAt: Date.now() - 5000
+	})
+	const rotateOauthRes = await executeTool('admin', {
+		action: 'update_session',
+		sessionId: oauthSession.id,
+		rotateToken: true
+	}, adminSession.token)
+	assert.equal(rotateOauthRes.isError, undefined)
+	const rotateOauthData = JSON.parse(rotateOauthRes.content[0].text)
+	assert.ok(rotateOauthData.session.token)
+	assert.ok(rotateOauthData.session.expiresAt > Date.now() + 3500 * 1000, 'Rotating an expiring/expired OAuth session extends expiresAt by 1h')
 })
 
 test('provider_api fail-loud on unlinked session or missing appId', async () => {

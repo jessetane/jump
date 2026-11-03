@@ -12,8 +12,6 @@ export {
 	handleMcp
 }
 
-const SUPPORTED_PROTOCOL_VERSIONS = ['2025-03-26', '2024-11-05']
-
 const adminTool = {
 	name: 'admin',
 	description: 'Administer MCP sessions, connected upstream apps, routing policies, and user account settings.',
@@ -264,12 +262,10 @@ function getAvailableTools (token) {
 const rpcMethods = {
 	initialize: params => {
 		const requested = params?.protocolVersion
-		const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
-			? requested
-			: '2024-11-05'
+		const protocolVersion = typeof requested === 'string' && requested ? requested : '2024-11-05'
 		if (process.env.NODE_ENV !== 'test') {
 			const client = params?.clientInfo ? `${params.clientInfo.name || 'unknown'}/${params.clientInfo.version || ''}` : 'unknown'
-			console.log(`[mcp] initialize (client: ${client}, protocol: ${requested || 'unknown'} -> ${protocolVersion})`)
+			console.log(`[mcp] initialize (client: ${client}, protocol: ${protocolVersion})`)
 		}
 		return {
 			protocolVersion,

@@ -116,7 +116,7 @@ async function get (token, sessionId, opts = {}) {
 		throw error
 	}
 	const targetSession = db.tokens.get(sessionId)
-	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self') {
+	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self' || !targetSession.token) {
 		const error = new Error(`Session not found: ${sessionId}`)
 		error.status = 404
 		throw error
@@ -215,7 +215,7 @@ async function revoke (token, { sessionId, allOthers } = {}) {
 			throw error
 		}
 		const targetSession = db.tokens.get(sessionId)
-		if (!targetSession || targetSession.userId !== session.userId) {
+		if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self') {
 			return {
 				revoked: false,
 				message: `Session not found: ${sessionId}`
@@ -361,7 +361,7 @@ async function linkApp (token, opts = {}) {
 		throw error
 	}
 	const targetSession = db.tokens.get(sessionId)
-	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self') {
+	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self' || !targetSession.token) {
 		const error = new Error(`Session not found: ${sessionId}`)
 		error.status = 404
 		throw error
@@ -394,7 +394,7 @@ async function unlinkApp (token, opts = {}) {
 		throw error
 	}
 	const targetSession = db.tokens.get(sessionId)
-	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self') {
+	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self' || !targetSession.token) {
 		const error = new Error(`Session not found: ${sessionId}`)
 		error.status = 404
 		throw error
@@ -535,7 +535,7 @@ async function updateSession (token, opts = {}) {
 		throw error
 	}
 	const targetSession = db.tokens.get(targetId)
-	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self') {
+	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self' || !targetSession.token) {
 		const error = new Error(`Session not found: ${targetId}`)
 		error.status = 404
 		throw error

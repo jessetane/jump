@@ -814,6 +814,7 @@ async function handleToken (req, res) {
 	if (grantType === 'refresh_token') {
 		const refreshToken = params.refresh_token
 		if (!refreshToken) {
+			console.warn('[oauth] Token refresh failed: Missing refresh_token')
 			res.statusCode = 400
 			res.setHeader('content-type', 'application/json; charset=utf-8')
 			res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Missing refresh_token' }))
@@ -821,11 +822,13 @@ async function handleToken (req, res) {
 		}
 		const session = db.tokens.refreshOauthSession(refreshToken)
 		if (!session) {
+			console.warn('[oauth] Token refresh failed: Invalid or expired refresh token')
 			res.statusCode = 400
 			res.setHeader('content-type', 'application/json; charset=utf-8')
 			res.end(JSON.stringify({ error: 'invalid_grant', error_description: 'Invalid or expired refresh token' }))
 			return
 		}
+		const expiresIn = session.expiresAt ? Math.max(1, Math.ceil((session.expiresAt - Date.now()) / 1000)) : 3600
 		res.statusCode = 200
 		res.setHeader('cache-control', 'no-store')
 		res.setHeader('pragma', 'no-cache')
@@ -834,7 +837,7 @@ async function handleToken (req, res) {
 			access_token: session.token,
 			refresh_token: session.credentials?.refreshToken,
 			token_type: 'Bearer',
-			expires_in: 3600,
+			expires_in: expiresIn,
 			scope: 'mcp'
 		}))
 		return
@@ -916,14 +919,8 @@ async function handleRevoke (req, res) {
 		return
 	}
 	const rawBody = await getBody(req)
-	let token = null
-	try {
-		const parsed = JSON.parse(rawBody)
-		token = parsed?.token || null
-	} catch {
-		const params = new URLSearchParams(rawBody)
-		token = params.get('token')
-	}
+	const params = parseTokenParams(rawBody)
+	const token = typeof params.token === 'string' ? params.token.trim() : ''
 	if (!token) {
 		res.statusCode = 400
 		res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -932,13 +929,6 @@ async function handleRevoke (req, res) {
 	}
 	const session = db.tokens.findRevocable(token)
 	if (session) {
-		const links = db.links.listBySessionId(session.id)
-		for (const link of links) {
-			const provider = getProvider(link.app?.provider)
-			if (provider?.revokeToken) {
-				await provider.revokeToken(link.app)
-			}
-		}
 		db.tokens.remove(session.id)
 	}
 	res.statusCode = 200
