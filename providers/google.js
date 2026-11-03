@@ -133,25 +133,27 @@ const services = {
 			'https://www.googleapis.com/auth/admin.directory.group.readonly',
 			'https://www.googleapis.com/auth/admin.directory.domain.readonly',
 			'https://www.googleapis.com/auth/admin.directory.orgunit.readonly',
+			'https://www.googleapis.com/auth/admin.directory.device.mobile.readonly',
+			'https://www.googleapis.com/auth/admin.directory.device.chromeos.readonly',
 			'https://www.googleapis.com/auth/admin.reports.audit.readonly',
 			'https://www.googleapis.com/auth/admin.reports.usage.readonly',
 			'https://www.googleapis.com/auth/apps.groups.settings',
 			'https://www.googleapis.com/auth/apps.licensing',
-			'https://www.googleapis.com/auth/cloud-identity.groups.readonly',
-			'https://www.googleapis.com/auth/cloud-identity.devices.readonly'
+			'https://www.googleapis.com/auth/cloud-identity.groups.readonly'
 		],
 		rw: [
 			'https://www.googleapis.com/auth/admin.directory.user',
 			'https://www.googleapis.com/auth/admin.directory.group',
 			'https://www.googleapis.com/auth/admin.directory.domain',
 			'https://www.googleapis.com/auth/admin.directory.orgunit',
+			'https://www.googleapis.com/auth/admin.directory.device.mobile',
+			'https://www.googleapis.com/auth/admin.directory.device.chromeos',
 			'https://www.googleapis.com/auth/admin.datatransfer',
 			'https://www.googleapis.com/auth/admin.reports.audit.readonly',
 			'https://www.googleapis.com/auth/admin.reports.usage.readonly',
 			'https://www.googleapis.com/auth/apps.groups.settings',
 			'https://www.googleapis.com/auth/apps.licensing',
-			'https://www.googleapis.com/auth/cloud-identity.groups',
-			'https://www.googleapis.com/auth/cloud-identity.devices'
+			'https://www.googleapis.com/auth/cloud-identity.groups'
 		]
 	}
 }
