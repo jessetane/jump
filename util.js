@@ -1,6 +1,51 @@
 export {
 	getBody,
-	sendMail
+	sendMail,
+	isAllowedUpstreamHost,
+	validateBaseUrl
+}
+
+function isAllowedUpstreamHost (hostname) {
+	if (!hostname || typeof hostname !== 'string') return false
+	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+	const isLoopback = host === 'localhost' || host.endsWith('.localhost') || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+	if (isLoopback) {
+		return process.env.NODE_ENV === 'test'
+	}
+	if (
+		host === '0.0.0.0' ||
+		host === '::' ||
+		host.startsWith('fe80:') ||
+		host.startsWith('fc') ||
+		host.startsWith('fd') ||
+		host.startsWith('::ffff:') ||
+		/^0\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
+		/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
+		/^169\.254\.\d{1,3}\.\d{1,3}$/.test(host) ||
+		/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host) ||
+		/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host)
+	) {
+		return false
+	}
+	return true
+}
+
+function validateBaseUrl (baseUrl) {
+	if (!baseUrl || typeof baseUrl !== 'string') return null
+	let parsed
+	try {
+		parsed = new URL(baseUrl.trim())
+	} catch {
+		return null
+	}
+	if (!isAllowedUpstreamHost(parsed.hostname)) return null
+	const host = parsed.hostname.toLowerCase()
+	const isLocal = host === 'localhost' || host.endsWith('.localhost') || host === '127.0.0.1' || host === '[::1]'
+	if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLocal && process.env.NODE_ENV === 'test')) {
+		return null
+	}
+	const pathname = parsed.pathname.replace(/\/+$/, '')
+	return `${parsed.origin}${pathname}`
 }
 
 function getBody (req, maxBytes = 1024 * 1024) {

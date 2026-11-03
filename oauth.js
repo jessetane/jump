@@ -635,6 +635,14 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 			res.end('Access denied: unauthorized re-authentication request.')
 			return
 		}
+	} else if (sessionId) {
+		const session = db.tokens.get(sessionId)
+		if (!session || session.provider !== 'self' || !session.admin) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: admin session required.')
+			return
+		}
 	}
 	const rawAppName = params.get('app_name') || params.get('name') || ''
 	const sessionName = rawAppName ? String(rawAppName).trim() : null
@@ -728,9 +736,13 @@ async function handleCallback (req, res, query) {
 		return
 	}
 	let targetUserId = null
+	let validSessionId = null
 	if (oauthState.sessionId) {
 		const session = db.tokens.get(oauthState.sessionId)
-		if (session) targetUserId = session.userId
+		if (session && session.provider === 'self' && session.admin) {
+			targetUserId = session.userId
+			validSessionId = session.id
+		}
 	}
 	if (!targetUserId) {
 		const user = db.users.upsert({
@@ -754,9 +766,9 @@ async function handleCallback (req, res, query) {
 		expiresAt,
 		scopes: scopes || null
 	})
-	if (oauthState.sessionId) {
+	if (validSessionId) {
 		db.links.create({
-			sessionId: oauthState.sessionId,
+			sessionId: validSessionId,
 			appId: appToken.id
 		})
 	}

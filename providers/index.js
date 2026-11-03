@@ -1,4 +1,5 @@
 import * as google from './google.js'
+import { validateBaseUrl } from '../util.js'
 
 export {
 	getProvider,
@@ -48,20 +49,11 @@ function createGenericProvider (name) {
 			return `${cleanBase}/${noLeadingSlash}`
 		},
 		isAllowedUrl (urlString, appToken) {
-			const base = appToken?.credentials?.baseUrl
-			if (!base || typeof base !== 'string') {
+			const normalizedBase = validateBaseUrl(appToken?.credentials?.baseUrl)
+			if (!normalizedBase) {
 				return { allowed: false, reason: 'App is missing a valid baseUrl' }
 			}
-			let allowedBase
-			try {
-				allowedBase = new URL(base)
-			} catch {
-				return { allowed: false, reason: 'App is missing a valid baseUrl' }
-			}
-			const isLocal = allowedBase.hostname === 'localhost' || allowedBase.hostname === '127.0.0.1' || allowedBase.hostname === '[::1]'
-			if (allowedBase.protocol !== 'https:' && !(allowedBase.protocol === 'http:' && isLocal)) {
-				return { allowed: false, reason: 'App is missing a valid baseUrl' }
-			}
+			const allowedBase = new URL(normalizedBase)
 			let parsed
 			try {
 				parsed = new URL(urlString)
