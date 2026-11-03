@@ -14,7 +14,6 @@ export {
 
 function init () {
 	sqlite.exec(`
-		DROP TABLE IF EXISTS token_links;
 		CREATE TABLE IF NOT EXISTS links (
 			session_id TEXT NOT NULL,
 			app_id TEXT NOT NULL,

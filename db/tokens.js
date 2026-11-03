@@ -30,8 +30,6 @@ export {
 
 function init () {
 	sqlite.exec(`
-		DROP TABLE IF EXISTS oauth_codes;
-		DROP TABLE IF EXISTS oauth_states;
 		CREATE TABLE IF NOT EXISTS tokens (
 			id TEXT PRIMARY KEY,
 			user_id TEXT,
@@ -53,39 +51,6 @@ function init () {
 		CREATE INDEX IF NOT EXISTS idx_tokens_user_provider ON tokens(user_id, provider);
 		CREATE INDEX IF NOT EXISTS idx_tokens_updated ON tokens(updated);
 	`)
-	const cols = sqlite.prepare('PRAGMA table_info(tokens)').all()
-	const userIdCol = cols.find(c => c.name === 'user_id')
-	if (userIdCol && userIdCol.notnull === 1) {
-		sqlite.exec(`
-			PRAGMA foreign_keys = OFF;
-			BEGIN;
-			CREATE TABLE tokens_new (
-				id TEXT PRIMARY KEY,
-				user_id TEXT,
-				provider TEXT NOT NULL,
-				type TEXT NOT NULL,
-				name TEXT,
-				token TEXT UNIQUE,
-				credentials TEXT,
-				expires_at INTEGER,
-				scopes TEXT,
-				admin INTEGER DEFAULT 0,
-				ip TEXT,
-				ua TEXT,
-				created TEXT NOT NULL,
-				updated TEXT NOT NULL,
-				FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-			);
-			INSERT INTO tokens_new SELECT id, user_id, provider, type, name, token, credentials, expires_at, scopes, admin, ip, ua, created, updated FROM tokens;
-			DROP TABLE tokens;
-			ALTER TABLE tokens_new RENAME TO tokens;
-			CREATE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);
-			CREATE INDEX IF NOT EXISTS idx_tokens_user_provider ON tokens(user_id, provider);
-			CREATE INDEX IF NOT EXISTS idx_tokens_updated ON tokens(updated);
-			COMMIT;
-			PRAGMA foreign_keys = ON;
-		`)
-	}
 }
 
 function formatToken (row) {

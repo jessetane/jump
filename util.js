@@ -1,8 +1,20 @@
 export {
 	getBody,
+	sendJson,
 	sendMail,
 	isAllowedUpstreamHost,
 	validateBaseUrl
+}
+
+function sendJson (res, data, status = 200, headers = null) {
+	res.statusCode = status
+	if (headers) {
+		for (const [k, v] of Object.entries(headers)) {
+			res.setHeader(k, v)
+		}
+	}
+	res.setHeader('content-type', 'application/json; charset=utf-8')
+	res.end(typeof data === 'string' ? data : JSON.stringify(data, null, '\t'))
 }
 
 function isAllowedUpstreamHost (hostname) {
@@ -60,7 +72,6 @@ function getBody (req, maxBytes = 1024 * 1024) {
 				exceeded = true
 				req.pause()
 				const err = new Error('Payload Too Large')
-				err.code = 413
 				err.status = 413
 				reject(err)
 				return

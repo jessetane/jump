@@ -3,7 +3,7 @@ import * as api from './api/index.js'
 import * as db from './db/index.js'
 import { getBaseUrl } from './oauth.js'
 import { getProvider } from './providers/index.js'
-import { getBody } from './util.js'
+import { getBody, sendJson } from './util.js'
 
 export {
 	buildProviderTool,
@@ -305,23 +305,19 @@ async function handleMcp (req, res, token) {
 	const base = getBaseUrl(req)
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
-		res.statusCode = 401
-		res.setHeader(
-			'www-authenticate',
-			`Bearer resource_metadata="${base}/.well-known/oauth-protected-resource", authorization_uri="${base}/oauth/authorize"`
-		)
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({
+		sendJson(res, {
 			jsonrpc: '2.0',
 			id: null,
 			error: { code: -32001, message: 'Unauthorized: Bearer token required' }
-		}))
+		}, 401, {
+			'www-authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource", authorization_uri="${base}/oauth/authorize"`
+		})
 		return
 	}
 	if (req.method !== 'POST') {
 		console.warn(`[mcp] Rejected non-POST request to /mcp: ${req.method}`)
 		const err = new Error('Method Not Allowed')
-		err.code = 405
+		err.status = 405
 		throw err
 	}
 	const rpc = new RpcEngine({

@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as db from './db/index.js'
 import { getProvider } from './providers/index.js'
-import { getBody, sendMail } from './util.js'
+import { getBody, sendJson, sendMail } from './util.js'
 
 export {
 	handleOauth,
@@ -252,20 +252,17 @@ function isAllowedRedirectUri (redirectUri) {
 
 async function handleProtectedResourceMetadata (req, res) {
 	const base = getBaseUrl(req)
-	const meta = {
+	sendJson(res, {
 		resource: `${base}/mcp`,
 		authorization_servers: [base],
 		bearer_methods_supported: ['header'],
 		scopes_supported: ['mcp']
-	}
-	res.statusCode = 200
-	res.setHeader('content-type', 'application/json; charset=utf-8')
-	res.end(JSON.stringify(meta, null, '\t'))
+	})
 }
 
 async function handleAuthServerMetadata (req, res) {
 	const base = getBaseUrl(req)
-	const meta = {
+	sendJson(res, {
 		issuer: base,
 		authorization_endpoint: `${base}/oauth/authorize`,
 		token_endpoint: `${base}/oauth/token`,
@@ -279,17 +276,12 @@ async function handleAuthServerMetadata (req, res) {
 		code_challenge_methods_supported: ['S256'],
 		scopes_supported: ['mcp', 'offline_access', 'openid', 'profile', 'email'],
 		client_id_metadata_document_supported: true
-	}
-	res.statusCode = 200
-	res.setHeader('content-type', 'application/json; charset=utf-8')
-	res.end(JSON.stringify(meta, null, '\t'))
+	})
 }
 
 async function handleRegister (req, res) {
 	if (req.method !== 'POST') {
-		res.statusCode = 405
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'method_not_allowed' }))
+		sendJson(res, { error: 'method_not_allowed' }, 405)
 		return
 	}
 	const rawBody = await getBody(req)
@@ -297,24 +289,18 @@ async function handleRegister (req, res) {
 	try {
 		body = rawBody ? JSON.parse(rawBody) : {}
 	} catch {
-		res.statusCode = 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'invalid_client_metadata', error_description: 'Invalid JSON body' }))
+		sendJson(res, { error: 'invalid_client_metadata', error_description: 'Invalid JSON body' }, 400)
 		return
 	}
 	const rawRedirects = body.redirect_uris
 	const redirectUris = Array.isArray(rawRedirects) ? rawRedirects : (rawRedirects ? [rawRedirects] : [])
 	if (redirectUris.length === 0) {
-		res.statusCode = 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'invalid_client_metadata', error_description: 'redirect_uris is required' }))
+		sendJson(res, { error: 'invalid_client_metadata', error_description: 'redirect_uris is required' }, 400)
 		return
 	}
 	for (const uri of redirectUris) {
 		if (!isAllowedRedirectUri(uri)) {
-			res.statusCode = 400
-			res.setHeader('content-type', 'application/json; charset=utf-8')
-			res.end(JSON.stringify({ error: 'invalid_redirect_uri', error_description: `redirect_uri is not allowed: ${uri}` }))
+			sendJson(res, { error: 'invalid_redirect_uri', error_description: `redirect_uri is not allowed: ${uri}` }, 400)
 			return
 		}
 	}
@@ -335,9 +321,7 @@ async function handleRegister (req, res) {
 		response.client_secret = clientSecret
 		response.client_secret_expires_at = 0
 	}
-	res.statusCode = 201
-	res.setHeader('content-type', 'application/json; charset=utf-8')
-	res.end(JSON.stringify(response))
+	sendJson(res, response, 201)
 }
 
 function validateAuthorizeParams (query) {
@@ -377,9 +361,7 @@ async function handleAuthorize (req, res, query) {
 	try {
 		validateAuthorizeParams(query)
 	} catch (err) {
-		res.statusCode = err.status || 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: err.code || 'invalid_request', error_description: err.message }))
+		sendJson(res, { error: err.code || 'invalid_request', error_description: err.message }, err.status || 400)
 		return
 	}
 	const clientName = deriveClientName(query.client_id, query.client_name)
@@ -418,18 +400,14 @@ async function handleAuthorizeConsent (req, res) {
 		}
 	}
 	if (!email || !email.includes('@')) {
-		res.statusCode = 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Valid email address is required' }))
+		sendJson(res, { error: 'invalid_request', error_description: 'Valid email address is required' }, 400)
 		return
 	}
 	let validation
 	try {
 		validation = validateAuthorizeParams(query)
 	} catch (err) {
-		res.statusCode = err.status || 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: err.code || 'invalid_request', error_description: err.message }))
+		sendJson(res, { error: err.code || 'invalid_request', error_description: err.message }, err.status || 400)
 		return
 	}
 	const { codeChallenge, codeChallengeMethod } = validation
@@ -579,7 +557,7 @@ async function handleProviderConnect (req, res, query, providerName = 'google') 
 	const provider = getProvider(providerName)
 	if (!provider || provider.type !== 'oauth') {
 		const err = new Error('not found')
-		err.code = 404
+		err.status = 404
 		throw err
 	}
 	const initData = {
@@ -609,7 +587,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	const provider = getProvider(providerName)
 	if (!provider || provider.type !== 'oauth' || !provider.buildAuthUrl) {
 		const err = new Error('not found')
-		err.code = 404
+		err.status = 404
 		throw err
 	}
 	const rawBody = await getBody(req)
@@ -806,40 +784,31 @@ async function handleToken (req, res) {
 	const params = parseTokenParams(rawBody)
 	const grantType = params.grant_type || 'authorization_code'
 	if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
-		res.statusCode = 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'unsupported_grant_type', error_description: `Unsupported grant_type: ${grantType}` }))
+		sendJson(res, { error: 'unsupported_grant_type', error_description: `Unsupported grant_type: ${grantType}` }, 400)
 		return
 	}
+	const noStoreHeaders = { 'cache-control': 'no-store', pragma: 'no-cache' }
 	if (grantType === 'refresh_token') {
 		const refreshToken = params.refresh_token
 		if (!refreshToken) {
 			console.warn('[oauth] Token refresh failed: Missing refresh_token')
-			res.statusCode = 400
-			res.setHeader('content-type', 'application/json; charset=utf-8')
-			res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Missing refresh_token' }))
+			sendJson(res, { error: 'invalid_request', error_description: 'Missing refresh_token' }, 400)
 			return
 		}
 		const session = db.tokens.refreshOauthSession(refreshToken)
 		if (!session) {
 			console.warn('[oauth] Token refresh failed: Invalid or expired refresh token')
-			res.statusCode = 400
-			res.setHeader('content-type', 'application/json; charset=utf-8')
-			res.end(JSON.stringify({ error: 'invalid_grant', error_description: 'Invalid or expired refresh token' }))
+			sendJson(res, { error: 'invalid_grant', error_description: 'Invalid or expired refresh token' }, 400)
 			return
 		}
 		const expiresIn = session.expiresAt ? Math.max(1, Math.ceil((session.expiresAt - Date.now()) / 1000)) : 3600
-		res.statusCode = 200
-		res.setHeader('cache-control', 'no-store')
-		res.setHeader('pragma', 'no-cache')
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({
+		sendJson(res, {
 			access_token: session.token,
 			refresh_token: session.credentials?.refreshToken,
 			token_type: 'Bearer',
 			expires_in: expiresIn,
 			scope: 'mcp'
-		}))
+		}, 200, noStoreHeaders)
 		return
 	}
 	const code = params.code
@@ -847,93 +816,69 @@ async function handleToken (req, res) {
 	const codeVerifier = params.code_verifier
 	if (!code) {
 		console.warn('[oauth] Token exchange failed: Missing code')
-		res.statusCode = 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Missing code' }))
+		sendJson(res, { error: 'invalid_request', error_description: 'Missing code' }, 400)
 		return
 	}
 	const authCode = db.tokens.consumeAuthCode(code)
 	if (!authCode) {
 		console.warn('[oauth] Token exchange failed: Invalid or expired authorization code')
-		res.statusCode = 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'invalid_grant', error_description: 'Invalid or expired authorization code' }))
+		sendJson(res, { error: 'invalid_grant', error_description: 'Invalid or expired authorization code' }, 400)
 		return
 	}
 	if (authCode.clientRedirectUri && authCode.clientRedirectUri !== redirectUri) {
 		console.warn(`[oauth] Token exchange failed: redirect_uri mismatch (expected "${authCode.clientRedirectUri}", got "${redirectUri}")`)
-		res.statusCode = 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'invalid_grant', error_description: 'redirect_uri mismatch' }))
+		sendJson(res, { error: 'invalid_grant', error_description: 'redirect_uri mismatch' }, 400)
 		return
 	}
 	if (authCode.codeChallenge) {
 		if (!codeVerifier) {
 			console.warn('[oauth] Token exchange failed: Missing code_verifier')
-			res.statusCode = 400
-			res.setHeader('content-type', 'application/json; charset=utf-8')
-			res.end(JSON.stringify({ error: 'invalid_grant', error_description: 'Missing code_verifier' }))
+			sendJson(res, { error: 'invalid_grant', error_description: 'Missing code_verifier' }, 400)
 			return
 		}
 		if (typeof codeVerifier !== 'string' || codeVerifier.length < 43 || codeVerifier.length > 128) {
 			console.warn(`[oauth] Token exchange failed: code_verifier length invalid (${codeVerifier?.length})`)
-			res.statusCode = 400
-			res.setHeader('content-type', 'application/json; charset=utf-8')
-			res.end(JSON.stringify({ error: 'invalid_grant', error_description: 'Invalid code_verifier' }))
+			sendJson(res, { error: 'invalid_grant', error_description: 'Invalid code_verifier' }, 400)
 			return
 		}
 		if (!verifyCodeChallenge(codeVerifier, authCode.codeChallenge, authCode.codeChallengeMethod)) {
 			console.warn('[oauth] Token exchange failed: PKCE verification failed')
-			res.statusCode = 400
-			res.setHeader('content-type', 'application/json; charset=utf-8')
-			res.end(JSON.stringify({ error: 'invalid_grant', error_description: 'Invalid code_verifier' }))
+			sendJson(res, { error: 'invalid_grant', error_description: 'Invalid code_verifier' }, 400)
 			return
 		}
 	}
 	const session = db.tokens.issueOauthTokens(authCode.sessionId)
 	if (!session) {
 		console.warn('[oauth] Token exchange failed: Session not found')
-		res.statusCode = 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'invalid_grant', error_description: 'Session not found' }))
+		sendJson(res, { error: 'invalid_grant', error_description: 'Session not found' }, 400)
 		return
 	}
-	res.statusCode = 200
-	res.setHeader('cache-control', 'no-store')
-	res.setHeader('pragma', 'no-cache')
-	res.setHeader('content-type', 'application/json; charset=utf-8')
-	res.end(JSON.stringify({
+	sendJson(res, {
 		access_token: session.token,
 		refresh_token: session.credentials?.refreshToken,
 		token_type: 'Bearer',
 		expires_in: 3600,
 		scope: 'mcp'
-	}))
+	}, 200, noStoreHeaders)
 }
 
 async function handleRevoke (req, res) {
 	if (req.method !== 'POST') {
-		res.statusCode = 405
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'method_not_allowed' }))
+		sendJson(res, { error: 'method_not_allowed' }, 405)
 		return
 	}
 	const rawBody = await getBody(req)
 	const params = parseTokenParams(rawBody)
 	const token = typeof params.token === 'string' ? params.token.trim() : ''
 	if (!token) {
-		res.statusCode = 400
-		res.setHeader('content-type', 'application/json; charset=utf-8')
-		res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Missing token parameter' }))
+		sendJson(res, { error: 'invalid_request', error_description: 'Missing token parameter' }, 400)
 		return
 	}
 	const session = db.tokens.findRevocable(token)
 	if (session) {
 		db.tokens.remove(session.id)
 	}
-	res.statusCode = 200
-	res.setHeader('content-type', 'application/json; charset=utf-8')
-	res.end(JSON.stringify({ status: 'ok' }))
+	sendJson(res, { status: 'ok' })
 }
 
 const routes = {
@@ -983,6 +928,6 @@ async function handleOauth (req, res, { pathname, query }) {
 		}
 	}
 	const err = new Error('not found')
-	err.code = 404
+	err.status = 404
 	throw err
 }

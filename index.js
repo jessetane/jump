@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { handleOauth, getBaseUrl } from './oauth.js'
 import { handleMcp } from './mcp.js'
 import { handleRest } from './rest.js'
+import { sendJson } from './util.js'
 
 export { server }
 
@@ -74,19 +75,17 @@ const server = http.createServer(async (req, res) => {
 			return
 		}
 		const err = new Error('not found')
-		err.code = 404
+		err.status = 404
 		throw err
 	} catch (err) {
-		const statusCode = typeof err.code === 'number' ? err.code : (err.status || 500)
+		const statusCode = err.status || 500
 		let message = err.message
 		if (statusCode >= 500) {
 			console.error(err)
 			message = 'Internal Server Error'
 		}
 		if (!res.headersSent && !res.writableEnded) {
-			res.statusCode = statusCode
-			res.setHeader('content-type', 'application/json; charset=utf-8')
-			res.end(JSON.stringify({ error: message }))
+			sendJson(res, { error: message }, statusCode)
 		}
 	}
 })

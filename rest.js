@@ -1,15 +1,9 @@
 import * as api from './api/index.js'
 import { getBaseUrl } from './oauth.js'
-import { getBody } from './util.js'
+import { getBody, sendJson } from './util.js'
 
 export {
 	handleRest
-}
-
-function sendJson (res, data, status = 200) {
-	res.statusCode = status
-	res.setHeader('content-type', 'application/json; charset=utf-8')
-	res.end(typeof data === 'string' ? data : JSON.stringify(data, null, '\t'))
 }
 
 function sendBinary (res, data, mimeType = 'application/octet-stream') {
@@ -25,7 +19,6 @@ async function parseJsonBody (req) {
 		return JSON.parse(rawBody)
 	} catch {
 		const err = new Error('Invalid JSON body')
-		err.code = 400
 		err.status = 400
 		throw err
 	}
@@ -34,7 +27,7 @@ async function parseJsonBody (req) {
 async function handleProviderProxy (req, res, provider, targetPath, url, token) {
 	if (!targetPath) {
 		const err = new Error('not found')
-		err.code = 404
+		err.status = 404
 		throw err
 	}
 	const appId = url?.searchParams?.get('app_id') || undefined
@@ -55,7 +48,6 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 					body = JSON.parse(rawBody)
 				} catch {
 					const err = new Error('Invalid JSON body')
-					err.code = 400
 					err.status = 400
 					throw err
 				}
@@ -171,7 +163,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 			return
 		}
 		const err = new Error('Method Not Allowed')
-		err.code = 405
+		err.status = 405
 		throw err
 	}
 	if (pathname.startsWith('/api/apps/')) {
@@ -189,7 +181,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 			return
 		}
 		const err = new Error('Method Not Allowed')
-		err.code = 405
+		err.status = 405
 		throw err
 	}
 	const route = routes[pathname]
@@ -197,7 +189,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 		const handler = route[req.method]
 		if (!handler) {
 			const err = new Error('Method Not Allowed')
-			err.code = 405
+			err.status = 405
 			throw err
 		}
 		await handler(req, res, { token, query, appUrl })
@@ -211,6 +203,6 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 		return
 	}
 	const err = new Error('not found')
-	err.code = 404
+	err.status = 404
 	throw err
 }

@@ -22,6 +22,32 @@ export {
 	validateBaseUrl
 }
 
+function formatSession (s, currentSessionId) {
+	const links = db.links.listBySessionId(s.id)
+	return {
+		id: s.id,
+		userId: s.userId,
+		name: s.name,
+		admin: Boolean(s.admin),
+		expiresAt: s.expiresAt,
+		ip: s.ip,
+		ua: s.ua,
+		created: s.created,
+		updated: s.updated,
+		...(currentSessionId !== undefined ? { isCurrent: s.id === currentSessionId } : {}),
+		apps: links.map(l => ({
+			id: l.app?.id,
+			provider: l.app?.provider,
+			type: l.app?.type,
+			name: l.app?.name,
+			account: l.app?.credentials?.account || l.app?.credentials?.email || null,
+			scopes: l.app?.scopes,
+			expiresAt: l.app?.expiresAt,
+			policy: parsePolicy(l.policy)
+		}))
+	}
+}
+
 async function whoami (token, opts = {}) {
 	const appUrl = (opts.appUrl || 'http://localhost:8080').replace(/\/$/, '')
 	const session = token ? db.tokens.getByToken(token) : null
@@ -32,17 +58,6 @@ async function whoami (token, opts = {}) {
 			message: 'Missing or expired Bearer token.'
 		}
 	}
-	const links = db.links.listBySessionId(session.id)
-	const apps = links.map(l => ({
-		id: l.app?.id,
-		provider: l.app?.provider,
-		type: l.app?.type,
-		name: l.app?.name,
-		account: l.app?.credentials?.account || l.app?.credentials?.email || null,
-		scopes: l.app?.scopes,
-		expiresAt: l.app?.expiresAt,
-		policy: parsePolicy(l.policy)
-	}))
 	return {
 		authenticated: true,
 		user: {
@@ -50,17 +65,7 @@ async function whoami (token, opts = {}) {
 			email: session.email,
 			name: session.userName
 		},
-		session: {
-			id: session.id,
-			name: session.name,
-			admin: Boolean(session.admin),
-			expiresAt: session.expiresAt,
-			ip: session.ip,
-			ua: session.ua,
-			created: session.created,
-			updated: session.updated,
-			apps
-		}
+		session: formatSession(session)
 	}
 }
 
@@ -83,29 +88,7 @@ async function list (token, opts = {}) {
 		throw error
 	}
 	const rawSessions = db.tokens.listByUserId(session.userId, { provider: 'self' })
-	const sessions = rawSessions.map(s => {
-		const links = db.links.listBySessionId(s.id)
-		return {
-			id: s.id,
-			userId: s.userId,
-			name: s.name,
-			admin: Boolean(s.admin),
-			expiresAt: s.expiresAt,
-			ip: s.ip,
-			ua: s.ua,
-			created: s.created,
-			updated: s.updated,
-			isCurrent: s.id === session.id,
-			apps: links.map(l => ({
-				id: l.app?.id,
-				provider: l.app?.provider,
-				name: l.app?.name,
-				account: l.app?.credentials?.account || l.app?.credentials?.email || null,
-				policy: parsePolicy(l.policy)
-			}))
-		}
-	})
-	return { sessions }
+	return { sessions: rawSessions.map(s => formatSession(s, session.id)) }
 }
 
 async function get (token, sessionId, opts = {}) {
@@ -121,28 +104,7 @@ async function get (token, sessionId, opts = {}) {
 		error.status = 404
 		throw error
 	}
-	const links = db.links.listBySessionId(targetSession.id)
-	return {
-		session: {
-			id: targetSession.id,
-			userId: targetSession.userId,
-			name: targetSession.name,
-			admin: Boolean(targetSession.admin),
-			expiresAt: targetSession.expiresAt,
-			ip: targetSession.ip,
-			ua: targetSession.ua,
-			created: targetSession.created,
-			updated: targetSession.updated,
-			isCurrent: targetSession.id === session.id,
-			apps: links.map(l => ({
-				id: l.app?.id,
-				provider: l.app?.provider,
-				name: l.app?.name,
-				account: l.app?.credentials?.account || l.app?.credentials?.email || null,
-				policy: parsePolicy(l.policy)
-			}))
-		}
-	}
+	return { session: formatSession(targetSession, session.id) }
 }
 
 async function createSession (token, opts = {}) {
@@ -555,17 +517,8 @@ async function updateSession (token, opts = {}) {
 	return {
 		updated: true,
 		session: {
-			id: updated.id,
-			userId: updated.userId,
-			name: updated.name,
-			admin: Boolean(updated.admin),
-			expiresAt: updated.expiresAt,
-			...(newToken ? { token: newToken } : {}),
-			ip: updated.ip,
-			ua: updated.ua,
-			created: updated.created,
-			updated: updated.updated,
-			isCurrent: updated.id === session.id
+			...formatSession(updated, session.id),
+			...(newToken ? { token: newToken } : {})
 		}
 	}
 }

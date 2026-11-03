@@ -12,7 +12,6 @@ export {
 
 function init () {
 	sqlite.exec(`
-		DROP TABLE IF EXISTS user_identities;
 		CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
 			email TEXT UNIQUE NOT NULL,
