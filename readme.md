@@ -4,7 +4,7 @@ MCP jump host for HTTP APIs.
 ## Why
 Most MCP servers wrap upstream APIs in dozens of rigid tools, burning context tokens on schemas while covering a fraction of the surface area. Upstream OAuth scopes are also too coarse (granting write access to a shared Google calendar lets an agent delete your personal calendar too), and agents shouldn't hold raw refresh tokens or master API keys directly.
 
-Models already know REST APIs from pretraining—they just need an authenticated pipe with a firewall.
+Models already know HTTP APIs from pretraining, they just need an authenticated pipe with a firewall.
 
 ## How
 * One `<provider>_api` passthrough tool per linked provider (`google_api`, `stripe_api`, etc).
@@ -45,7 +45,7 @@ From an admin session, use the `admin` tool to connect upstream apps and link th
 // connect a Google account (returns an interactive OAuth URL)
 admin({ action: 'connect_app', provider: 'google', name: 'Work Google' })
 
-// or connect any REST API with an API key and baseUrl
+// or connect any HTTP API with an API key and baseUrl
 admin({
 	action: 'connect_app',
 	provider: 'stripe',

@@ -348,13 +348,13 @@ async function handleMcp (req, res, token) {
 				res.setHeader('content-type', 'application/json; charset=utf-8')
 				res.end(JSON.stringify({ status: 'accepted' }))
 			}
+		},
+		methods: {
+			...rpcMethods,
+			'tools/list': params => rpcMethods['tools/list'](params, token),
+			'tools/call': params => rpcMethods['tools/call'](params, token, base)
 		}
 	})
-	rpc.methods = {
-		...rpcMethods,
-		'tools/list': params => rpcMethods['tools/list'](params, token),
-		'tools/call': params => rpcMethods['tools/call'](params, token, base)
-	}
 	const request = await getBody(req)
 	await rpc.receive(request)
 	if (!res.writableEnded) {
