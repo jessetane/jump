@@ -1,5 +1,5 @@
 # jump
-MCP jump host for HTTP APIs.
+MCP proxy for HTTP APIs.
 
 ## Why
 Most MCP servers wrap upstream APIs in dozens of rigid tools, burning context tokens on schemas while covering a fraction of the surface area. Upstream OAuth scopes are also too coarse (granting write access to a shared Google calendar lets an agent delete your personal calendar too), and agents shouldn't hold raw refresh tokens or master API keys directly.
