@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import * as users from './users.js'
 import * as tokens from './tokens.js'
 import * as links from './links.js'
+import * as logs from './logs.js'
 
 const dbPath = process.env.DB_PATH || './data.db'
 
@@ -67,13 +68,16 @@ function migrateLegacySessions () {
 users.init()
 tokens.init()
 links.init()
+logs.init()
 migrateLegacySessions()
 tokens.pruneDormant()
+logs.prune()
 
 export {
 	sqlite,
 	users,
 	tokens,
 	links,
+	logs,
 	migrateLegacySessions
 }

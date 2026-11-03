@@ -36,7 +36,8 @@ const adminTool = {
 					'update_app',
 					'update_session',
 					'update_email',
-					'update_user'
+					'update_user',
+					'list_logs'
 				],
 				description: 'Administrative action to perform.'
 			},
@@ -73,6 +74,10 @@ const adminTool = {
 							type: 'string',
 							description: 'Origin glob pattern (e.g. "https://sheets.googleapis.com" or "https://*.googleapis.com").'
 						},
+						body: {
+							type: 'object',
+							description: 'Optional map of request body field paths (supporting dot-notation like "recipient.email") to expected glob patterns or arrays of patterns.'
+						},
 						description: {
 							type: 'string',
 							description: 'Optional human-readable label or explanation for this rule.'
@@ -83,7 +88,9 @@ const adminTool = {
 			admin: { type: 'boolean', description: 'Grant admin permissions to a new session.' },
 			rotateToken: { type: 'boolean', description: 'When action is update_session, set to true to rotate and regenerate the session bearer token.' },
 			revoke: { type: 'boolean', description: 'When action is disconnect_app, set to false to remove locally without upstream revocation (defaults to true).' },
-			allOthers: { type: 'boolean', description: 'When action is revoke, set to true to revoke all other sessions.' }
+			allOthers: { type: 'boolean', description: 'When action is revoke, set to true to revoke all other sessions.' },
+			allowed: { type: 'boolean', description: 'When action is list_logs, filter logs by whether the request was allowed by policy.' },
+			limit: { type: 'number', description: 'When action is list_logs, maximum number of log entries to return (defaults to 100, max 1000).' }
 		}
 	}
 }
@@ -146,7 +153,8 @@ const adminActions = {
 	link_app: (args, token, appUrl) => api.auth.linkApp(token, { ...args, appUrl }),
 	unlink_app: (args, token, appUrl) => api.auth.unlinkApp(token, { ...args, appUrl }),
 	update_email: (args, token, appUrl) => api.auth.updateEmail(token, { ...args, appUrl }),
-	update_user: (args, token, appUrl) => api.auth.updateUser(token, { ...args, appUrl })
+	update_user: (args, token, appUrl) => api.auth.updateUser(token, { ...args, appUrl }),
+	list_logs: (args, token, appUrl) => api.auth.listLogs(token, { ...args, appUrl })
 }
 
 function formatContent (result) {

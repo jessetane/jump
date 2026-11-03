@@ -134,6 +134,19 @@ const routes = {
 			})
 			sendJson(res, result)
 		}
+	},
+	'/api/logs': {
+		async GET (req, res, { token, query, appUrl }) {
+			const result = await api.auth.listLogs(token, {
+				sessionId: query.sessionId,
+				appId: query.appId,
+				provider: query.provider,
+				allowed: query.allowed,
+				limit: query.limit ? Number(query.limit) : undefined,
+				appUrl
+			})
+			sendJson(res, result)
+		}
 	}
 }
 

@@ -34,7 +34,7 @@ async function readResponseBody (res, maxBytes) {
 	return Buffer.concat(chunks)
 }
 
-async function executeUpstream ({ token, url, method = 'GET', body, headers = {} }) {
+async function executeUpstream ({ token, url, method = 'GET', body, headers = {}, onStatus }) {
 	const reqHeaders = {
 		...(token ? { authorization: `Bearer ${token}` } : {}),
 		...headers
@@ -57,6 +57,7 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 		fetchOpts.body = reqBody
 	}
 	const res = await fetch(url, fetchOpts)
+	if (onStatus) onStatus(res.status)
 	const maxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB) || 10
 	const maxFileSizeBytes = maxFileSizeMb * 1024 * 1024
 	const contentLength = res.headers.get('content-length')
@@ -110,78 +111,108 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 		err.status = 401
 		throw err
 	}
-	const provider = getProvider(providerName)
-	const links = db.links.listBySessionId(session.id)
-	const providerLinks = links.filter(l => l.app?.provider === provider.id)
-	if (providerLinks.length === 0) {
-		const connectHint = provider.type === 'oauth'
-			? ` Connect an account at: ${appUrl}/providers/${provider.id}/connect`
-			: ''
-		const err = new Error(`No ${provider.name} app linked to session.${connectHint}`)
-		err.status = 403
-		throw err
-	}
-	let targetLink = providerLinks[0]
-	if (appId) {
-		const found = providerLinks.find(l => l.app?.id === appId)
-		if (!found) {
-			const err = new Error(`App not linked to session or not found: ${appId}`)
-			err.status = 404
-			throw err
-		}
-		targetLink = found
-	} else if (account) {
-		const cleanAccount = String(account).trim().toLowerCase()
-		const found = providerLinks.find(l => {
-			const appAcc = (l.app?.credentials?.account || l.app?.credentials?.email || '').toLowerCase()
-			const appName = (l.app?.name || '').toLowerCase()
-			return appAcc === cleanAccount || appName === cleanAccount || l.app?.id === account
-		})
-		if (!found) {
-			const err = new Error(`App account not linked to session or not found: ${account}`)
-			err.status = 404
-			throw err
-		}
-		targetLink = found
-	}
+	const start = Date.now()
 	const normalizedMethod = (method || 'GET').toUpperCase()
-	const fullUrl = provider.normalizeTargetUrl(url, targetLink.app)
-	const urlCheck = provider.isAllowedUrl(fullUrl, targetLink.app)
-	if (!urlCheck.allowed) {
-		const err = new Error(urlCheck.reason)
-		err.status = 403
-		throw err
-	}
-	if (targetLink.policy) {
-		const check = evaluatePolicy(targetLink.policy, {
-			url: fullUrl,
-			method: normalizedMethod
+	const provider = getProvider(providerName)
+	let targetAppId = appId ? String(appId) : null
+	let resolvedUrl = String(url)
+	let allowed = false
+	const recordLog = (status, error = null) => {
+		db.logs.create({
+			userId: session.userId,
+			sessionId: session.id,
+			appId: targetAppId,
+			provider: provider.id,
+			method: normalizedMethod,
+			url: resolvedUrl,
+			allowed,
+			status,
+			duration: Date.now() - start,
+			error
 		})
-		if (!check.allowed) {
-			const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by session policy'}`)
+	}
+	try {
+		const links = db.links.listBySessionId(session.id)
+		const providerLinks = links.filter(l => l.app?.provider === provider.id)
+		if (providerLinks.length === 0) {
+			const connectHint = provider.type === 'oauth'
+				? ` Connect an account at: ${appUrl}/providers/${provider.id}/connect`
+				: ''
+			const err = new Error(`No ${provider.name} app linked to session.${connectHint}`)
 			err.status = 403
 			throw err
 		}
-	}
-	let freshInfo = null
-	try {
-		freshInfo = await provider.getFreshToken(targetLink.app)
+		let targetLink = providerLinks[0]
+		if (appId) {
+			const found = providerLinks.find(l => l.app?.id === appId)
+			if (!found) {
+				const err = new Error(`App not linked to session or not found: ${appId}`)
+				err.status = 404
+				throw err
+			}
+			targetLink = found
+		} else if (account) {
+			const cleanAccount = String(account).trim().toLowerCase()
+			const found = providerLinks.find(l => {
+				const appAcc = (l.app?.credentials?.account || l.app?.credentials?.email || '').toLowerCase()
+				const appName = (l.app?.name || '').toLowerCase()
+				return appAcc === cleanAccount || appName === cleanAccount || l.app?.id === account
+			})
+			if (!found) {
+				const err = new Error(`App account not linked to session or not found: ${account}`)
+				err.status = 404
+				throw err
+			}
+			targetLink = found
+		}
+		targetAppId = targetLink.app?.id || null
+		resolvedUrl = provider.normalizeTargetUrl(url, targetLink.app)
+		const urlCheck = provider.isAllowedUrl(resolvedUrl, targetLink.app)
+		if (!urlCheck.allowed) {
+			const err = new Error(urlCheck.reason)
+			err.status = 403
+			throw err
+		}
+		if (targetLink.policy) {
+			const check = evaluatePolicy(targetLink.policy, {
+				url: resolvedUrl,
+				method: normalizedMethod,
+				body
+			})
+			if (!check.allowed) {
+				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by session policy'}`)
+				err.status = 403
+				throw err
+			}
+		}
+		allowed = true
+		let freshInfo = null
+		try {
+			freshInfo = await provider.getFreshToken(targetLink.app)
+		} catch (err) {
+			const reauthUrl = `${appUrl}/providers/${provider.id}/connect?session_id=${encodeURIComponent(session.id)}&reauth_app_id=${encodeURIComponent(targetLink.app.id)}`
+			const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. Re-authenticate: ${reauthUrl}`)
+			error.status = 401
+			throw error
+		}
+		if (!freshInfo?.token) {
+			const err = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
+			err.status = 401
+			throw err
+		}
+		let upstreamStatus = 200
+		const result = await executeUpstream({
+			token: freshInfo.token,
+			url: resolvedUrl,
+			method: normalizedMethod,
+			body,
+			headers,
+			onStatus: s => { upstreamStatus = s }
+		})
+		recordLog(upstreamStatus, null)
+		return result
 	} catch (err) {
-		const reauthUrl = `${appUrl}/providers/${provider.id}/connect?reauth_app_id=${targetLink.app.id}`
-		const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. Re-authenticate: ${reauthUrl}`)
-		error.status = 401
-		throw error
-	}
-	if (!freshInfo?.token) {
-		const err = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
-		err.status = 401
+		recordLog(err.status || 502, err.message)
 		throw err
 	}
-	return executeUpstream({
-		token: freshInfo.token,
-		url: fullUrl,
-		method: normalizedMethod,
-		body,
-		headers
-	})
 }

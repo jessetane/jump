@@ -562,14 +562,37 @@ test('direct browser authorize without redirect_uri', async () => {
 
 test('google provider connect screen and consent flow', async () => {
 	const addr = server.address()
-	const connectRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?session_id=sess_123`)
+	const { session } = createTestSession({ email: 'connect-flow@example.com', admin: true })
+	const { session: workerSession, app: nonSelfToken } = createTestSession({ email: 'nonself-consent@example.com', admin: false })
+	const connectRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?session_id=${session.id}`)
 	assert.equal(connectRes.status, 200)
 	const connectHtml = await connectRes.text()
 	assert.match(connectHtml, /Configure API services access/)
 	assert.match(connectHtml, /Sign in with Google/)
 	assert.match(connectHtml, /action="\/providers\/google\/consent"/)
+	const invalidSessionConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ session_id: 'non-existent-session' }).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(invalidSessionConsentRes.status, 403)
+	const nonSelfConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ session_id: nonSelfToken.id }).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(nonSelfConsentRes.status, 403)
+	const nonAdminInitialConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ session_id: workerSession.id }).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(nonAdminInitialConsentRes.status, 403)
 	const consentBody = new URLSearchParams({
-		session_id: 'sess_123',
+		session_id: session.id,
 		app_name: 'Custom Work Google'
 	})
 	consentBody.append('services', 'drive')
@@ -591,7 +614,7 @@ test('google provider connect screen and consent flow', async () => {
 	const stateParam = targetUrl.searchParams.get('state')
 	assert.ok(stateParam)
 	const stateRow = db.tokens.consumeState(stateParam)
-	assert.equal(stateRow.sessionId, 'sess_123')
+	assert.equal(stateRow.sessionId, session.id)
 	assert.equal(stateRow.sessionName, 'Custom Work Google')
 	assert.equal(stateRow.provider, 'google')
 })
@@ -1016,10 +1039,132 @@ test('validatePolicy validates schema and fails fast on errors', () => {
 	assert.match(validatePolicy([{ action: 'allow', description: 123 }]).error, /Rule at index 0 description must be a string/)
 	const validPolicy = [
 		{ action: 'allow', methods: ['GET'], origin: 'https://sheets.googleapis.com', path: '/v4/**', description: 'Allow sheets GET' },
+		{ action: 'allow', methods: ['POST'], path: '/v1/messages', body: { channel: 'C123*', 'recipient.email': ['*@company.com', 'admin@example.org'], urgent: false, retries: 3 } },
 		{ action: 'deny' }
 	]
 	assert.equal(validatePolicy(validPolicy).valid, true)
 	assert.equal(validatePolicy([{ action: 'allow', origin: 'https://sheets.googleapis.com/' }]).valid, true)
+	assert.equal(validatePolicy([{ action: 'allow', body: null }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', body: null }]).error, /body must be a non-empty object/)
+	assert.equal(validatePolicy([{ action: 'allow', body: [] }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', body: [] }]).error, /body must be a non-empty object/)
+	assert.equal(validatePolicy([{ action: 'allow', body: {} }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', body: {} }]).error, /body must be a non-empty object/)
+	assert.equal(validatePolicy([{ action: 'allow', body: { '': 'val' } }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', body: { '': 'val' } }]).error, /body field key must be a non-empty string/)
+	assert.equal(validatePolicy([{ action: 'allow', body: { field: [] } }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', body: { field: [] } }]).error, /body field "field" must be a primitive or non-empty array of primitives/)
+	assert.equal(validatePolicy([{ action: 'allow', body: { field: { nested: 'obj' } } }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', body: { field: { nested: 'obj' } } }]).error, /body field "field" must be a primitive or non-empty array of primitives/)
+	assert.equal(validatePolicy([{ action: 'allow', body: { field: ['ok', null] } }]).valid, false)
+})
+
+test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON string, form-urlencoded)', () => {
+	const policy = [
+		{
+			action: 'deny',
+			methods: ['POST'],
+			path: '/v1/charges',
+			body: { currency: 'btc' },
+			description: 'Crypto charges forbidden'
+		},
+		{
+			action: 'allow',
+			methods: ['POST'],
+			path: '/v1/messages',
+			body: {
+				channel: ['C_PUBLIC_*', 'C_TEAM'],
+				'recipient.email': '*@example.com'
+			}
+		},
+		{
+			action: 'allow',
+			methods: ['POST'],
+			path: '/v1/charges',
+			body: {
+				'metadata.env': 'staging',
+				capture: true
+			}
+		}
+	]
+	assert.equal(evaluatePolicy(policy, {
+		url: 'https://api.slack.com/v1/messages',
+		method: 'POST',
+		body: { channel: 'C_PUBLIC_123', recipient: { email: 'alice@example.com' } }
+	}).allowed, true)
+	assert.equal(evaluatePolicy(policy, {
+		url: 'https://api.slack.com/v1/messages',
+		method: 'POST',
+		body: JSON.stringify({ channel: 'C_TEAM', 'recipient.email': 'bob@example.com' })
+	}).allowed, true)
+	assert.equal(evaluatePolicy(policy, {
+		url: 'https://api.slack.com/v1/messages',
+		method: 'POST',
+		body: { channel: 'C_PRIVATE', recipient: { email: 'alice@example.com' } }
+	}).allowed, false)
+	assert.equal(evaluatePolicy(policy, {
+		url: 'https://api.slack.com/v1/messages',
+		method: 'POST',
+		body: { channel: 'C_TEAM', recipient: { email: 'alice@evil.com' } }
+	}).allowed, false)
+	assert.equal(evaluatePolicy(policy, {
+		url: 'https://api.slack.com/v1/messages',
+		method: 'POST'
+	}).allowed, false)
+	const denyCrypto = evaluatePolicy(policy, {
+		url: 'https://api.stripe.com/v1/charges',
+		method: 'POST',
+		body: 'currency=btc&amount=1000'
+	})
+	assert.equal(denyCrypto.allowed, false)
+	assert.equal(denyCrypto.reason, 'Crypto charges forbidden')
+	assert.equal(evaluatePolicy(policy, {
+		url: 'https://api.stripe.com/v1/charges',
+		method: 'POST',
+		body: { metadata: { env: 'staging' }, capture: true }
+	}).allowed, true)
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/tags', body: { tags: 'urgent-*' } }
+	], {
+		url: 'https://api.example.com/v1/tags',
+		method: 'POST',
+		body: { tags: ['normal', 'urgent-fix'] }
+	}).allowed, true)
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/proto', body: { toString: '*' } }
+	], {
+		url: 'https://api.example.com/v1/proto',
+		method: 'POST',
+		body: {}
+	}).allowed, false, 'Prototype property toString must not match on empty object')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/proto', body: { constructor: '*' } }
+	], {
+		url: 'https://api.example.com/v1/proto',
+		method: 'POST',
+		body: {}
+	}).allowed, false, 'Prototype property constructor must not match on empty object')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/proto', body: { 'nested.valueOf': '*' } }
+	], {
+		url: 'https://api.example.com/v1/proto',
+		method: 'POST',
+		body: { nested: {} }
+	}).allowed, false, 'Nested prototype property must not match')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/proto', body: { toString: 'hello' } }
+	], {
+		url: 'https://api.example.com/v1/proto',
+		method: 'POST',
+		body: 'toString=hello&other=1'
+	}).allowed, true, 'Form-urlencoded key named toString must parse cleanly as own property')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/slash', body: { text: 'hello*world', mime: 'application/*' } }
+	], {
+		url: 'https://api.example.com/v1/slash',
+		method: 'POST',
+		body: { text: 'hello/cruel/world', mime: 'application/json' }
+	}).allowed, true, 'Single star in body value pattern must match across slashes')
 })
 
 test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
@@ -1384,6 +1529,16 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	}, adminSession.token)
 	assert.equal(missingBaseRes.isError, true)
 	assert.match(missingBaseRes.content[0].text, /Valid https:\/\/ baseUrl is required/)
+	for (const ssrfUrl of ['https://169.254.169.254/latest/meta-data', 'https://10.0.0.1/api', 'https://192.168.1.1/api', 'https://172.16.0.5/api', 'https://0.0.0.0/api', 'https://[fe80::1]/api']) {
+		const ssrfRes = await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'custom',
+			apiKey: 'sk_ssrf',
+			baseUrl: ssrfUrl
+		}, adminSession.token)
+		assert.equal(ssrfRes.isError, true, `Must reject private/metadata baseUrl: ${ssrfUrl}`)
+		assert.match(ssrfRes.content[0].text, /Valid https:\/\/ baseUrl is required/)
+	}
 	const connectRes = await executeTool('admin', {
 		action: 'connect_app',
 		provider: 'stripe',
@@ -1439,6 +1594,24 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(unlinkRes.isError, undefined)
 	const unlinkData = JSON.parse(unlinkRes.content[0].text)
 	assert.equal(unlinkData.unlinked, true)
+	const otherTenant = db.users.upsert({ email: 'other-tenant@example.com' })
+	const otherAdmin = db.tokens.create({ userId: otherTenant.id, provider: 'self', admin: 1 })
+	const crossTenantUnlinkSessionRes = await executeTool('admin', {
+		action: 'unlink_app',
+		sessionId: chefSessionId,
+		appId: googleApp.id
+	}, otherAdmin.token)
+	assert.equal(crossTenantUnlinkSessionRes.isError, true)
+	assert.match(crossTenantUnlinkSessionRes.content[0].text, /Session not found/)
+	const otherApp = db.tokens.create({ userId: otherTenant.id, provider: 'google', type: 'oauth', name: 'Other Google' })
+	const crossTenantUnlinkAppRes = await executeTool('admin', {
+		action: 'unlink_app',
+		sessionId: chefSessionId,
+		appId: otherApp.id
+	}, adminSession.token)
+	assert.equal(crossTenantUnlinkAppRes.isError, true)
+	assert.match(crossTenantUnlinkAppRes.content[0].text, /App not found/)
+	assert.equal(db.links.listBySessionId(chefSessionId).length, 1, 'Cross-tenant unlink must not remove link')
 	const disconnectRes = await executeTool('admin', {
 		action: 'disconnect_app',
 		appId: stripeAppId,
@@ -1907,7 +2080,8 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 			sessionId: session.id,
 			appId: stripeAppId,
 			policy: [
-				{ action: 'allow', methods: ['GET'], path: '/v1/customers/**' }
+				{ action: 'allow', methods: ['GET'], path: '/v1/customers/**' },
+				{ action: 'allow', methods: ['POST'], path: '/v1/charges', body: { currency: 'usd', 'metadata.team': 'core' } }
 			]
 		}, session.token)
 		const toolsRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
@@ -1948,6 +2122,28 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 		const restData = await restRes.json()
 		assert.equal(restData.ok, true)
 		assert.equal(restData.path, '/v1/customers/cus_456/?expand=subscriptions')
+		const allowedPostRes = await executeTool('stripe_api', {
+			url: '/v1/charges',
+			method: 'POST',
+			body: { currency: 'usd', metadata: { team: 'core' } }
+		}, session.token)
+		assert.equal(allowedPostRes.isError, undefined)
+		const deniedBodyRes = await executeTool('stripe_api', {
+			url: '/v1/charges',
+			method: 'POST',
+			body: { currency: 'eur', metadata: { team: 'core' } }
+		}, session.token)
+		assert.equal(deniedBodyRes.isError, true)
+		assert.match(deniedBodyRes.content[0].text, /Policy violation/)
+		const restPostDenied = await fetch(`http://127.0.0.1:${addr.port}/api/stripe/v1/charges`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${session.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ currency: 'eur', metadata: { team: 'core' } })
+		})
+		assert.equal(restPostDenied.status, 403)
 	} finally {
 		await new Promise(resolve => mockUpstream.close(resolve))
 	}
@@ -2019,6 +2215,119 @@ test('migrateLegacySessions converts legacy sessions table to tokens and links s
 	assert.equal(whoamiData.authenticated, true)
 	assert.equal(whoamiData.session.apps.length, 1)
 	assert.deepEqual(whoamiData.session.apps[0].policy, JSON.parse(legacyPolicy))
+})
+
+test('usage logging: 30-day rolling window, proxy log capture, MCP list_logs, and GET /api/logs', async () => {
+	const http = await import('node:http')
+	const mockUpstream = http.createServer((req, res) => {
+		if (req.url === '/v1/fail') {
+			res.statusCode = 500
+			res.setHeader('content-type', 'application/json')
+			res.end(JSON.stringify({ error: 'upstream explosion' }))
+			return
+		}
+		if (req.url === '/v1/created') {
+			res.statusCode = 201
+			res.setHeader('content-type', 'application/json')
+			res.end(JSON.stringify({ created: true }))
+			return
+		}
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.end(JSON.stringify({ ok: true }))
+	})
+	await new Promise(resolve => mockUpstream.listen(0, '127.0.0.1', resolve))
+	const upstreamPort = mockUpstream.address().port
+	const baseUrl = `http://127.0.0.1:${upstreamPort}`
+	try {
+		const addr = server.address()
+		const user = db.users.upsert({ email: 'logs-test@example.com' })
+		const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
+		const workerSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+		const app = db.tokens.create({
+			userId: user.id,
+			provider: 'stripe',
+			type: 'api_key',
+			name: 'Stripe Logs App',
+			credentials: { apiKey: 'sk_test_logs', baseUrl }
+		})
+		db.links.create({
+			sessionId: workerSession.id,
+			appId: app.id,
+			policy: [
+				{ action: 'allow', methods: ['GET'], path: '/v1/ok' },
+				{ action: 'allow', methods: ['POST'], path: '/v1/created' },
+				{ action: 'allow', methods: ['GET'], path: '/v1/fail' }
+			]
+		})
+		const okRes = await executeTool('stripe_api', { url: '/v1/ok' }, workerSession.token)
+		assert.equal(okRes.isError, undefined)
+		const createdRes = await executeTool('stripe_api', { url: '/v1/created', method: 'POST' }, workerSession.token)
+		assert.equal(createdRes.isError, undefined)
+		const deniedRes = await executeTool('stripe_api', { url: '/v1/denied' }, workerSession.token)
+		assert.equal(deniedRes.isError, true)
+		const failRes = await executeTool('stripe_api', { url: '/v1/fail' }, workerSession.token)
+		assert.equal(failRes.isError, true)
+		const oldLog = db.logs.create({
+			userId: user.id,
+			sessionId: workerSession.id,
+			appId: app.id,
+			provider: 'stripe',
+			method: 'GET',
+			url: `${baseUrl}/v1/old`,
+			allowed: true,
+			status: 200,
+			duration: 5
+		})
+		const oldDate = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000).toISOString()
+		db.sqlite.prepare('UPDATE logs SET created = ? WHERE id = ?').run(oldDate, oldLog.id)
+		db.logs.prune()
+		const adminLogsRes = await executeTool('admin', { action: 'list_logs' }, adminSession.token)
+		assert.equal(adminLogsRes.isError, undefined)
+		const { logs } = JSON.parse(adminLogsRes.content[0].text)
+		assert.equal(logs.length, 4, '30-day pruning removes 35-day-old log entry and keeps 4 recent entries')
+		assert.equal(logs[0].url, `${baseUrl}/v1/fail`)
+		assert.equal(logs[0].allowed, true)
+		assert.equal(logs[0].status, 500)
+		assert.match(logs[0].error, /upstream explosion/)
+		assert.equal(logs[1].url, `${baseUrl}/v1/denied`)
+		assert.equal(logs[1].allowed, false)
+		assert.equal(logs[1].status, 403)
+		assert.equal(logs[2].url, `${baseUrl}/v1/created`)
+		assert.equal(logs[2].allowed, true)
+		assert.equal(logs[2].status, 201)
+		assert.equal(logs[3].url, `${baseUrl}/v1/ok`)
+		assert.equal(logs[3].allowed, true)
+		assert.equal(logs[3].status, 200)
+		assert.equal(logs[3].error, null)
+		const selfLogsRes = await executeTool('admin', { action: 'list_logs' }, workerSession.token)
+		assert.equal(selfLogsRes.isError, undefined)
+		const selfLogsData = JSON.parse(selfLogsRes.content[0].text)
+		assert.equal(selfLogsData.logs.length, 4)
+		const crossSessionLogsRes = await executeTool('admin', {
+			action: 'list_logs',
+			sessionId: adminSession.id
+		}, workerSession.token)
+		assert.equal(crossSessionLogsRes.isError, true)
+		assert.match(crossSessionLogsRes.content[0].text, /requires admin privileges/)
+		const restDeniedOnlyRes = await fetch(`http://127.0.0.1:${addr.port}/api/logs?allowed=false&limit=10`, {
+			headers: { authorization: `Bearer ${adminSession.token}` }
+		})
+		assert.equal(restDeniedOnlyRes.status, 200)
+		const restDeniedData = await restDeniedOnlyRes.json()
+		assert.equal(restDeniedData.logs.length, 1)
+		assert.equal(restDeniedData.logs[0].allowed, false)
+		assert.equal(restDeniedData.logs[0].url, `${baseUrl}/v1/denied`)
+		const restAllowedNumericRes = await fetch(`http://127.0.0.1:${addr.port}/api/logs?allowed=1&limit=10`, {
+			headers: { authorization: `Bearer ${adminSession.token}` }
+		})
+		assert.equal(restAllowedNumericRes.status, 200)
+		const restAllowedNumericData = await restAllowedNumericRes.json()
+		assert.equal(restAllowedNumericData.logs.length, 3)
+		assert.ok(restAllowedNumericData.logs.every(l => l.allowed === true))
+	} finally {
+		await new Promise(resolve => mockUpstream.close(resolve))
+	}
 })
 
 test('teardown server', (t, done) => {

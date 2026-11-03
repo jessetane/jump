@@ -9,7 +9,7 @@ Models already know HTTP APIs from pretraining, they just need an authenticated 
 ## How
 * One `<provider>_api` passthrough tool per linked provider (`google_api`, `stripe_api`, etc).
 * Sessions are decoupled from upstream OAuth and API-key credentials, so multiple accounts can be linked to one or many sessions.
-* Each session-to-app link can carry an ordered `allow`/`deny` policy matching HTTP methods, origins, and URL path globs.
+* Each session-to-app link can carry an ordered `allow`/`deny` policy matching HTTP methods, origins, URL path globs, and request body fields.
 
 ## Setup
 ```sh
@@ -77,7 +77,7 @@ admin({
 
 ### Tools
 * `<provider>_api({ url, method?, body?, headers?, account?, appId? })` - Proxies an HTTP request to the linked upstream provider.
-* `admin({ action, ... })` - Manages sessions, apps, and links (`whoami`, `list`, `get`, `create_session`, `update_session`, `revoke`, `list_apps`, `connect_app`, `disconnect_app`, `update_app`, `link_app`, `unlink_app`, `update_email`, `update_user`). Exposed only to admin sessions.
+* `admin({ action, ... })` - Manages sessions, apps, links, and usage logs (`whoami`, `list`, `get`, `create_session`, `update_session`, `revoke`, `list_apps`, `connect_app`, `disconnect_app`, `update_app`, `link_app`, `unlink_app`, `update_email`, `update_user`, `list_logs`). Exposed only to admin sessions.
 
 ## HTTP
 ```
@@ -108,6 +108,7 @@ PATCH  /api/apps/:id                            # update app (admin)
 DELETE /api/apps/:id                            # disconnect app (admin)
 POST   /api/links                               # link app to session (admin)
 DELETE /api/links                               # unlink app from session (admin)
+GET    /api/logs                                # list usage logs
 ALL    /api/:provider/*                         # transparent rest proxy
 ```
 

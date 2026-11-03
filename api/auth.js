@@ -1,6 +1,7 @@
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { parsePolicy } from '../policy.js'
+import { validateBaseUrl } from '../util.js'
 
 export {
 	whoami,
@@ -17,23 +18,8 @@ export {
 	unlinkApp,
 	updateEmail,
 	updateUser,
+	listLogs,
 	validateBaseUrl
-}
-
-function validateBaseUrl (baseUrl) {
-	if (!baseUrl || typeof baseUrl !== 'string') return null
-	let parsed
-	try {
-		parsed = new URL(baseUrl.trim())
-	} catch {
-		return null
-	}
-	const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '[::1]'
-	if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLocal)) {
-		return null
-	}
-	const pathname = parsed.pathname.replace(/\/+$/, '')
-	return `${parsed.origin}${pathname}`
 }
 
 async function whoami (token, opts = {}) {
@@ -403,11 +389,23 @@ async function unlinkApp (token, opts = {}) {
 		error.status = 403
 		throw error
 	}
-	const removed = db.links.remove(sessionId, appId)
+	const targetSession = db.tokens.get(sessionId)
+	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self') {
+		const error = new Error(`Session not found: ${sessionId}`)
+		error.status = 404
+		throw error
+	}
+	const targetApp = db.tokens.get(appId)
+	if (!targetApp || targetApp.userId !== session.userId || targetApp.provider === 'self') {
+		const error = new Error(`App not found: ${appId}`)
+		error.status = 404
+		throw error
+	}
+	const removed = db.links.remove(targetSession.id, targetApp.id)
 	return {
 		unlinked: removed,
-		sessionId,
-		appId
+		sessionId: targetSession.id,
+		appId: targetApp.id
 	}
 }
 
@@ -565,4 +563,23 @@ async function updateSession (token, opts = {}) {
 			isCurrent: updated.id === session.id
 		}
 	}
+}
+
+async function listLogs (token, opts = {}) {
+	const { sessionId, appId, provider, allowed, limit } = opts
+	const { session } = requireSession(token, opts)
+	if (!session.admin && sessionId && sessionId !== session.id) {
+		const error = new Error('Access denied: log administration requires admin privileges')
+		error.status = 403
+		throw error
+	}
+	const effectiveSessionId = session.admin ? sessionId : session.id
+	const logs = db.logs.listByUserId(session.userId, {
+		sessionId: effectiveSessionId,
+		appId,
+		provider,
+		allowed,
+		limit
+	})
+	return { logs }
 }
