@@ -2,7 +2,7 @@
 MCP proxy for HTTP APIs.
 
 ## Why
-Untrusted agents sometimes still need to use tools.
+So my trusted agents can do Google stuff. So my untrusted agents can also do Google stuff.
 
 ## How
 * One `<provider>_api` passthrough tool per linked provider (`google_api`, `stripe_api`, etc).
