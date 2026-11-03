@@ -125,12 +125,34 @@ const services = {
 			'https://www.googleapis.com/auth/chat.messages'
 		]
 	},
-	keep: {
-		id: 'keep',
-		name: 'Google Keep',
-		enterprise: true,
-		ro: ['https://www.googleapis.com/auth/keep.readonly'],
-		rw: ['https://www.googleapis.com/auth/keep']
+	admin: {
+		id: 'admin',
+		name: 'Google Admin',
+		ro: [
+			'https://www.googleapis.com/auth/admin.directory.user.readonly',
+			'https://www.googleapis.com/auth/admin.directory.group.readonly',
+			'https://www.googleapis.com/auth/admin.directory.domain.readonly',
+			'https://www.googleapis.com/auth/admin.directory.orgunit.readonly',
+			'https://www.googleapis.com/auth/admin.reports.audit.readonly',
+			'https://www.googleapis.com/auth/admin.reports.usage.readonly',
+			'https://www.googleapis.com/auth/apps.groups.settings',
+			'https://www.googleapis.com/auth/apps.licensing',
+			'https://www.googleapis.com/auth/cloud-identity.groups.readonly',
+			'https://www.googleapis.com/auth/cloud-identity.devices.readonly'
+		],
+		rw: [
+			'https://www.googleapis.com/auth/admin.directory.user',
+			'https://www.googleapis.com/auth/admin.directory.group',
+			'https://www.googleapis.com/auth/admin.directory.domain',
+			'https://www.googleapis.com/auth/admin.directory.orgunit',
+			'https://www.googleapis.com/auth/admin.datatransfer',
+			'https://www.googleapis.com/auth/admin.reports.audit.readonly',
+			'https://www.googleapis.com/auth/admin.reports.usage.readonly',
+			'https://www.googleapis.com/auth/apps.groups.settings',
+			'https://www.googleapis.com/auth/apps.licensing',
+			'https://www.googleapis.com/auth/cloud-identity.groups',
+			'https://www.googleapis.com/auth/cloud-identity.devices'
+		]
 	}
 }
 

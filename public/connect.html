@@ -83,18 +83,6 @@
 				cursor: not-allowed;
 			}
 
-			.enterprise-mark {
-				color: #000;
-				font-weight: bold;
-			}
-
-			.footnote {
-				font-size: 0.78rem;
-				color: #666;
-				line-height: 1.4;
-				margin-bottom: 1.5rem;
-			}
-
 			.form-group {
 				margin-bottom: 1.25rem;
 			}
@@ -158,9 +146,6 @@
 						</tr>
 					</tbody>
 				</table>
-				<div class="footnote" id="enterprise-footnote">
-					<span class="enterprise-mark">*</span> Restricted to enterprise Google Workspace accounts with domain-wide delegation. Requests from personal accounts will fail if selected.
-				</div>
 				<button type="submit" id="submit-btn">Sign in with Google</button>
 			</form>
 		</div>
@@ -181,7 +166,7 @@
 				{ id: 'photos', name: 'Google Photos' },
 				{ id: 'meet', name: 'Google Meet' },
 				{ id: 'chat', name: 'Google Chat' },
-				{ id: 'keep', name: 'Google Keep', enterprise: true }
+				{ id: 'admin', name: 'Google Admin' }
 			]
 
 			function updateAllRowState () {
@@ -228,7 +213,6 @@
 				const subtitleEl = document.getElementById('page-subtitle')
 				const submitEl = document.getElementById('submit-btn')
 				const tableEl = document.getElementById('services-table')
-				const footnoteEl = document.getElementById('enterprise-footnote')
 				document.title = 'jump connect'
 				if (formEl) formEl.action = '/providers/' + provider.id + '/consent'
 				if (params.reauth_app_id) {
@@ -271,12 +255,6 @@
 						const tdSvc = document.createElement('td')
 						const spanName = document.createElement('span')
 						spanName.textContent = s.name
-						if (s.enterprise) {
-							const mark = document.createElement('span')
-							mark.className = 'enterprise-mark'
-							mark.textContent = ' *'
-							spanName.appendChild(mark)
-						}
 						tdSvc.appendChild(spanName)
 						const isReadChecked = serviceIdsRead ? serviceIdsRead.has(s.id) : false
 						const isWriteChecked = isReadChecked && serviceIdsWrite.has(s.id)
@@ -345,7 +323,6 @@
 					updateAllRowState()
 				} else {
 					if (tableEl) tableEl.style.display = 'none'
-					if (footnoteEl) footnoteEl.style.display = 'none'
 				}
 				const hiddenContainer = document.getElementById('hidden-inputs')
 				for (const [key, value] of Object.entries(params)) {

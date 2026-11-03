@@ -566,8 +566,7 @@ async function handleProviderConnect (req, res, query, providerName = 'google') 
 		...(provider.services && {
 			services: Object.values(provider.services).map(s => ({
 				id: s.id,
-				name: s.name,
-				...(s.enterprise && { enterprise: true })
+				name: s.name
 			}))
 		})
 	}
