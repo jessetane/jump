@@ -14,27 +14,35 @@ function isValidBodyScalar (val) {
 	return t === 'string' || t === 'number' || t === 'boolean'
 }
 
-function parseBodyObject (body) {
+function parseUrlEncoded (str) {
+	const params = new URLSearchParams(str)
+	const obj = {}
+	for (const [k, v] of params.entries()) {
+		if (Object.hasOwn(obj, k)) {
+			obj[k] = Array.isArray(obj[k]) ? [...obj[k], v] : [obj[k], v]
+		} else {
+			obj[k] = v
+		}
+	}
+	return Object.keys(obj).length > 0 ? obj : null
+}
+
+function parseBodyObject (body, contentType = '') {
 	if (!body) return null
 	if (typeof body === 'object' && !Array.isArray(body)) return body
 	if (typeof body === 'string') {
+		const ct = String(contentType || '').split(';')[0].trim().toLowerCase()
+		if (ct === 'application/x-www-form-urlencoded') {
+			return parseUrlEncoded(body)
+		}
 		const trimmed = body.trim()
-		if (!trimmed) return null
+		if (!trimmed || /^<[a-zA-Z?_!][\s\S]*>$/.test(trimmed)) return null
 		try {
 			const parsed = JSON.parse(trimmed)
 			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
 		} catch {}
 		if (trimmed.includes('=')) {
-			const params = new URLSearchParams(trimmed)
-			const obj = {}
-			for (const [k, v] of params.entries()) {
-				if (Object.hasOwn(obj, k)) {
-					obj[k] = Array.isArray(obj[k]) ? [...obj[k], v] : [obj[k], v]
-				} else {
-					obj[k] = v
-				}
-			}
-			return Object.keys(obj).length > 0 ? obj : null
+			return parseUrlEncoded(body)
 		}
 	}
 	return null
@@ -281,7 +289,7 @@ function evaluatePolicy (policy, req = {}) {
 		}
 		if (rule.body) {
 			if (parsedBody === undefined) {
-				parsedBody = parseBodyObject(req.body)
+				parsedBody = parseBodyObject(req.body, req.contentType)
 			}
 			if (!parsedBody) continue
 			let bodyMatched = true

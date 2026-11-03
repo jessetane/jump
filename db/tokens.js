@@ -224,7 +224,7 @@ function listByUserId (userId, opts = {}) {
 }
 
 function updateCredentials (id, opts = {}) {
-	const { credentials, expiresAt, scopes = null, name = null } = opts
+	const { credentials, expiresAt = null, scopes = null, name = null } = opts
 	const now = new Date().toISOString()
 	const credsJson = credentials && typeof credentials === 'object' ? JSON.stringify(credentials) : credentials
 	sqlite.prepare(`

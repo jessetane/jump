@@ -44,7 +44,7 @@ const adminTool = {
 			name: { type: 'string', description: 'Human-readable label or user display name.' },
 			account: { type: 'string', description: 'Upstream account or tenant identifier (e.g. email, username, account ID).' },
 			baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or API-key providers (e.g. "https://api.stripe.com").' },
-			apiKey: { type: 'string', description: 'Upstream API key or bearer secret when connecting an API-key provider.' },
+			apiKey: { type: 'string', description: 'Upstream API credential when connecting an API-key provider: Bearer token, HTTP Basic "user:pass", or query string "?key=val".' },
 			email: { type: 'string', description: 'New email address (for update_email action).' },
 			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe", "github").' },
 			policy: {
@@ -117,7 +117,7 @@ function buildProviderTool (providerName, providerLinks = []) {
 				},
 				body: {
 					type: ['object', 'string'],
-					description: 'JSON body object or string payload for POST/PUT/PATCH requests.'
+					description: 'Request body payload for POST/PUT/PATCH requests (JSON object, form-urlencoded object when Content-Type is application/x-www-form-urlencoded, or raw XML/text string).'
 				},
 				headers: {
 					type: 'object',

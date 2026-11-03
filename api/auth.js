@@ -224,6 +224,7 @@ async function listApps (token, opts = {}) {
 
 async function connectApp (token, opts = {}) {
 	let { provider, name, apiKey, account, baseUrl, credentials, appId } = opts
+	apiKey = typeof apiKey === 'string' ? apiKey.trim() : apiKey
 	const { session, appUrl } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: app administration requires admin privileges')
@@ -426,7 +427,7 @@ async function updateUser (token, opts = {}) {
 }
 
 async function updateApp (token, opts = {}) {
-	const { appId, name, account, baseUrl } = opts
+	const { appId, name, account, baseUrl, apiKey } = opts
 	const { session } = requireSession(token, opts)
 	if (!session.admin) {
 		const error = new Error('Access denied: app administration requires admin privileges')
@@ -456,11 +457,12 @@ async function updateApp (token, opts = {}) {
 	if (name !== undefined) {
 		db.tokens.updateName(appId, name)
 	}
-	if (account !== undefined || baseUrl !== undefined) {
+	if (account !== undefined || baseUrl !== undefined || apiKey !== undefined) {
 		const updatedCreds = {
 			...(targetApp.credentials || {}),
 			...(account !== undefined ? { account: account ? String(account).trim() : null } : {}),
-			...(baseUrl !== undefined ? { baseUrl: normalizedBaseUrl } : {})
+			...(baseUrl !== undefined ? { baseUrl: normalizedBaseUrl } : {}),
+			...(apiKey !== undefined ? { apiKey: apiKey ? String(apiKey).trim() : null } : {})
 		}
 		db.tokens.updateCredentials(appId, { credentials: updatedCreds })
 	}

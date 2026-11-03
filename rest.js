@@ -39,17 +39,24 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 	const search = qs ? `?${qs}` : ''
 	const targetUrl = `${targetPath}${search}`
 	let body = undefined
-	if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
+	const headers = req.headers['content-type'] ? { 'content-type': req.headers['content-type'] } : undefined
+	if (!['GET', 'HEAD'].includes(req.method)) {
 		const rawBody = await getBody(req)
 		if (rawBody && rawBody.trim()) {
 			const contentType = (req.headers['content-type'] || '').toLowerCase()
-			if (contentType.includes('application/json') || rawBody.trim().startsWith('{') || rawBody.trim().startsWith('[')) {
+			if (contentType.includes('application/json') || contentType.includes('+json')) {
 				try {
 					body = JSON.parse(rawBody)
 				} catch {
 					const err = new Error('Invalid JSON body')
 					err.status = 400
 					throw err
+				}
+			} else if (!contentType && (rawBody.trim().startsWith('{') || rawBody.trim().startsWith('['))) {
+				try {
+					body = JSON.parse(rawBody)
+				} catch {
+					body = rawBody
 				}
 			} else {
 				body = rawBody
@@ -61,12 +68,19 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 		url: targetUrl,
 		method: req.method,
 		body,
+		headers,
 		appId,
 		account,
 		appUrl: getBaseUrl(req)
 	}, token)
 	if (result?.binary) {
 		sendBinary(res, result.data, result.mimeType)
+		return
+	}
+	if (typeof result === 'string') {
+		res.statusCode = 200
+		res.setHeader('content-type', /^<[a-zA-Z?_!][\s\S]*>$/.test(result.trim()) ? 'application/xml; charset=utf-8' : 'text/plain; charset=utf-8')
+		res.end(result)
 		return
 	}
 	sendJson(res, result)

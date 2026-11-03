@@ -1367,6 +1367,30 @@ test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON
 		method: 'POST',
 		body: { text: 'hello/cruel/world', mime: 'application/json' }
 	}).allowed, true, 'Single star in body value pattern must match across slashes')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/xml', body: { '<?xml version': '"1.0"?>' } }
+	], {
+		url: 'https://api.example.com/xml',
+		method: 'POST',
+		body: '<?xml version="1.0"?><request><action>transfer</action></request>'
+	}).allowed, false, 'XML string body must not be misparsed as URLSearchParams')
+	assert.equal(evaluatePolicy([
+		{ action: 'deny', methods: ['POST'], path: '/v1/charges', body: { currency: 'btc' } },
+		{ action: 'allow' }
+	], {
+		url: 'https://api.stripe.com/v1/charges',
+		method: 'POST',
+		body: '<x>=1&currency=btc',
+		contentType: 'application/x-www-form-urlencoded'
+	}).allowed, false, 'Form-urlencoded string starting with < must still be evaluated against body deny rules')
+	assert.equal(evaluatePolicy([
+		{ action: 'deny', methods: ['POST'], path: '/v1/charges', body: { currency: 'btc' } },
+		{ action: 'allow' }
+	], {
+		url: 'https://api.stripe.com/v1/charges',
+		method: 'POST',
+		body: '<x>=1&currency=btc'
+	}).allowed, false, 'Form-urlencoded string starting with < without explicit contentType must still match body deny rules')
 })
 
 test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
@@ -2476,6 +2500,204 @@ test('usage logging: 30-day rolling window, proxy log capture, MCP list_logs, an
 		const restAllowedNumericData = await restAllowedNumericRes.json()
 		assert.equal(restAllowedNumericData.logs.length, 3)
 		assert.ok(restAllowedNumericData.logs.every(l => l.allowed === true))
+	} finally {
+		await new Promise(resolve => mockUpstream.close(resolve))
+	}
+})
+
+test('upstream credential conventions (Basic, Query-param, Bearer), form-urlencoded object serialization, and XML/+json content types', async () => {
+	const http = await import('node:http')
+	const captured = []
+	const mockUpstream = http.createServer((req, res) => {
+		const chunks = []
+		req.on('data', c => chunks.push(c))
+		req.on('end', () => {
+			const rawBody = Buffer.concat(chunks).toString('utf8')
+			captured.push({
+				method: req.method,
+				url: req.url,
+				headers: req.headers,
+				body: rawBody
+			})
+			if (req.url.startsWith('/xml.response')) {
+				res.statusCode = 200
+				res.setHeader('content-type', 'application/xml; charset=iso-8859-1')
+				res.end(Buffer.from('<?xml version="1.0" encoding="iso-8859-1"?><ApiResponse Status="OK"><CommandResponse>caf\xe9</CommandResponse></ApiResponse>', 'latin1'))
+				return
+			}
+			if (req.url.startsWith('/soap')) {
+				res.statusCode = 200
+				res.setHeader('content-type', 'application/soap+xml; charset=utf-8')
+				res.end('<soap:Envelope><soap:Body><Result>ok</Result></soap:Body></soap:Envelope>')
+				return
+			}
+			if (req.url.startsWith('/problem')) {
+				res.statusCode = 200
+				res.setHeader('content-type', 'application/problem+json')
+				res.end(JSON.stringify({ type: 'about:blank', title: 'Not Really An Error', detail: 'parsed as json' }))
+				return
+			}
+			res.statusCode = 200
+			res.setHeader('content-type', 'application/json')
+			res.end(JSON.stringify({
+				ok: true,
+				url: req.url,
+				auth: req.headers.authorization || null,
+				contentType: req.headers['content-type'] || null,
+				body: rawBody
+			}))
+		})
+	})
+	await new Promise(resolve => mockUpstream.listen(0, '127.0.0.1', resolve))
+	const upstreamPort = mockUpstream.address().port
+	const baseUrl = `http://127.0.0.1:${upstreamPort}`
+	try {
+		const addr = server.address()
+		const user = db.users.upsert({ email: 'conventions@example.com' })
+		const session = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
+		const mailgunConnect = await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'mailgun',
+			name: 'Mailgun Basic',
+			apiKey: '  api:key-mailgun-secret  ',
+			baseUrl
+		}, session.token)
+		const mailgunAppId = JSON.parse(mailgunConnect.content[0].text).app.id
+		await executeTool('admin', {
+			action: 'link_app',
+			sessionId: session.id,
+			appId: mailgunAppId,
+			policy: [
+				{
+					action: 'deny',
+					methods: ['POST'],
+					path: '/v3/messages',
+					body: { forbidden: '1' }
+				},
+				{
+					action: 'allow',
+					methods: ['POST'],
+					path: '/v3/messages',
+					body: { from: 'noreply@example.com', tag: 'welcome' }
+				}
+			]
+		}, session.token)
+		const mgRes = await executeTool('mailgun_api', {
+			url: '/v3/messages',
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/x-www-form-urlencoded',
+				Authorization: 'Bearer attacker-attempt'
+			},
+			body: {
+				from: 'noreply@example.com',
+				to: 'alice@example.com',
+				tag: ['onboarding', 'welcome'],
+				vars: { plan: 'pro' }
+			}
+		}, session.token)
+		assert.equal(mgRes.isError, undefined)
+		const mgData = JSON.parse(mgRes.content[0].text)
+		assert.equal(mgData.auth, `Basic ${Buffer.from('api:key-mailgun-secret').toString('base64')}`)
+		assert.equal(mgData.contentType, 'application/x-www-form-urlencoded')
+		assert.equal(mgData.body, 'from=noreply%40example.com&to=alice%40example.com&tag=onboarding&tag=welcome&vars=%7B%22plan%22%3A%22pro%22%7D')
+		const mgBypassAttempt = await executeTool('mailgun_api', {
+			url: '/v3/messages',
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: '<x>=1&from=noreply@example.com&tag=welcome&forbidden=1'
+		}, session.token)
+		assert.equal(mgBypassAttempt.isError, true, 'Form-urlencoded string starting with < must not bypass body deny rules')
+		assert.match(mgBypassAttempt.content[0].text, /Policy violation/)
+		const mgDenied = await executeTool('mailgun_api', {
+			url: '/v3/messages',
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: {
+				from: 'spoof@evil.com',
+				to: 'alice@example.com',
+				tag: ['welcome']
+			}
+		}, session.token)
+		assert.equal(mgDenied.isError, true)
+		assert.match(mgDenied.content[0].text, /Policy violation/)
+		const preformattedBasicApp = db.tokens.create({
+			userId: user.id,
+			provider: 'twilio',
+			type: 'api_key',
+			name: 'Twilio Preformatted',
+			credentials: { apiKey: 'basic dXNlcm5hbWU6cGFzc3dvcmQ=', baseUrl }
+		})
+		db.links.create({ sessionId: session.id, appId: preformattedBasicApp.id, policy: [{ action: 'allow' }] })
+		const twilioRes = await executeTool('twilio_api', { url: '/2010-04-01/Accounts' }, session.token)
+		assert.equal(twilioRes.isError, undefined)
+		assert.equal(JSON.parse(twilioRes.content[0].text).auth, 'Basic dXNlcm5hbWU6cGFzc3dvcmQ=')
+		const ncConnect = await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'namecheap',
+			name: 'Namecheap XML',
+			apiKey: ' ?ApiUser=jtane&ApiKey=topsecret123&UserName=jtane&ClientIp=1.2.3.4 ',
+			baseUrl
+		}, session.token)
+		const ncAppId = JSON.parse(ncConnect.content[0].text).app.id
+		await executeTool('admin', {
+			action: 'link_app',
+			sessionId: session.id,
+			appId: ncAppId,
+			policy: [{ action: 'allow', path: '/**' }]
+		}, session.token)
+		const ncRes = await executeTool('namecheap_api', {
+			url: '/xml.response?Command=namecheap.domains.getList&apikey=evil_override&APIUSER=hacker',
+			headers: { Authorization: 'Bearer should-be-stripped' }
+		}, session.token)
+		assert.equal(ncRes.isError, undefined)
+		assert.match(ncRes.content[0].text, /<CommandResponse>café<\/CommandResponse>/)
+		const ncCaptured = captured.find(r => r.url.startsWith('/xml.response'))
+		assert.ok(ncCaptured)
+		assert.equal(ncCaptured.headers.authorization, undefined, 'Query-param auth must not send Authorization header')
+		const ncParsedUrl = new URL(ncCaptured.url, baseUrl)
+		assert.equal(ncParsedUrl.searchParams.get('Command'), 'namecheap.domains.getList')
+		assert.equal(ncParsedUrl.searchParams.get('ApiUser'), 'jtane')
+		assert.equal(ncParsedUrl.searchParams.get('APIUSER'), null, 'Case-insensitive colliding caller query param APIUSER must be stripped')
+		assert.equal(ncParsedUrl.searchParams.get('ApiKey'), 'topsecret123')
+		assert.equal(ncParsedUrl.searchParams.get('apikey'), null, 'Case-insensitive colliding caller query param apikey must be stripped')
+		assert.equal(ncParsedUrl.searchParams.get('ClientIp'), '1.2.3.4')
+		assert.deepEqual(ncParsedUrl.searchParams.getAll('ApiKey'), ['topsecret123'], 'Caller query param must not duplicate or override secret query param')
+		const logsRes = await executeTool('admin', { action: 'list_logs', provider: 'namecheap' }, session.token)
+		const ncLogs = JSON.parse(logsRes.content[0].text).logs
+		assert.equal(ncLogs.length, 1)
+		assert.ok(!ncLogs[0].url.includes('topsecret123'), 'Secret query credentials must never leak into db.logs')
+		assert.equal(ncLogs[0].url, `${baseUrl}/xml.response?Command=namecheap.domains.getList&apikey=evil_override&APIUSER=hacker`)
+		const updateKeyRes = await executeTool('admin', {
+			action: 'update_app',
+			appId: ncAppId,
+			apiKey: '?ApiUser=jtane&ApiKey=rotatedsecret456&UserName=jtane&ClientIp=5.6.7.8'
+		}, session.token)
+		assert.equal(updateKeyRes.isError, undefined)
+		captured.length = 0
+		await executeTool('namecheap_api', { url: '/xml.response?Command=namecheap.domains.getList' }, session.token)
+		const rotatedParsedUrl = new URL(captured[0].url, baseUrl)
+		assert.equal(rotatedParsedUrl.searchParams.get('ApiKey'), 'rotatedsecret456')
+		assert.equal(rotatedParsedUrl.searchParams.get('ClientIp'), '5.6.7.8')
+		const restXmlRes = await fetch(`http://127.0.0.1:${addr.port}/api/namecheap/xml.response?Command=namecheap.domains.getList`, {
+			headers: { authorization: `Bearer ${session.token}` }
+		})
+		assert.equal(restXmlRes.status, 200)
+		assert.equal(restXmlRes.headers.get('content-type'), 'application/xml; charset=utf-8')
+		assert.match(await restXmlRes.text(), /<ApiResponse Status="OK">/)
+		const soapRes = await executeTool('namecheap_api', {
+			url: '/soap',
+			method: 'POST',
+			body: '  <soap:Envelope><soap:Body><Ping/></soap:Body></soap:Envelope>'
+		}, session.token)
+		assert.equal(soapRes.isError, undefined)
+		assert.equal(soapRes.content[0].text, '<soap:Envelope><soap:Body><Result>ok</Result></soap:Body></soap:Envelope>')
+		const soapCaptured = captured.find(r => r.url.startsWith('/soap'))
+		assert.equal(soapCaptured.headers['content-type'], 'application/xml')
+		const problemRes = await executeTool('namecheap_api', { url: '/problem' }, session.token)
+		assert.equal(problemRes.isError, undefined)
+		const problemData = JSON.parse(problemRes.content[0].text)
+		assert.equal(problemData.detail, 'parsed as json')
 	} finally {
 		await new Promise(resolve => mockUpstream.close(resolve))
 	}

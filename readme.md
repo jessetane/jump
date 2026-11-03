@@ -43,7 +43,7 @@ From an admin session, use the `admin` tool to connect upstream apps and link th
 // connect a Google account (returns an interactive OAuth URL)
 admin({ action: 'connect_app', provider: 'google', name: 'Work Google' })
 
-// or connect any HTTP API with an API key and baseUrl
+// or connect any HTTP API with a Bearer key, Basic auth ("user:pass"), or query params ("?key=val")
 admin({
 	action: 'connect_app',
 	provider: 'stripe',

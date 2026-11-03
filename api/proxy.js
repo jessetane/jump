@@ -35,17 +35,68 @@ async function readResponseBody (res, maxBytes) {
 }
 
 async function executeUpstream ({ token, url, method = 'GET', body, headers = {}, onStatus }) {
-	const reqHeaders = {
-		...(token ? { authorization: `Bearer ${token}` } : {}),
-		...headers
+	const reqHeaders = {}
+	if (headers && typeof headers === 'object') {
+		for (const [k, v] of Object.entries(headers)) {
+			if (v !== undefined && v !== null) {
+				reqHeaders[k.toLowerCase()] = String(v)
+			}
+		}
+	}
+	let fetchUrl = url
+	const cleanToken = typeof token === 'string' ? token.trim() : ''
+	if (cleanToken) {
+		if (cleanToken.startsWith('?')) {
+			delete reqHeaders.authorization
+			const parsed = new URL(url)
+			const secretParams = new URLSearchParams(cleanToken.slice(1))
+			const secretKeysLower = new Set(Array.from(secretParams.keys(), k => k.toLowerCase()))
+			for (const existingKey of Array.from(parsed.searchParams.keys())) {
+				if (secretKeysLower.has(existingKey.toLowerCase())) {
+					parsed.searchParams.delete(existingKey)
+				}
+			}
+			for (const [k, v] of secretParams.entries()) {
+				parsed.searchParams.append(k, v)
+			}
+			fetchUrl = parsed.toString()
+		} else if (/^(?:Bearer|Basic)\s+/i.test(cleanToken)) {
+			const isBasic = /^basic/i.test(cleanToken)
+			reqHeaders.authorization = `${isBasic ? 'Basic' : 'Bearer'} ${cleanToken.replace(/^(?:Bearer|Basic)\s+/i, '').trim()}`
+		} else if (cleanToken.includes(':')) {
+			reqHeaders.authorization = `Basic ${Buffer.from(cleanToken).toString('base64')}`
+		} else {
+			reqHeaders.authorization = `Bearer ${cleanToken}`
+		}
 	}
 	let reqBody
 	if (body !== undefined && body !== null) {
 		if (typeof body === 'object') {
-			reqHeaders['content-type'] = reqHeaders['content-type'] || 'application/json'
-			reqBody = JSON.stringify(body)
+			const ct = (reqHeaders['content-type'] || '').split(';')[0].trim().toLowerCase()
+			if (ct === 'application/x-www-form-urlencoded') {
+				const params = new URLSearchParams()
+				for (const [k, v] of Object.entries(body)) {
+					if (v === undefined || v === null) continue
+					if (Array.isArray(v)) {
+						for (const item of v) {
+							if (item !== undefined && item !== null) {
+								params.append(k, typeof item === 'object' ? JSON.stringify(item) : String(item))
+							}
+						}
+					} else {
+						params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v))
+					}
+				}
+				reqBody = params.toString()
+			} else {
+				reqHeaders['content-type'] = reqHeaders['content-type'] || 'application/json'
+				reqBody = JSON.stringify(body)
+			}
 		} else {
 			reqBody = String(body)
+			if (!reqHeaders['content-type'] && /^<[a-zA-Z?_!][\s\S]*>$/.test(reqBody.trim())) {
+				reqHeaders['content-type'] = 'application/xml'
+			}
 		}
 	}
 	const reqMethod = method.toUpperCase()
@@ -56,7 +107,7 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 	if (reqMethod !== 'GET' && reqMethod !== 'HEAD' && reqBody !== undefined) {
 		fetchOpts.body = reqBody
 	}
-	const res = await fetch(url, fetchOpts)
+	const res = await fetch(fetchUrl, fetchOpts)
 	if (onStatus) onStatus(res.status)
 	const maxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB) || 10
 	const maxFileSizeBytes = maxFileSizeMb * 1024 * 1024
@@ -69,20 +120,29 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 		throw err
 	}
 	const rawContentType = res.headers.get('content-type') || ''
-	const contentType = rawContentType.split(';')[0].trim()
+	const contentType = rawContentType.split(';')[0].trim().toLowerCase()
 	const charsetMatch = rawContentType.match(/charset=([^;]+)/i)
 	const charset = charsetMatch ? charsetMatch[1].trim().replace(/^["']|["']$/g, '') : undefined
 	const buf = await readResponseBody(res, maxFileSizeBytes)
 	let result
-	if (contentType === 'application/json') {
+	if (contentType === 'application/json' || contentType.endsWith('+json')) {
 		const str = buf.toString('utf8')
 		try {
 			result = str ? JSON.parse(str) : {}
 		} catch {
 			result = str
 		}
-	} else if (contentType.startsWith('text/')) {
-		result = buf.toString(charset || 'utf8')
+	} else if (
+		contentType.startsWith('text/') ||
+		contentType === 'application/xml' ||
+		contentType.endsWith('+xml') ||
+		contentType === 'application/x-www-form-urlencoded'
+	) {
+		try {
+			result = new TextDecoder(charset || 'utf-8').decode(buf)
+		} catch {
+			result = buf.toString('utf8')
+		}
 	} else {
 		result = { binary: true, mimeType: contentType, ...(charset && { charset }), data: buf.toString('base64') }
 	}
@@ -174,10 +234,20 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 			throw err
 		}
 		if (targetLink.policy) {
+			let contentType
+			if (headers && typeof headers === 'object') {
+				for (const [k, v] of Object.entries(headers)) {
+					if (k.toLowerCase() === 'content-type' && v !== undefined && v !== null) {
+						contentType = String(v)
+						break
+					}
+				}
+			}
 			const check = evaluatePolicy(targetLink.policy, {
 				url: resolvedUrl,
 				method: normalizedMethod,
-				body
+				body,
+				contentType
 			})
 			if (!check.allowed) {
 				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by session policy'}`)
