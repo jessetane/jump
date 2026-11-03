@@ -6,8 +6,77 @@ export {
 	validatePolicy
 }
 
-const ALLOWED_RULE_KEYS = new Set(['action', 'methods', 'origin', 'path', 'description'])
+const ALLOWED_RULE_KEYS = new Set(['action', 'methods', 'origin', 'path', 'body', 'description'])
 const ALLOWED_HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', '*'])
+
+function isValidBodyScalar (val) {
+	const t = typeof val
+	return t === 'string' || t === 'number' || t === 'boolean'
+}
+
+function parseBodyObject (body) {
+	if (!body) return null
+	if (typeof body === 'object' && !Array.isArray(body)) return body
+	if (typeof body === 'string') {
+		const trimmed = body.trim()
+		if (!trimmed) return null
+		try {
+			const parsed = JSON.parse(trimmed)
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+		} catch {}
+		if (trimmed.includes('=')) {
+			const params = new URLSearchParams(trimmed)
+			const obj = {}
+			for (const [k, v] of params.entries()) {
+				if (Object.hasOwn(obj, k)) {
+					obj[k] = Array.isArray(obj[k]) ? [...obj[k], v] : [obj[k], v]
+				} else {
+					obj[k] = v
+				}
+			}
+			return Object.keys(obj).length > 0 ? obj : null
+		}
+	}
+	return null
+}
+
+function resolveBodyField (obj, key) {
+	if (!obj || typeof obj !== 'object') return undefined
+	if (Object.hasOwn(obj, key)) return obj[key]
+	if (!key.includes('.')) return undefined
+	const parts = key.split('.')
+	let cur = obj
+	for (const part of parts) {
+		if (!cur || typeof cur !== 'object' || !Object.hasOwn(cur, part)) return undefined
+		cur = cur[part]
+	}
+	return cur
+}
+
+function matchValuePattern (pattern, str) {
+	if (typeof pattern !== 'string' || typeof str !== 'string') return false
+	if (pattern === '*' || pattern === '**') return true
+	if (pattern === str) return true
+	const escaped = pattern.replace(/[.+^${}()|[\]\\?]/g, '\\$&').replace(/\*+/g, '.*')
+	try {
+		const regex = new RegExp(`^${escaped}$`, 'i')
+		return regex.test(str)
+	} catch {
+		return false
+	}
+}
+
+function matchBodyValue (expected, actual) {
+	if (actual === undefined || actual === null) return false
+	const patterns = Array.isArray(expected) ? expected : [expected]
+	const values = Array.isArray(actual) ? actual : [actual]
+	if (values.length === 0) return false
+	return values.some(val => {
+		if (val === undefined || val === null || typeof val === 'object') return false
+		const valStr = String(val)
+		return patterns.some(pat => matchValuePattern(String(pat), valStr))
+	})
+}
 
 function canonicalizePath (str) {
 	if (typeof str !== 'string') return ''
@@ -95,6 +164,27 @@ function validatePolicy (policy) {
 				return { valid: false, error: `Rule at index ${i} path must be a pathname; use "origin" to specify hostnames` }
 			}
 		}
+		if (rule.body !== undefined) {
+			if (!rule.body || typeof rule.body !== 'object' || Array.isArray(rule.body)) {
+				return { valid: false, error: `Rule at index ${i} body must be a non-empty object` }
+			}
+			const entries = Object.entries(rule.body)
+			if (entries.length === 0) {
+				return { valid: false, error: `Rule at index ${i} body must be a non-empty object` }
+			}
+			for (const [k, v] of entries) {
+				if (!k.trim()) {
+					return { valid: false, error: `Rule at index ${i} body field key must be a non-empty string` }
+				}
+				if (Array.isArray(v)) {
+					if (v.length === 0 || !v.every(isValidBodyScalar)) {
+						return { valid: false, error: `Rule at index ${i} body field "${k}" must be a primitive or non-empty array of primitives` }
+					}
+				} else if (!isValidBodyScalar(v)) {
+					return { valid: false, error: `Rule at index ${i} body field "${k}" must be a primitive or non-empty array of primitives` }
+				}
+			}
+		}
 		if (rule.description !== undefined && typeof rule.description !== 'string') {
 			return { valid: false, error: `Rule at index ${i} description must be a string` }
 		}
@@ -172,6 +262,7 @@ function evaluatePolicy (policy, req = {}) {
 	if (canonicalPath === null) {
 		return { allowed: false, reason: 'Invalid path: path traversal is not permitted' }
 	}
+	let parsedBody = undefined
 	for (const rule of parsedPolicy) {
 		const action = rule.action.toLowerCase()
 		if (rule.methods) {
@@ -187,6 +278,21 @@ function evaluatePolicy (policy, req = {}) {
 			const normPath = rawPath.startsWith('/') || rawPath === '*' || rawPath === '**' ? rawPath : `/${rawPath}`
 			const canonicalNormPath = canonicalizePath(normPath)
 			if (!matchPattern(canonicalNormPath, canonicalPath)) continue
+		}
+		if (rule.body) {
+			if (parsedBody === undefined) {
+				parsedBody = parseBodyObject(req.body)
+			}
+			if (!parsedBody) continue
+			let bodyMatched = true
+			for (const [key, expected] of Object.entries(rule.body)) {
+				const actual = resolveBodyField(parsedBody, key)
+				if (!matchBodyValue(expected, actual)) {
+					bodyMatched = false
+					break
+				}
+			}
+			if (!bodyMatched) continue
 		}
 		if (action === 'deny') {
 			return {
