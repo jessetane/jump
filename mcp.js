@@ -241,7 +241,6 @@ async function executeTool (name, args = {}, token, appUrl) {
 
 function getAvailableTools (token) {
 	if (!token) return []
-	db.tokens.touchByToken(token)
 	const session = db.tokens.getByToken(token)
 	if (!session) return []
 	const links = db.links.listBySessionId(session.id)
@@ -302,7 +301,6 @@ const rpcMethods = {
 		if (process.env.NODE_ENV !== 'test') {
 			console.log(`[mcp] tools/call: name=${name || '(missing)'} args=${JSON.stringify(args)}`)
 		}
-		if (token) db.tokens.touchByToken(token)
 		return executeTool(name, args, token, appUrl)
 	}
 }

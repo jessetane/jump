@@ -6,13 +6,15 @@ export {
 	create,
 	get,
 	getByToken,
+	findRevocable,
+	issueOauthTokens,
+	refreshOauthSession,
 	listByUserId,
 	updateCredentials,
 	updateName,
 	setAdmin,
 	rotateToken,
 	touch,
-	touchByToken,
 	remove,
 	pruneDormant,
 	pruneExpired,
@@ -123,7 +125,7 @@ function create (opts = {}) {
 		provider = 'self',
 		type = 'bearer',
 		name = null,
-		token = (provider === 'self' && type === 'bearer') ? randomUUID() : null,
+		token = opts.token !== undefined ? opts.token : ((provider === 'self' && type === 'bearer') ? randomUUID() : null),
 		credentials = null,
 		expiresAt = null,
 		scopes = null,
@@ -154,13 +156,81 @@ function get (id) {
 
 function getByToken (token) {
 	if (!token) return null
+	const now = Date.now()
 	const row = sqlite.prepare(`
 		SELECT tokens.*, users.email, users.name AS user_name
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.token = ? AND tokens.provider = 'self' AND tokens.type = 'bearer'
-	`).get(token)
+			AND (tokens.expires_at IS NULL OR tokens.expires_at > ?)
+	`).get(token, now)
+	if (!row) return null
+	if (touch(row.id)) {
+		row.updated = new Date().toISOString()
+	}
 	return formatToken(row)
+}
+
+function findRevocable (token) {
+	if (!token) return null
+	const row = sqlite.prepare(`
+		SELECT tokens.*, users.email, users.name AS user_name
+		FROM tokens
+		JOIN users ON tokens.user_id = users.id
+		WHERE tokens.provider = 'self' AND tokens.type = 'bearer'
+			AND (tokens.token = ? OR json_extract(tokens.credentials, '$.refreshToken') = ?)
+	`).get(token, token)
+	return formatToken(row)
+}
+
+function issueOauthTokens (id) {
+	if (!id) return null
+	const session = get(id)
+	if (!session) return null
+	const now = Date.now()
+	const token = session.token || randomUUID()
+	const expiresAt = now + 3600 * 1000
+	const refreshToken = randomUUID()
+	const credentials = JSON.stringify({
+		...(session.credentials || {}),
+		refreshToken
+	})
+	const nowIso = new Date(now).toISOString()
+	sqlite.prepare(`
+		UPDATE tokens
+		SET token = ?, credentials = ?, expires_at = ?, updated = ?
+		WHERE id = ?
+	`).run(token, credentials, expiresAt, nowIso, id)
+	return get(id)
+}
+
+function refreshOauthSession (refreshToken) {
+	if (!refreshToken) return null
+	pruneDormant()
+	const row = sqlite.prepare(`
+		SELECT tokens.*, users.email, users.name AS user_name
+		FROM tokens
+		JOIN users ON tokens.user_id = users.id
+		WHERE tokens.provider = 'self' AND tokens.type = 'bearer'
+			AND json_extract(tokens.credentials, '$.refreshToken') = ?
+	`).get(refreshToken)
+	const session = formatToken(row)
+	if (!session) return null
+	const now = Date.now()
+	const newAccessToken = randomUUID()
+	const newRefreshToken = randomUUID()
+	const newExpiresAt = now + 3600 * 1000
+	const credentials = JSON.stringify({
+		...(session.credentials || {}),
+		refreshToken: newRefreshToken
+	})
+	const nowIso = new Date(now).toISOString()
+	sqlite.prepare(`
+		UPDATE tokens
+		SET token = ?, credentials = ?, expires_at = ?, updated = ?
+		WHERE id = ?
+	`).run(newAccessToken, credentials, newExpiresAt, nowIso, session.id)
+	return get(session.id)
 }
 
 function touch (id) {
@@ -168,14 +238,6 @@ function touch (id) {
 	const now = new Date().toISOString()
 	const cutoff = new Date(Date.now() - 60000).toISOString()
 	const res = sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ? AND updated < ?').run(now, id, cutoff)
-	return res.changes > 0
-}
-
-function touchByToken (token) {
-	if (!token) return false
-	const now = new Date().toISOString()
-	const cutoff = new Date(Date.now() - 60000).toISOString()
-	const res = sqlite.prepare("UPDATE tokens SET updated = ? WHERE token = ? AND provider = 'self' AND type = 'bearer' AND updated < ?").run(now, token, cutoff)
 	return res.changes > 0
 }
 
@@ -242,7 +304,7 @@ function remove (id) {
 
 function pruneExpired () {
 	const now = Date.now()
-	sqlite.prepare("DELETE FROM tokens WHERE type IN ('oauth_state', 'oauth_code') AND expires_at IS NOT NULL AND expires_at < ?").run(now)
+	sqlite.prepare("DELETE FROM tokens WHERE (type IN ('oauth_state', 'oauth_code') OR (provider = 'self' AND type = 'bearer' AND token IS NULL)) AND expires_at IS NOT NULL AND expires_at < ?").run(now)
 }
 
 function pruneDormant (maxAgeMs = 30 * 24 * 60 * 60 * 1000) {

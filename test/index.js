@@ -320,8 +320,146 @@ test('oauth code exchange flow', async () => {
 	assert.equal(res.status, 200)
 	const data = await res.json()
 	assert.equal(data.access_token, session.token)
+	assert.ok(data.refresh_token)
 	assert.equal(data.token_type, 'Bearer')
+	assert.equal(data.expires_in, 3600)
+	assert.equal(data.scope, 'mcp')
 	assert.equal(db.tokens.consumeAuthCode(code2), null)
+	const issuedSession = db.tokens.get(session.id)
+	assert.ok(issuedSession.expiresAt > Date.now())
+	assert.deepEqual(issuedSession.credentials, { refreshToken: data.refresh_token })
+})
+
+test('oauth refresh_token grant rotation, access_token expiration, and embedded session indefinite TTL', async () => {
+	const addr = server.address()
+	const { session } = createTestSession({ email: 'refresh-flow@example.com', name: 'Refresh User', admin: true })
+	const code = db.tokens.createAuthCode({
+		sessionId: session.id,
+		clientRedirectUri: 'https://chatgpt.com/callback'
+	})
+	const tokenRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			code,
+			redirect_uri: 'https://chatgpt.com/callback',
+			grant_type: 'authorization_code'
+		})
+	})
+	assert.equal(tokenRes.status, 200)
+	const initialTokens = await tokenRes.json()
+	assert.equal(initialTokens.access_token, session.token)
+	assert.ok(initialTokens.refresh_token)
+	assert.equal(initialTokens.expires_in, 3600)
+	const unsupportedRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ grant_type: 'client_credentials' })
+	})
+	assert.equal(unsupportedRes.status, 400)
+	const unsupportedData = await unsupportedRes.json()
+	assert.equal(unsupportedData.error, 'unsupported_grant_type')
+	const missingRefreshRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ grant_type: 'refresh_token' })
+	})
+	assert.equal(missingRefreshRes.status, 400)
+	const missingRefreshData = await missingRefreshRes.json()
+	assert.equal(missingRefreshData.error, 'invalid_request')
+	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id = ?').run(Date.now() - 1000, session.id)
+	assert.equal(db.tokens.getByToken(initialTokens.access_token), null, 'Expired access_token must return null from getByToken')
+	const expiredMcpRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${initialTokens.access_token}`
+		},
+		body: JSON.stringify({
+			jsonrpc: '2.0',
+			id: 1,
+			method: 'initialize',
+			params: { protocolVersion: '2025-03-26' }
+		})
+	})
+	assert.equal(expiredMcpRes.status, 401, 'Expired access_token must be rejected with 401 on /mcp')
+	const expiredApiRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
+		headers: { authorization: `Bearer ${initialTokens.access_token}` }
+	})
+	assert.equal(expiredApiRes.status, 401, 'Expired access_token must be rejected with 401 on REST API')
+	const refreshRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			grant_type: 'refresh_token',
+			refresh_token: initialTokens.refresh_token
+		}).toString()
+	})
+	assert.equal(refreshRes.status, 200)
+	const rotatedTokens = await refreshRes.json()
+	assert.ok(rotatedTokens.access_token)
+	assert.ok(rotatedTokens.refresh_token)
+	assert.notEqual(rotatedTokens.access_token, initialTokens.access_token, 'Access token must rotate on refresh')
+	assert.notEqual(rotatedTokens.refresh_token, initialTokens.refresh_token, 'Refresh token must rotate on refresh')
+	assert.equal(rotatedTokens.token_type, 'Bearer')
+	assert.equal(rotatedTokens.expires_in, 3600)
+	assert.equal(rotatedTokens.scope, 'mcp')
+	const replayOldRefreshRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			grant_type: 'refresh_token',
+			refresh_token: initialTokens.refresh_token
+		})
+	})
+	assert.equal(replayOldRefreshRes.status, 400, 'Replaying old refresh_token must fail with 400')
+	const replayData = await replayOldRefreshRes.json()
+	assert.equal(replayData.error, 'invalid_grant')
+	const oldTouchTime = new Date(Date.now() - 120000).toISOString()
+	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldTouchTime, session.id)
+	const validMcpRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${rotatedTokens.access_token}`
+		},
+		body: JSON.stringify({
+			jsonrpc: '2.0',
+			id: 2,
+			method: 'initialize',
+			params: { protocolVersion: '2025-03-26' }
+		})
+	})
+	assert.equal(validMcpRes.status, 200, 'Newly minted access_token must authenticate /mcp')
+	assert.ok(db.tokens.get(session.id).updated > oldTouchTime, 'getByToken must touch updated timestamp on auth')
+	const embeddedRes = await executeTool('admin', {
+		action: 'create_session',
+		name: 'Embedded Worker',
+		admin: false
+	}, rotatedTokens.access_token)
+	assert.equal(embeddedRes.isError, undefined)
+	const embeddedData = JSON.parse(embeddedRes.content[0].text)
+	assert.equal(embeddedData.session.expiresAt, null)
+	const embeddedRow = db.tokens.get(embeddedData.session.id)
+	assert.equal(embeddedRow.expiresAt, null, 'Embedded session created via create_session must have expiresAt: null')
+	assert.equal(embeddedRow.credentials, null, 'Embedded session must not have refresh token credentials')
+	const whoamiRes = await executeTool('admin', { action: 'whoami' }, rotatedTokens.access_token)
+	const whoamiData = JSON.parse(whoamiRes.content[0].text)
+	assert.ok(typeof whoamiData.session.expiresAt === 'number', 'whoami must expose expiresAt for OAuth session')
+	const dormantDate = new Date(Date.now() - 31 * 86400 * 1000).toISOString()
+	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(dormantDate, session.id)
+	const expiredRefreshRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			grant_type: 'refresh_token',
+			refresh_token: rotatedTokens.refresh_token
+		})
+	})
+	assert.equal(expiredRefreshRes.status, 400, 'Dormant/expired refresh_token (>30d) must be rejected with 400')
+	const expiredRefreshData = await expiredRefreshRes.json()
+	assert.equal(expiredRefreshData.error, 'invalid_grant')
+	assert.equal(db.tokens.get(session.id), null, 'Dormant session must be pruned on refresh attempt')
 })
 
 test('well-known oauth discovery endpoints', async () => {
@@ -340,6 +478,7 @@ test('well-known oauth discovery endpoints', async () => {
 	assert.ok(authData.token_endpoint.endsWith('/oauth/token'))
 	assert.ok(authData.registration_endpoint.endsWith('/oauth/register'))
 	assert.ok(authData.revocation_endpoint.endsWith('/oauth/revoke'))
+	assert.deepEqual(authData.grant_types_supported, ['authorization_code', 'refresh_token'])
 	assert.deepEqual(authData.code_challenge_methods_supported, ['S256'])
 	assert.equal(authData.client_id_metadata_document_supported, true)
 	const resAuthMcp = await fetch(`http://127.0.0.1:${addr.port}/.well-known/oauth-authorization-server/mcp`)
@@ -519,6 +658,11 @@ test('oauth consent html page, post consent, and scanner-safe two-step verify fl
 	const code = targetUrl.searchParams.get('code')
 	assert.ok(code)
 	assert.equal(db.tokens.findStateByMagicCode(stateObj.magicCode), null, 'POST /oauth/verify must consume magicCode')
+	const agentUser = db.users.getByEmail('agent@example.com')
+	const unexchangedSessions = db.tokens.listByUserId(agentUser.id, { provider: 'self' })
+	assert.equal(unexchangedSessions.length, 1)
+	assert.equal(unexchangedSessions[0].token, null, 'Unexchanged OAuth session must have token: null until /oauth/token is called')
+	assert.ok(unexchangedSessions[0].expiresAt > Date.now(), 'Unexchanged OAuth session must have temporary 10m expiresAt')
 })
 
 test('direct browser authorize without redirect_uri', async () => {
@@ -558,6 +702,10 @@ test('direct browser authorize without redirect_uri', async () => {
 	const verifyText = await postVerifyRes.text()
 	assert.match(verifyText, /user: browser@example.com/)
 	assert.match(verifyText, /Authorization: Bearer/)
+	const browserUser = db.users.getByEmail('browser@example.com')
+	const browserSessions = db.tokens.listByUserId(browserUser.id, { provider: 'self' })
+	assert.equal(browserSessions.length, 1)
+	assert.equal(browserSessions[0].expiresAt, null, 'Direct browser verify without redirect_uri must have expiresAt: null')
 })
 
 test('google provider connect screen and consent flow', async () => {
@@ -764,6 +912,16 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 	})
 	assert.equal(revokeJsonRes.status, 200)
 	assert.equal(db.tokens.get(sessionJson.id), null)
+	const { session: sessionRefreshRevoke } = createTestSession({ email: 'revoke-refresh@example.com' })
+	const issuedRefresh = db.tokens.issueOauthTokens(sessionRefreshRevoke.id)
+	assert.ok(issuedRefresh.credentials?.refreshToken)
+	const revokeByRefreshRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ token: issuedRefresh.credentials.refreshToken }).toString()
+	})
+	assert.equal(revokeByRefreshRes.status, 200)
+	assert.equal(db.tokens.get(sessionRefreshRevoke.id), null, 'Revoking by refresh_token must delete the session')
 })
 
 test('mcp auth whoami, list, and revoke', async () => {
@@ -2057,6 +2215,7 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 		const regData = await regRes.json()
 		assert.ok(regData.client_id)
 		assert.equal(regData.client_name, 'Test MCP Agent')
+		assert.deepEqual(regData.grant_types, ['authorization_code', 'refresh_token'])
 		const user = db.users.upsert({ email: 'multi-provider@example.com' })
 		const session = db.tokens.create({
 			userId: user.id,

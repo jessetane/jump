@@ -273,7 +273,7 @@ async function handleAuthServerMetadata (req, res) {
 		revocation_endpoint: `${base}/oauth/revoke`,
 		response_types_supported: ['code'],
 		response_modes_supported: ['query'],
-		grant_types_supported: ['authorization_code'],
+		grant_types_supported: ['authorization_code', 'refresh_token'],
 		token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
 		revocation_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
 		code_challenge_methods_supported: ['S256'],
@@ -327,7 +327,7 @@ async function handleRegister (req, res) {
 		client_id_issued_at: Math.floor(Date.now() / 1000),
 		client_name: body.client_name || 'MCP Client',
 		redirect_uris: redirectUris,
-		grant_types: body.grant_types || ['authorization_code'],
+		grant_types: body.grant_types || ['authorization_code', 'refresh_token'],
 		response_types: body.response_types || ['code'],
 		token_endpoint_auth_method: authMethod
 	}
@@ -539,6 +539,8 @@ async function handleVerify (req, res, query) {
 		provider: 'self',
 		type: 'bearer',
 		name: state.sessionName || (state.admin ? 'Admin Session' : 'Default Session'),
+		token: state.clientRedirectUri ? null : undefined,
+		expiresAt: state.clientRedirectUri ? Date.now() + 10 * 60 * 1000 : null,
 		admin: state.admin ? 1 : 0,
 		ip: state.ip || ip,
 		ua
@@ -802,6 +804,41 @@ async function handleToken (req, res) {
 	}
 	const rawBody = await getBody(req)
 	const params = parseTokenParams(rawBody)
+	const grantType = params.grant_type || 'authorization_code'
+	if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
+		res.statusCode = 400
+		res.setHeader('content-type', 'application/json; charset=utf-8')
+		res.end(JSON.stringify({ error: 'unsupported_grant_type', error_description: `Unsupported grant_type: ${grantType}` }))
+		return
+	}
+	if (grantType === 'refresh_token') {
+		const refreshToken = params.refresh_token
+		if (!refreshToken) {
+			res.statusCode = 400
+			res.setHeader('content-type', 'application/json; charset=utf-8')
+			res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Missing refresh_token' }))
+			return
+		}
+		const session = db.tokens.refreshOauthSession(refreshToken)
+		if (!session) {
+			res.statusCode = 400
+			res.setHeader('content-type', 'application/json; charset=utf-8')
+			res.end(JSON.stringify({ error: 'invalid_grant', error_description: 'Invalid or expired refresh token' }))
+			return
+		}
+		res.statusCode = 200
+		res.setHeader('cache-control', 'no-store')
+		res.setHeader('pragma', 'no-cache')
+		res.setHeader('content-type', 'application/json; charset=utf-8')
+		res.end(JSON.stringify({
+			access_token: session.token,
+			refresh_token: session.credentials?.refreshToken,
+			token_type: 'Bearer',
+			expires_in: 3600,
+			scope: 'mcp'
+		}))
+		return
+	}
 	const code = params.code
 	const redirectUri = params.redirect_uri
 	const codeVerifier = params.code_verifier
@@ -850,7 +887,7 @@ async function handleToken (req, res) {
 			return
 		}
 	}
-	const session = db.tokens.get(authCode.sessionId)
+	const session = db.tokens.issueOauthTokens(authCode.sessionId)
 	if (!session) {
 		console.warn('[oauth] Token exchange failed: Session not found')
 		res.statusCode = 400
@@ -864,8 +901,9 @@ async function handleToken (req, res) {
 	res.setHeader('content-type', 'application/json; charset=utf-8')
 	res.end(JSON.stringify({
 		access_token: session.token,
+		refresh_token: session.credentials?.refreshToken,
 		token_type: 'Bearer',
-		expires_in: 30 * 24 * 60 * 60,
+		expires_in: 3600,
 		scope: 'mcp'
 	}))
 }
@@ -892,7 +930,7 @@ async function handleRevoke (req, res) {
 		res.end(JSON.stringify({ error: 'invalid_request', error_description: 'Missing token parameter' }))
 		return
 	}
-	const session = db.tokens.getByToken(token)
+	const session = db.tokens.findRevocable(token)
 	if (session) {
 		const links = db.links.listBySessionId(session.id)
 		for (const link of links) {
