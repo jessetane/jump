@@ -2,9 +2,7 @@
 MCP proxy for HTTP APIs.
 
 ## Why
-Most MCP servers wrap upstream APIs in dozens of rigid tools, burning context tokens on schemas while covering a fraction of the surface area. Upstream OAuth scopes are also too coarse (granting write access to a shared Google calendar lets an agent delete your personal calendar too), and agents shouldn't hold raw refresh tokens or master API keys directly.
-
-Models already know HTTP APIs from pretraining, they just need an authenticated pipe with a firewall.
+Untrusted agents sometimes still need to use tools.
 
 ## How
 * One `<provider>_api` passthrough tool per linked provider (`google_api`, `stripe_api`, etc).
