@@ -19,7 +19,7 @@ fs.rmSync(`${testDbPath}-shm`, { force: true })
 
 const { server } = await import('../index.js')
 const db = await import('../db/index.js')
-const { isAllowedUrl: isGoogleAllowedUrl } = await import('../providers/google.js')
+const { isAllowedUrl: isGoogleAllowedUrl, summarizeScopes, services: googleServices } = await import('../providers/google.js')
 const { readResponseBody } = await import('../api/proxy.js')
 const { executeTool } = await import('../mcp.js')
 const { isAllowedRedirectUri } = await import('../oauth.js')
@@ -250,6 +250,49 @@ test('google.isAllowedUrl domain restrictions', () => {
 	assert.equal(isGoogleAllowedUrl('https://evilgoogleapis.com').allowed, false)
 	assert.equal(isGoogleAllowedUrl('https://localhost:8080').allowed, false)
 	assert.equal(isGoogleAllowedUrl('not-a-url').allowed, false)
+})
+
+test('google.summarizeScopes formats service scope combinations concisely', () => {
+	assert.equal(summarizeScopes(null), '')
+	assert.equal(summarizeScopes('https://www.googleapis.com/auth/userinfo.email'), '')
+	assert.equal(
+		summarizeScopes('https://www.googleapis.com/auth/calendar.readonly'),
+		'calendar (ro)'
+	)
+	assert.equal(
+		summarizeScopes('https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/spreadsheets.readonly'),
+		'drive, sheets (ro)'
+	)
+	assert.equal(
+		summarizeScopes('https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.readonly'),
+		'drive (rw), gmail (ro)'
+	)
+	assert.equal(
+		summarizeScopes(googleServices.photos.ro.join(' ')),
+		'photos (ro)'
+	)
+	assert.equal(
+		summarizeScopes(googleServices.photos.rw.join(' ')),
+		'photos (rw)'
+	)
+	assert.equal(
+		summarizeScopes(googleServices.admin.ro.join(' ')),
+		'admin (ro)'
+	)
+	assert.equal(
+		summarizeScopes(googleServices.admin.rw.join(' ')),
+		'admin (rw)'
+	)
+	const fiveMixed = [
+		...googleServices.drive.rw,
+		...googleServices.docs.rw,
+		...googleServices.sheets.ro,
+		...googleServices.slides.ro,
+		...googleServices.forms.ro
+	].join(' ')
+	assert.equal(summarizeScopes(fiveMixed), '5 services (2 rw, 3 ro)')
+	const allRw = Object.values(googleServices).flatMap(s => s.rw).join(' ')
+	assert.equal(summarizeScopes(allRw), 'all services (rw)')
 })
 
 test('rejects non-googleapis URLs in google_api tool', async () => {
@@ -1647,7 +1690,18 @@ test('magic link admin verification flow (/oauth/verify) with connected app sele
 		type: 'oauth',
 		name: 'Personal Google',
 		credentials: { accessToken: 'ya29.existing', account: 'magic-admin@example.com' },
+		scopes: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.readonly',
 		expiresAt: Date.now() + 3600000
+	})
+	const priorSession = db.tokens.create({
+		userId: existingUser.id,
+		provider: 'self',
+		type: 'bearer',
+		name: 'Prior Agent'
+	})
+	db.links.create({
+		sessionId: priorSession.id,
+		appId: existingApp.id
 	})
 	const magicCode = 'test-magic-code-123'
 	db.tokens.createState({
@@ -1666,6 +1720,7 @@ test('magic link admin verification flow (/oauth/verify) with connected app sele
 	const verifyHtml = await getVerifyRes.text()
 	assert.match(verifyHtml, /Link connected apps/)
 	assert.match(verifyHtml, /Personal Google/)
+	assert.match(verifyHtml, /drive \(rw\), gmail \(ro\) · linked: Prior Agent/)
 	assert.match(verifyHtml, new RegExp(`value="${existingApp.id}" checked`))
 	const verifyBody = new URLSearchParams({
 		code: magicCode,
