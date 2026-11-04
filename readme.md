@@ -22,22 +22,19 @@ For Google OAuth, enable the APIs you want in Google Cloud Console, add `https:/
 For magic-link emails, set `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, and `MAILGUN_SENDER` in `.env` (when unset, links are printed to stdout).
 
 ## Usage
-Connect your MCP client directly via OAuth (`https://<host>/mcp`), or visit `https://<host>/oauth/authorize` to generate a bearer token:
+Point an OAuth-capable MCP client at `https://<host>/mcp` and sign in as an admin:
 
 ```json
 {
 	"mcpServers": {
 		"jump": {
-			"serverUrl": "https://<host>/mcp",
-			"headers": {
-				"Authorization": "Bearer <token>"
-			}
+			"serverUrl": "https://<host>/mcp"
 		}
 	}
 }
 ```
 
-From an admin session, use the `admin` tool to connect upstream apps and link them to sessions:
+From an admin session, use the `admin` tool to connect upstream apps, create scoped sessions, and attach policies:
 
 ```javascript
 // connect a Google account (returns an interactive OAuth URL)
@@ -52,7 +49,10 @@ admin({
 	baseUrl: 'https://api.stripe.com'
 })
 
-// link an app to a session with a path/method policy
+// create a non-admin session for an embedded/untrusted agent (returns a bearer token)
+admin({ action: 'create_session', name: 'Untrusted Agent' })
+
+// link an app to that session with a path/method policy
 admin({
 	action: 'link_app',
 	sessionId: '<session_id>',
@@ -69,6 +69,21 @@ admin({
 		}
 	]
 })
+```
+
+For headless or embedded installations, pass a bearer token (from `create_session` or `https://<host>/oauth/authorize`) in `headers`:
+
+```json
+{
+	"mcpServers": {
+		"jump": {
+			"serverUrl": "https://<host>/mcp",
+			"headers": {
+				"Authorization": "Bearer <token>"
+			}
+		}
+	}
+}
 ```
 
 ## MCP
