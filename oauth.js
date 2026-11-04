@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as db from './db/index.js'
-import { getProvider } from './providers/index.js'
+import { getProvider, summarizeScopes } from './providers/index.js'
 import { getBody, sendJson, sendMail } from './util.js'
 
 export {
@@ -141,7 +141,7 @@ function renderCardPage (title, subtitle, bodyHtml) {
 
 			.app-item {
 				display: flex;
-				align-items: flex-start;
+				align-items: center;
 				gap: 8px;
 				padding: 8px 6px;
 				border-bottom: 1px solid #eee;
@@ -154,34 +154,10 @@ function renderCardPage (title, subtitle, bodyHtml) {
 				background: #fafafa;
 			}
 
-			.app-item input[type=checkbox] {
-				margin-top: 3px;
-			}
-
-			.app-info {
-				display: flex;
-				flex-direction: column;
-				flex: 1;
-				min-width: 0;
-				gap: 2px;
-			}
-
-			.app-row {
-				display: flex;
-				align-items: center;
-				gap: 8px;
-			}
-
 			.app-meta {
 				color: #777;
 				font-size: 0.8rem;
 				margin-left: auto;
-			}
-
-			.app-details {
-				color: #777;
-				font-size: 0.75rem;
-				line-height: 1.3;
 			}
 
 			button[type=submit] {
@@ -495,28 +471,12 @@ async function handleVerify (req, res, query) {
 		if (userApps.length > 0) {
 			const checkedAttr = state.admin ? ' checked' : ''
 			const items = userApps.map(app => {
-				const account = app.credentials?.account || app.credentials?.email || ''
-				const label = app.name || `${app.provider} app`
 				const provider = getProvider(app.provider)
-				const detailParts = []
-				const scopeSummary = provider?.summarizeScopes ? provider.summarizeScopes(app.scopes) : ''
-				if (scopeSummary) {
-					detailParts.push(scopeSummary)
-				} else if (app.credentials?.baseUrl) {
-					detailParts.push(app.credentials.baseUrl)
-				}
-				const appLinks = db.links.listByAppId(app.id)
-				if (appLinks.length > 0) {
-					const sessionNames = appLinks.map(l => l.session?.name || 'Session')
-					const sessionSummary = sessionNames.length <= 2
-						? sessionNames.join(', ')
-						: `${sessionNames.slice(0, 2).join(', ')} +${sessionNames.length - 2}`
-					detailParts.push(`linked: ${sessionSummary}`)
-				}
-				const detailsHtml = detailParts.length > 0
-					? `<div class="app-details">${escapeHtml(detailParts.join(' · '))}</div>`
-					: ''
-				return `<label class="app-item"><input type="checkbox" name="app_id" value="${escapeHtml(app.id)}"${checkedAttr}><div class="app-info"><div class="app-row"><span>${escapeHtml(label)}</span>${account ? `<span class="app-meta">${escapeHtml(account)}</span>` : ''}</div>${detailsHtml}</div></label>`
+				const account = app.credentials?.account || app.credentials?.email || ''
+				const scopeSummary = summarizeScopes(app.scopes, provider?.services)
+				const baseName = app.name || provider?.name || `${app.provider} app`
+				const label = scopeSummary ? `${baseName} · ${scopeSummary}` : baseName
+				return `<label class="app-item"><input type="checkbox" name="app_id" value="${escapeHtml(app.id)}"${checkedAttr}><span>${escapeHtml(label)}</span>${account ? `<span class="app-meta">${escapeHtml(account)}</span>` : ''}</label>`
 			}).join('')
 			appsHtml = `<div class="app-list"><div class="app-list-title">Link connected apps</div>${items}</div>`
 		}
@@ -773,7 +733,7 @@ async function handleCallback (req, res, query) {
 		})
 		targetUserId = user.id
 	}
-	const appName = oauthState.sessionName || `${userName || email} ${provider.name}`
+	const appName = oauthState.sessionName || provider.name
 	const appToken = db.tokens.create({
 		userId: targetUserId,
 		provider: provider.id,

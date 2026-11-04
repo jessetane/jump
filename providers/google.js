@@ -6,7 +6,6 @@ export {
 	type,
 	baseUrl,
 	services,
-	summarizeScopes,
 	toolDescription,
 	urlParamDescription,
 	buildAuthUrl,
@@ -157,40 +156,6 @@ const services = {
 			'https://www.googleapis.com/auth/cloud-identity.groups'
 		]
 	}
-}
-
-function summarizeScopes (scopesStr) {
-	if (!scopesStr || typeof scopesStr !== 'string') return ''
-	const granted = new Set(scopesStr.split(/\s+/).filter(Boolean))
-	const allServices = Object.values(services)
-	const matched = []
-	for (const svc of allServices) {
-		const rwDiff = svc.rw.filter(s => !svc.ro.includes(s))
-		const isRw = rwDiff.length > 0 ? rwDiff.some(s => granted.has(s)) : svc.rw.some(s => granted.has(s))
-		const isRo = !isRw && svc.ro.some(s => granted.has(s))
-		if (isRw || isRo) {
-			matched.push({ id: svc.id, mode: isRw ? 'rw' : 'ro' })
-		}
-	}
-	if (matched.length === 0) return ''
-	const allRw = matched.every(m => m.mode === 'rw')
-	const allRo = matched.every(m => m.mode === 'ro')
-	const uniformMode = allRw ? 'rw' : (allRo ? 'ro' : null)
-	if (matched.length === allServices.length && uniformMode) {
-		return `all services (${uniformMode})`
-	}
-	if (matched.length <= 4) {
-		if (uniformMode && matched.length > 1) {
-			return `${matched.map(m => m.id).join(', ')} (${uniformMode})`
-		}
-		return matched.map(m => `${m.id} (${m.mode})`).join(', ')
-	}
-	if (uniformMode) {
-		return `${matched.length} services (${uniformMode})`
-	}
-	const rwCount = matched.filter(m => m.mode === 'rw').length
-	const roCount = matched.length - rwCount
-	return `${matched.length} services (${rwCount} rw, ${roCount} ro)`
 }
 
 function buildScopesFromSelection (selectedServices = [], writeServiceIds = []) {

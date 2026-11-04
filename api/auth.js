@@ -271,7 +271,7 @@ async function connectApp (token, opts = {}) {
 		userId: session.userId,
 		provider,
 		type: apiKey ? 'api_key' : 'oauth',
-		name: name || `${provider} app`,
+		name: name || providerDef.name,
 		credentials: creds
 	})
 	return {
