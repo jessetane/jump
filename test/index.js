@@ -19,8 +19,9 @@ fs.rmSync(`${testDbPath}-shm`, { force: true })
 
 const { server } = await import('../index.js')
 const db = await import('../db/index.js')
-const { isAllowedUrl: isGoogleAllowedUrl, services: googleServices } = await import('../providers/google.js')
-const { summarizeScopes } = await import('../providers/index.js')
+const { google, github, createProvider, getProvider, summarizeScopes } = await import('../providers/index.js')
+const { isAllowedUrl: isGoogleAllowedUrl, services: googleServices } = google
+const { isAllowedUrl: isGithubAllowedUrl, services: githubServices } = github
 const { readResponseBody } = await import('../api/proxy.js')
 const { executeTool } = await import('../mcp.js')
 const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
@@ -2871,6 +2872,202 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 		assert.equal(problemData.detail, 'parsed as json')
 	} finally {
 		await new Promise(resolve => mockUpstream.close(resolve))
+	}
+})
+
+test('unified provider factory, github oauth + api_key provider, and unauthenticated consent/callback protections', async () => {
+	const http = await import('node:http')
+	assert.equal(isGithubAllowedUrl('https://api.github.com/repos/jessetane/jump').allowed, true)
+	assert.equal(isGithubAllowedUrl('http://api.github.com/repos/jessetane/jump').allowed, false)
+	assert.equal(isGithubAllowedUrl('https://evil.com/repos').allowed, false)
+	assert.equal(getProvider('github').normalizeTargetUrl('repos/jessetane/jump'), 'https://api.github.com/repos/jessetane/jump')
+	assert.equal(getProvider('github').normalizeTargetUrl('/user/repos'), 'https://api.github.com/user/repos')
+	assert.equal(getProvider('google').normalizeTargetUrl('sheets.googleapis.com/v4/spreadsheets/123'), 'https://sheets.googleapis.com/v4/spreadsheets/123')
+	assert.equal(getProvider('google').normalizeTargetUrl('drive/v3/files'), 'https://www.googleapis.com/drive/v3/files')
+	assert.equal(summarizeScopes('public_repo,gist', githubServices), 'repo (ro), gist (rw)')
+	assert.equal(summarizeScopes('read:user,public_repo,gist', githubServices), 'repo (ro), gist (rw)')
+	assert.equal(summarizeScopes('read:user,user:email,public_repo', githubServices), 'repo, user (ro)')
+	assert.equal(summarizeScopes('read:audit_log,admin:org', githubServices), 'org (rw), audit_log (ro)')
+	assert.equal(summarizeScopes('repo, workflow, notifications', githubServices), 'repo (rw), workflow (rw), notifications (ro)')
+	assert.equal(summarizeScopes('read:packages,write:packages,delete:packages', githubServices), 'packages (rw)')
+	assert.equal(summarizeScopes('read:packages', githubServices), 'packages (ro)')
+	const customProv = createProvider({ id: 'custom_oauth', name: 'CustomOAuth', baseUrl: 'https://api.custom.dev/v2', oauth: { authUrl: 'https://custom.dev/auth', tokenUrl: 'https://custom.dev/token', userInfoUrl: 'https://custom.dev/me' } })
+	assert.equal(customProv.isAllowedUrl('https://api.custom.dev/v2/items').allowed, true)
+	assert.equal(customProv.isAllowedUrl('https://api.custom.dev/v1/items').allowed, false)
+	const wildcardNoBaseProv = createProvider({ id: 'wildcard_only', name: 'WildcardOnly', baseUrl: null, allowedHosts: ['*.example.org'] })
+	assert.equal(wildcardNoBaseProv.isAllowedUrl('https://api.example.org/v1/test').allowed, true)
+	assert.equal(wildcardNoBaseProv.isAllowedUrl('https://evil.org/v1/test').allowed, false)
+	const addr = server.address()
+	const user = db.users.upsert({ email: 'github-test@example.com', name: 'GitHub Tester' })
+	const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
+	const noParamsConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: '',
+		redirect: 'manual'
+	})
+	assert.equal(noParamsConsentRes.status, 403)
+	assert.match(await noParamsConsentRes.text(), /admin session required/)
+	const connectPageRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/connect?session_id=${adminSession.id}&services=repo,gist,notifications&write=repo,gist`)
+	assert.equal(connectPageRes.status, 200)
+	const connectHtml = await connectPageRes.text()
+	assert.match(connectHtml, /"provider":\{"id":"github","name":"GitHub"\}/)
+	assert.match(connectHtml, /"id":"gist","name":"Gists","ro":false,"rw":true/)
+	assert.match(connectHtml, /"id":"notifications","name":"Notifications","ro":true,"rw":false/)
+	assert.doesNotMatch(connectHtml, /defaultServices/)
+	delete process.env.GITHUB_CLIENT_ID
+	const missingEnvConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ session_id: adminSession.id }).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(missingEnvConsentRes.status, 500)
+	assert.match(await missingEnvConsentRes.text(), /GITHUB_CLIENT_ID environment variable is missing/)
+	process.env.GITHUB_CLIENT_ID = 'gh-test-client-id'
+	process.env.GITHUB_CLIENT_SECRET = 'gh-test-client-secret'
+	const consentBody = new URLSearchParams({
+		session_id: adminSession.id,
+		app_name: 'My GitHub'
+	})
+	consentBody.append('services', 'REPO,GIST,NOTIFICATIONS')
+	consentBody.append('write', 'GIST')
+	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: consentBody.toString(),
+		redirect: 'manual'
+	})
+	assert.equal(consentRes.status, 302)
+	const authUrl = new URL(consentRes.headers.get('location'))
+	assert.equal(authUrl.origin, 'https://github.com')
+	assert.equal(authUrl.pathname, '/login/oauth/authorize')
+	assert.equal(authUrl.searchParams.get('client_id'), 'gh-test-client-id')
+	const scopes = authUrl.searchParams.get('scope').split(' ')
+	assert.deepEqual(scopes, ['read:user', 'public_repo', 'gist', 'notifications'])
+	const stateToken = authUrl.searchParams.get('state')
+	assert.ok(stateToken)
+	const origFetch = globalThis.fetch
+	const revokedCalls = []
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://github.com/login/oauth/access_token') {
+			const bodyParams = new URLSearchParams(init?.body || '')
+			if (bodyParams.get('code') === 'bad-gh-code') {
+				return new Response(JSON.stringify({
+					error: 'bad_verification_code',
+					error_description: 'The code passed is incorrect or expired.'
+				}), { status: 200, headers: { 'content-type': 'application/json' } })
+			}
+			return new Response(JSON.stringify({
+				access_token: 'gho_test_oauth_token',
+				scope: 'read:user,public_repo,gist,notifications',
+				token_type: 'bearer'
+			}), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://api.github.com/user') {
+			return new Response(JSON.stringify({
+				login: 'octocat',
+				id: 1
+			}), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u.startsWith('https://api.github.com/applications/')) {
+			revokedCalls.push({ url: u, method: init?.method, headers: init?.headers, body: init?.body })
+			return new Response(null, { status: 204 })
+		}
+		return origFetch(input, init)
+	}
+	try {
+		const badStateToken = db.tokens.createState({
+			sessionId: adminSession.id,
+			provider: 'github'
+		})
+		const badCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=bad-gh-code&state=${badStateToken}`)
+		assert.equal(badCbRes.status, 502)
+		assert.match(await badCbRes.text(), /The code passed is incorrect or expired/)
+		const orphanStateToken = db.tokens.createState({
+			sessionId: 'deleted-session-id',
+			provider: 'github'
+		})
+		const orphanCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=good-code&state=${orphanStateToken}`)
+		assert.equal(orphanCbRes.status, 403)
+		assert.match(await orphanCbRes.text(), /Access denied: admin session required/)
+		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=good-code&state=${stateToken}`)
+		assert.equal(cbRes.status, 200)
+		const cbHtml = await cbRes.text()
+		assert.match(cbHtml, /GitHub Connected/)
+		assert.match(cbHtml, /Connected <strong>octocat<\/strong>/)
+		const appsListRes = await executeTool('admin', { action: 'list_apps' }, adminSession.token)
+		const { apps } = JSON.parse(appsListRes.content[0].text)
+		const ghOauthApp = apps.find(a => a.provider === 'github' && a.type === 'oauth')
+		assert.ok(ghOauthApp)
+		assert.equal(ghOauthApp.name, 'My GitHub')
+		assert.equal(ghOauthApp.account, 'octocat')
+		assert.equal(ghOauthApp.expiresAt, null)
+		assert.equal(ghOauthApp.scopes, 'read:user,public_repo,gist,notifications')
+		const rawGhToken = db.tokens.get(ghOauthApp.id)
+		assert.deepEqual(rawGhToken.credentials, {
+			accessToken: 'gho_test_oauth_token',
+			refreshToken: null,
+			account: 'octocat'
+		})
+		const disconnectOauthRes = await executeTool('admin', {
+			action: 'disconnect_app',
+			appId: ghOauthApp.id,
+			revoke: true
+		}, adminSession.token)
+		assert.equal(disconnectOauthRes.isError, undefined)
+		assert.equal(revokedCalls.length, 1)
+		assert.equal(revokedCalls[0].url, 'https://api.github.com/applications/gh-test-client-id/token')
+		assert.equal(revokedCalls[0].method, 'DELETE')
+		assert.equal(JSON.parse(revokedCalls[0].body).access_token, 'gho_test_oauth_token')
+	} finally {
+		globalThis.fetch = origFetch
+	}
+	const capturedUpstream = []
+	const mockGhServer = http.createServer((req, res) => {
+		capturedUpstream.push({
+			url: req.url,
+			headers: req.headers
+		})
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.end(JSON.stringify({ full_name: 'jessetane/jump', ua: req.headers['user-agent'] }))
+	})
+	await new Promise(resolve => mockGhServer.listen(0, '127.0.0.1', resolve))
+	const mockGhUrl = `http://127.0.0.1:${mockGhServer.address().port}`
+	try {
+		const patConnectRes = await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'github',
+			name: 'GitHub PAT',
+			account: 'jessetane',
+			apiKey: 'ghp_personal_access_token_123',
+			baseUrl: mockGhUrl
+		}, adminSession.token)
+		assert.equal(patConnectRes.isError, undefined)
+		const patApp = JSON.parse(patConnectRes.content[0].text).app
+		assert.equal(patApp.provider, 'github')
+		assert.equal(patApp.type, 'api_key')
+		assert.equal(patApp.account, 'jessetane')
+		await executeTool('admin', {
+			action: 'link_app',
+			sessionId: adminSession.id,
+			appId: patApp.id,
+			policy: [{ action: 'allow', methods: ['GET'], path: '/repos/jessetane/**' }]
+		}, adminSession.token)
+		const ghApiRes = await executeTool('github_api', {
+			url: '/repos/jessetane/jump'
+		}, adminSession.token)
+		assert.equal(ghApiRes.isError, undefined)
+		const ghData = JSON.parse(ghApiRes.content[0].text)
+		assert.equal(ghData.full_name, 'jessetane/jump')
+		assert.equal(ghData.ua, 'jump')
+		assert.equal(capturedUpstream.length, 1)
+		assert.equal(capturedUpstream[0].headers.authorization, 'Bearer ghp_personal_access_token_123')
+		assert.equal(capturedUpstream[0].headers['user-agent'], 'jump')
+	} finally {
+		await new Promise(resolve => mockGhServer.close(resolve))
 	}
 })
 

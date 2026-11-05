@@ -43,6 +43,7 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 			}
 		}
 	}
+	reqHeaders['user-agent'] ||= 'jump'
 	let fetchUrl = url
 	const cleanToken = typeof token === 'string' ? token.trim() : ''
 	if (cleanToken) {
@@ -214,7 +215,7 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 		} else if (account) {
 			const cleanAccount = String(account).trim().toLowerCase()
 			const found = providerLinks.find(l => {
-				const appAcc = (l.app?.credentials?.account || l.app?.credentials?.email || '').toLowerCase()
+				const appAcc = (l.app?.credentials?.account || '').toLowerCase()
 				const appName = (l.app?.name || '').toLowerCase()
 				return appAcc === cleanAccount || appName === cleanAccount || l.app?.id === account
 			})

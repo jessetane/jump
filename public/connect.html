@@ -152,63 +152,65 @@
 		<script>
 			const initData = {{INIT_DATA}}
 
-			const defaultServices = [
-				{ id: 'drive', name: 'Google Drive' },
-				{ id: 'docs', name: 'Google Docs' },
-				{ id: 'sheets', name: 'Google Sheets' },
-				{ id: 'slides', name: 'Google Slides' },
-				{ id: 'forms', name: 'Google Forms' },
-				{ id: 'calendar', name: 'Google Calendar' },
-				{ id: 'tasks', name: 'Google Tasks' },
-				{ id: 'contacts', name: 'Google Contacts' },
-				{ id: 'youtube', name: 'YouTube' },
-				{ id: 'gmail', name: 'Gmail' },
-				{ id: 'photos', name: 'Google Photos' },
-				{ id: 'meet', name: 'Google Meet' },
-				{ id: 'chat', name: 'Google Chat' },
-				{ id: 'admin', name: 'Google Admin' }
-			]
-
 			function updateAllRowState () {
 				const allRead = document.getElementById('all-read')
 				const allWrite = document.getElementById('all-write')
 				if (!allRead || !allWrite) return
 				const services = document.querySelectorAll('input[name="services"]')
 				if (services.length === 0) return
+				let readTotal = 0
 				let readCount = 0
 				let writeCount = 0
 				for (const s of services) {
 					const id = s.value
 					const w = document.getElementById('wr_' + id)
-					if (s.checked) {
-						readCount++
-						if (w && w.checked) writeCount++
+					const writeOnly = s.type === 'hidden'
+					if (!writeOnly) {
+						readTotal++
+						if (s.checked) readCount++
+					}
+					if (w && (writeOnly || s.checked) && w.checked) {
+						writeCount++
 					}
 				}
-				allRead.checked = readCount === services.length
-				allRead.indeterminate = readCount > 0 && readCount < services.length
-				allWrite.disabled = readCount === 0
-				if (readCount === 0) {
+				let writeTotal = 0
+				if (readCount > 0 || writeCount > 0 || readTotal === 0) {
+					for (const s of services) {
+						const id = s.value
+						const w = document.getElementById('wr_' + id)
+						const writeOnly = s.type === 'hidden'
+						if (w && (writeOnly || s.checked)) {
+							writeTotal++
+						}
+					}
+				}
+				allRead.checked = readTotal > 0 && readCount === readTotal
+				allRead.indeterminate = readCount > 0 && readCount < readTotal
+				allWrite.disabled = writeTotal === 0
+				if (writeTotal === 0) {
 					allWrite.checked = false
 					allWrite.indeterminate = false
 				} else {
-					allWrite.checked = readCount > 0 && writeCount === readCount
-					allWrite.indeterminate = writeCount > 0 && writeCount < readCount
+					allWrite.checked = writeCount === writeTotal
+					allWrite.indeterminate = writeCount > 0 && writeCount < writeTotal
 				}
 			}
 
 			function onServiceToggle (id) {
 				const s = document.getElementById('svc_' + id)
 				const w = document.getElementById('wr_' + id)
-				if (!s || !w) return
-				w.disabled = !s.checked
-				if (!s.checked) w.checked = false
+				if (!s) return
+				if (w) {
+					w.disabled = !s.checked
+					if (!s.checked) w.checked = false
+				}
 				updateAllRowState()
 			}
 
 			function init () {
 				const params = initData.params || {}
 				const provider = initData.provider || { id: 'google', name: 'Google' }
+				const services = Array.isArray(initData.services) ? initData.services : []
 				const formEl = document.getElementById('connect-form')
 				const subtitleEl = document.getElementById('page-subtitle')
 				const submitEl = document.getElementById('submit-btn')
@@ -222,7 +224,7 @@
 					if (nameGroup) nameGroup.style.display = 'none'
 				} else {
 					if (subtitleEl) {
-						subtitleEl.textContent = provider.id === 'google'
+						subtitleEl.textContent = services.length > 0
 							? 'Configure API services access'
 							: 'Connect ' + provider.name + ' account'
 					}
@@ -247,42 +249,67 @@
 						if (w) serviceIdsWrite.add(w)
 					}
 				}
-				if (provider.id === 'google') {
+				if (services.length > 0) {
 					const tbody = document.getElementById('service-rows')
-					const services = initData.services || defaultServices
 					for (const s of services) {
+						const hasRo = s.ro !== false
+						const hasRw = s.rw !== false
 						const tr = document.createElement('tr')
 						const tdSvc = document.createElement('td')
 						const spanName = document.createElement('span')
 						spanName.textContent = s.name
 						tdSvc.appendChild(spanName)
-						const isReadChecked = serviceIdsRead ? serviceIdsRead.has(s.id) : false
-						const isWriteChecked = isReadChecked && serviceIdsWrite.has(s.id)
 						const tdRead = document.createElement('td')
 						tdRead.className = 'col-check'
-						const inputSvc = document.createElement('input')
-						inputSvc.type = 'checkbox'
-						inputSvc.name = 'services'
-						inputSvc.id = 'svc_' + s.id
-						inputSvc.value = s.id
-						inputSvc.checked = isReadChecked
-						inputSvc.addEventListener('change', function () {
-							onServiceToggle(s.id)
-						})
-						tdRead.appendChild(inputSvc)
 						const tdWrite = document.createElement('td')
 						tdWrite.className = 'col-check'
-						const inputWr = document.createElement('input')
-						inputWr.type = 'checkbox'
-						inputWr.name = 'write'
-						inputWr.id = 'wr_' + s.id
-						inputWr.value = s.id
-						inputWr.checked = isWriteChecked
-						inputWr.disabled = !isReadChecked
-						inputWr.addEventListener('change', function () {
-							updateAllRowState()
-						})
-						tdWrite.appendChild(inputWr)
+						if (!hasRo && hasRw) {
+							const isWriteChecked = (serviceIdsRead ? serviceIdsRead.has(s.id) : false) || serviceIdsWrite.has(s.id)
+							const inputSvc = document.createElement('input')
+							inputSvc.type = 'hidden'
+							inputSvc.name = 'services'
+							inputSvc.id = 'svc_' + s.id
+							inputSvc.value = s.id
+							inputSvc.disabled = !isWriteChecked
+							tdRead.appendChild(inputSvc)
+							const inputWr = document.createElement('input')
+							inputWr.type = 'checkbox'
+							inputWr.name = 'write'
+							inputWr.id = 'wr_' + s.id
+							inputWr.value = s.id
+							inputWr.checked = isWriteChecked
+							inputWr.addEventListener('change', function () {
+								inputSvc.disabled = !inputWr.checked
+								updateAllRowState()
+							})
+							tdWrite.appendChild(inputWr)
+						} else {
+							const isReadChecked = serviceIdsRead ? serviceIdsRead.has(s.id) : false
+							const inputSvc = document.createElement('input')
+							inputSvc.type = 'checkbox'
+							inputSvc.name = 'services'
+							inputSvc.id = 'svc_' + s.id
+							inputSvc.value = s.id
+							inputSvc.checked = isReadChecked
+							inputSvc.addEventListener('change', function () {
+								onServiceToggle(s.id)
+							})
+							tdRead.appendChild(inputSvc)
+							if (hasRw) {
+								const isWriteChecked = isReadChecked && serviceIdsWrite.has(s.id)
+								const inputWr = document.createElement('input')
+								inputWr.type = 'checkbox'
+								inputWr.name = 'write'
+								inputWr.id = 'wr_' + s.id
+								inputWr.value = s.id
+								inputWr.checked = isWriteChecked
+								inputWr.disabled = !isReadChecked
+								inputWr.addEventListener('change', function () {
+									updateAllRowState()
+								})
+								tdWrite.appendChild(inputWr)
+							}
+						}
 						tr.appendChild(tdSvc)
 						tr.appendChild(tdRead)
 						tr.appendChild(tdWrite)
@@ -296,8 +323,15 @@
 							const services = document.querySelectorAll('input[name="services"]')
 							for (const s of services) {
 								const id = s.value
-								s.checked = checked
 								const w = document.getElementById('wr_' + id)
+								if (s.type === 'hidden') {
+									if (!checked && w) {
+										w.checked = false
+										s.disabled = true
+									}
+									continue
+								}
+								s.checked = checked
 								if (w) {
 									w.disabled = !s.checked
 									if (!s.checked) w.checked = false
@@ -313,7 +347,12 @@
 							for (const s of services) {
 								const id = s.value
 								const w = document.getElementById('wr_' + id)
-								if (w && s.checked) {
+								if (s.type === 'hidden') {
+									if (w) {
+										w.checked = checked
+										s.disabled = !checked
+									}
+								} else if (w && s.checked) {
 									w.checked = checked
 								}
 							}

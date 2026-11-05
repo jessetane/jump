@@ -40,7 +40,7 @@ function formatSession (s, currentSessionId) {
 			provider: l.app?.provider,
 			type: l.app?.type,
 			name: l.app?.name,
-			account: l.app?.credentials?.account || l.app?.credentials?.email || null,
+			account: l.app?.credentials?.account || null,
 			scopes: l.app?.scopes,
 			expiresAt: l.app?.expiresAt,
 			policy: parsePolicy(l.policy)
@@ -213,7 +213,7 @@ async function listApps (token, opts = {}) {
 		provider: a.provider,
 		type: a.type,
 		name: a.name,
-		account: a.credentials?.account || a.credentials?.email || null,
+		account: a.credentials?.account || null,
 		scopes: a.scopes,
 		expiresAt: a.expiresAt,
 		created: a.created,
@@ -281,7 +281,7 @@ async function connectApp (token, opts = {}) {
 			provider: app.provider,
 			type: app.type,
 			name: app.name,
-			account: app.credentials?.account || app.credentials?.email || null,
+			account: app.credentials?.account || null,
 			...(app.credentials?.baseUrl ? { baseUrl: app.credentials.baseUrl } : {})
 		}
 	}
@@ -474,7 +474,7 @@ async function updateApp (token, opts = {}) {
 			provider: updated.provider,
 			type: updated.type,
 			name: updated.name,
-			account: updated.credentials?.account || updated.credentials?.email || null,
+			account: updated.credentials?.account || null,
 			...(updated.credentials?.baseUrl ? { baseUrl: updated.credentials.baseUrl } : {}),
 			scopes: updated.scopes,
 			expiresAt: updated.expiresAt,

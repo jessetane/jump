@@ -486,7 +486,7 @@ async function handleVerify (req, res, query) {
 			const checkedAttr = state.admin ? ' checked' : ''
 			const items = userApps.map(app => {
 				const provider = getProvider(app.provider)
-				const account = app.credentials?.account || app.credentials?.email || ''
+				const account = app.credentials?.account || ''
 				const scopeSummary = summarizeScopes(app.scopes, provider?.services)
 				const baseName = app.name || provider?.name || `${app.provider} app`
 				const label = scopeSummary ? `${baseName} · ${scopeSummary}` : baseName
@@ -584,7 +584,9 @@ async function handleProviderConnect (req, res, query, providerName = 'google') 
 		...(provider.services && {
 			services: Object.values(provider.services).map(s => ({
 				id: s.id,
-				name: s.name
+				name: s.name,
+				ro: Boolean(s.ro?.length),
+				rw: Boolean(s.rw?.length) && JSON.stringify(s.rw) !== JSON.stringify(s.ro)
 			}))
 		})
 	}
@@ -612,13 +614,15 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	const servicesList = []
 	for (const v of params.getAll('services')) {
 		for (const s of v.split(',')) {
-			if (s.trim()) servicesList.push(s.trim())
+			const clean = s.trim().toLowerCase()
+			if (clean) servicesList.push(clean)
 		}
 	}
 	const writeList = []
 	for (const v of params.getAll('write')) {
 		for (const s of v.split(',')) {
-			if (s.trim()) writeList.push(s.trim())
+			const clean = s.trim().toLowerCase()
+			if (clean) writeList.push(clean)
 		}
 	}
 	const sessionId = params.get('session_id') || null
@@ -632,8 +636,8 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 			res.end('Access denied: unauthorized re-authentication request.')
 			return
 		}
-	} else if (sessionId) {
-		const session = db.tokens.get(sessionId)
+	} else {
+		const session = sessionId ? db.tokens.get(sessionId) : null
 		if (!session || session.provider !== 'self' || !session.admin) {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
@@ -701,7 +705,7 @@ async function handleCallback (req, res, query) {
 		res.end(err.message)
 		return
 	}
-	const { accessToken, refreshToken, expiresAt, scopes, email, account, userName } = exchanged
+	const { accessToken, refreshToken, expiresAt, scopes, account } = exchanged
 	if (oauthState.reauthAppId) {
 		const session = oauthState.sessionId ? db.tokens.get(oauthState.sessionId) : null
 		const existingApp = db.tokens.get(oauthState.reauthAppId)
@@ -714,8 +718,7 @@ async function handleCallback (req, res, query) {
 		const updatedCreds = {
 			...existingApp.credentials,
 			accessToken,
-			refreshToken: refreshToken || existingApp.credentials?.refreshToken,
-			email,
+			refreshToken: refreshToken || existingApp.credentials?.refreshToken || null,
 			account
 		}
 		db.tokens.updateCredentials(existingApp.id, {
@@ -732,48 +735,36 @@ async function handleCallback (req, res, query) {
 		))
 		return
 	}
-	let targetUserId = null
-	let validSessionId = null
-	if (oauthState.sessionId) {
-		const session = db.tokens.get(oauthState.sessionId)
-		if (session && session.provider === 'self' && session.admin) {
-			targetUserId = session.userId
-			validSessionId = session.id
-		}
-	}
-	if (!targetUserId) {
-		const user = db.users.upsert({
-			email,
-			name: userName || null
-		})
-		targetUserId = user.id
+	const session = oauthState.sessionId ? db.tokens.get(oauthState.sessionId) : null
+	if (!session || session.provider !== 'self' || !session.admin) {
+		res.statusCode = 403
+		res.setHeader('content-type', 'text/plain')
+		res.end('Access denied: admin session required.')
+		return
 	}
 	const appName = oauthState.sessionName || provider.name
 	const appToken = db.tokens.create({
-		userId: targetUserId,
+		userId: session.userId,
 		provider: provider.id,
 		type: 'oauth',
 		name: appName,
 		credentials: {
 			accessToken,
 			refreshToken: refreshToken || null,
-			email,
 			account
 		},
 		expiresAt,
 		scopes: scopes || null
 	})
-	if (validSessionId) {
-		db.links.create({
-			sessionId: validSessionId,
-			appId: appToken.id
-		})
-	}
+	db.links.create({
+		sessionId: session.id,
+		appId: appToken.id
+	})
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/html; charset=utf-8')
 	res.end(renderCardPage(
 		`${provider.name} Connected`,
-		`Connected <strong>${escapeHtml(email)}</strong>`,
+		`Connected <strong>${escapeHtml(account)}</strong>`,
 		`<p class="subtitle">You can close this window and return to your agent.</p>`
 	))
 }
@@ -941,7 +932,7 @@ async function handleOauth (req, res, { pathname, query }) {
 		await handler(req, res, { query })
 		return
 	}
-	const providerMatch = pathname.match(/^\/providers\/([a-z0-9_-]+)\/(connect|consent|callback)$/i)
+	const providerMatch = pathname.match(/^\/providers\/([a-z0-9_-]+)\/(connect|consent)$/i)
 	if (providerMatch) {
 		const [, providerName, action] = providerMatch
 		const id = providerName.toLowerCase()
@@ -951,10 +942,6 @@ async function handleOauth (req, res, { pathname, query }) {
 		}
 		if (action === 'consent') {
 			await handleProviderConsent(req, res, id)
-			return
-		}
-		if (action === 'callback') {
-			await handleCallback(req, res, query)
 			return
 		}
 	}

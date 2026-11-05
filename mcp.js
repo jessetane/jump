@@ -97,7 +97,7 @@ function buildProviderTool (providerName, providerLinks = []) {
 	const provider = getProvider(providerName)
 	const id = provider.id
 	const accounts = providerLinks
-		.map(l => l.app?.credentials?.account || l.app?.credentials?.email || l.app?.name)
+		.map(l => l.app?.credentials?.account || l.app?.name)
 		.filter(Boolean)
 	const accountHint = accounts.length > 0 ? ` Linked accounts: ${accounts.join(', ')}.` : ''
 	const baseHint = providerLinks.find(l => l.app?.credentials?.baseUrl)?.app?.credentials?.baseUrl || provider.baseUrl

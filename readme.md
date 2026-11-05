@@ -5,7 +5,8 @@ MCP proxy for HTTP APIs.
 So my trusted agents can do Google stuff. So my untrusted agents can also do Google stuff.
 
 ## How
-* One `<provider>_api` passthrough tool per linked provider (`google_api`, `stripe_api`, etc).
+
+* One `<provider>_api` passthrough tool per linked provider (`google_api`, `github_api`, `stripe_api`, etc).
 * Sessions are decoupled from upstream OAuth and API-key credentials, so multiple accounts can be linked to one or many sessions.
 * Each session-to-app link can carry an ordered `allow`/`deny` policy matching HTTP methods, origins, URL path globs, and request body fields.
 
@@ -18,6 +19,8 @@ $ cp .env.example .env
 ```
 
 For Google OAuth, enable the APIs you want in Google Cloud Console, add `https://<host>/oauth/callback` to your OAuth client's redirect URIs, and set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
+
+For GitHub OAuth, create an OAuth App in GitHub Developer Settings with callback URL `https://<host>/oauth/callback`, and set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` in `.env` (or connect a Personal Access Token directly via `apiKey`).
 
 For magic-link emails, set `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, and `MAILGUN_SENDER` in `.env` (when unset, links are printed to stdout).
 
@@ -89,6 +92,7 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 ## MCP
 
 ### Tools
+
 * `<provider>_api({ url, method?, body?, headers?, account?, appId? })` - Proxies an HTTP request to the linked upstream provider.
 * `admin({ action, ... })` - Manages sessions, apps, links, and usage logs (`whoami`, `list`, `get`, `create_session`, `update_session`, `revoke`, `list_apps`, `connect_app`, `disconnect_app`, `update_app`, `link_app`, `unlink_app`, `update_email`, `update_user`, `list_logs`). Exposed only to admin sessions.
 
