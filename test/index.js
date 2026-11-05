@@ -540,6 +540,17 @@ test('well-known oauth discovery endpoints', async () => {
 	const resResourceMcp = await fetch(`http://127.0.0.1:${addr.port}/.well-known/oauth-protected-resource/mcp`)
 	assert.equal(resResourceMcp.status, 200)
 	assert.deepEqual(await resResourceMcp.json(), resourceData)
+	const resResourceWork = await fetch(`http://127.0.0.1:${addr.port}/.well-known/oauth-protected-resource/mcp/work`)
+	assert.equal(resResourceWork.status, 200)
+	const resourceWorkData = await resResourceWork.json()
+	assert.equal(resourceWorkData.resource, `http://127.0.0.1:${addr.port}/mcp/work`)
+	const unauthSubRes = await fetch(`http://127.0.0.1:${addr.port}/mcp/work`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+	})
+	assert.equal(unauthSubRes.status, 401)
+	assert.match(unauthSubRes.headers.get('www-authenticate') || '', /\/\.well-known\/oauth-protected-resource\/mcp\/work/)
 	const resAuth = await fetch(`http://127.0.0.1:${addr.port}/.well-known/oauth-authorization-server`)
 	assert.equal(resAuth.status, 200)
 	const authData = await resAuth.json()

@@ -305,12 +305,14 @@ async function handleMcp (req, res, token) {
 	const base = getBaseUrl(req)
 	const session = token ? db.tokens.getByToken(token) : null
 	if (!session) {
+		const rawPath = new URL(req.url || '/mcp', 'http://localhost').pathname.replace(/\/+$/, '') || '/'
+		const resourceSuffix = rawPath.startsWith('/mcp/') ? rawPath : ''
 		sendJson(res, {
 			jsonrpc: '2.0',
 			id: null,
 			error: { code: -32001, message: 'Unauthorized: Bearer token required' }
 		}, 401, {
-			'www-authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource", authorization_uri="${base}/oauth/authorize"`
+			'www-authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource${resourceSuffix}", authorization_uri="${base}/oauth/authorize"`
 		})
 		return
 	}

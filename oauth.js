@@ -250,10 +250,12 @@ function isAllowedRedirectUri (redirectUri) {
 	})
 }
 
-async function handleProtectedResourceMetadata (req, res) {
+async function handleProtectedResourceMetadata (req, res, pathname = '') {
 	const base = getBaseUrl(req)
+	const prefix = '/.well-known/oauth-protected-resource'
+	const suffix = pathname.startsWith(`${prefix}/`) ? pathname.slice(prefix.length) : '/mcp'
 	sendJson(res, {
-		resource: `${base}/mcp`,
+		resource: `${base}${suffix}`,
 		authorization_servers: [base],
 		bearer_methods_supported: ['header'],
 		scopes_supported: ['mcp']
@@ -895,7 +897,7 @@ const routes = {
 
 async function handleOauth (req, res, { pathname, query }) {
 	if (pathname === '/.well-known/oauth-protected-resource' || pathname.startsWith('/.well-known/oauth-protected-resource/')) {
-		await handleProtectedResourceMetadata(req, res)
+		await handleProtectedResourceMetadata(req, res, pathname)
 		return
 	}
 	if (

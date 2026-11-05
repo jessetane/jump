@@ -66,7 +66,7 @@ const server = http.createServer(async (req, res) => {
 			await handleRest(req, res, { pathname, url, query, token })
 			return
 		}
-		if (pathname === '/mcp') {
+		if (pathname === '/mcp' || pathname.startsWith('/mcp/')) {
 			await handleMcp(req, res, token)
 			return
 		}
