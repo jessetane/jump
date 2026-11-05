@@ -23,7 +23,7 @@ const { isAllowedUrl: isGoogleAllowedUrl, services: googleServices } = await imp
 const { summarizeScopes } = await import('../providers/index.js')
 const { readResponseBody } = await import('../api/proxy.js')
 const { executeTool } = await import('../mcp.js')
-const { isAllowedRedirectUri } = await import('../oauth.js')
+const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
 
@@ -529,6 +529,112 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	const expiredRefreshData = await expiredRefreshRes.json()
 	assert.equal(expiredRefreshData.error, 'invalid_grant')
 	assert.equal(db.tokens.get(session.id), null, 'Dormant session must be pruned on refresh attempt')
+	assert.equal(deriveClientName('client_12345'), null, 'Generated DCR client_id must not become derived session name')
+	assert.equal(deriveClientName('client_bearer_12345'), null, 'Generated DCR client_bearer_id must not become derived session name')
+	assert.equal(deriveClientName('client_12345', 'Explicit Client'), 'Explicit Client')
+	assert.equal(deriveClientName('custom_named_client'), 'custom_named_client')
+	const bearerRegRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/register`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			client_name: 'Embedded MCP Client',
+			redirect_uris: ['http://localhost:8080/cb'],
+			grant_types: ['authorization_code'],
+			response_types: ['code'],
+			token_endpoint_auth_method: 'none'
+		})
+	})
+	assert.equal(bearerRegRes.status, 201)
+	const bearerRegData = await bearerRegRes.json()
+	assert.ok(bearerRegData.client_id.startsWith('client_bearer_'), 'DCR without refresh_token grant must issue client_bearer_ prefix')
+	assert.deepEqual(bearerRegData.grant_types, ['authorization_code'])
+	const bearerChallenge = createHash('sha256').update('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk').digest('base64url')
+	const bearerConsentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			email: 'embedded-oauth@example.com',
+			client_id: bearerRegData.client_id,
+			redirect_uri: 'http://localhost:8080/cb',
+			code_challenge: bearerChallenge,
+			code_challenge_method: 'S256'
+		}).toString()
+	})
+	assert.equal(bearerConsentRes.status, 200)
+	const bearerStateRow = db.sqlite.prepare("SELECT * FROM tokens WHERE type = 'oauth_state' AND json_extract(credentials, '$.email') = ?").get('embedded-oauth@example.com')
+	const bearerState = db.tokens.getState(bearerStateRow.id)
+	assert.equal(bearerState.clientId, bearerRegData.client_id)
+	assert.equal(bearerState.sessionName, null, 'DCR client_id without explicit name must not pollute sessionName')
+	const bearerVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ code: bearerState.magicCode }).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(bearerVerifyRes.status, 302)
+	const bearerCode = new URL(bearerVerifyRes.headers.get('location')).searchParams.get('code')
+	assert.ok(bearerCode)
+	const bearerTokenRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			grant_type: 'authorization_code',
+			client_id: bearerRegData.client_id,
+			code: bearerCode,
+			redirect_uri: 'http://localhost:8080/cb',
+			code_verifier: 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
+		}).toString()
+	})
+	assert.equal(bearerTokenRes.status, 200)
+	const bearerTokenData = await bearerTokenRes.json()
+	assert.ok(bearerTokenData.access_token)
+	assert.equal(bearerTokenData.refresh_token, undefined, 'Static bearer OAuth client must not receive refresh_token')
+	assert.equal(bearerTokenData.expires_in, undefined, 'Static bearer OAuth client must not receive expires_in')
+	assert.equal(bearerTokenData.token_type, 'Bearer')
+	assert.equal(bearerTokenData.scope, 'mcp')
+	const bearerSession = db.tokens.getByToken(bearerTokenData.access_token)
+	assert.ok(bearerSession)
+	assert.equal(bearerSession.expiresAt, null, 'Static bearer OAuth session must have expiresAt: null')
+	assert.equal(bearerSession.credentials, null, 'Static bearer OAuth session must have credentials: null')
+	assert.equal(bearerSession.name, 'Default Session')
+	const mismatchCodeSession = db.tokens.create({ userId: bearerSession.userId, provider: 'self' })
+	const boundCode = db.tokens.createAuthCode({
+		sessionId: mismatchCodeSession.id,
+		clientId: 'client_refresh_bound',
+		clientRedirectUri: 'http://localhost:8080/cb'
+	})
+	const mismatchClientRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			grant_type: 'authorization_code',
+			client_id: 'client_bearer_spoofed',
+			code: boundCode,
+			redirect_uri: 'http://localhost:8080/cb'
+		})
+	})
+	assert.equal(mismatchClientRes.status, 400, 'Mismatched client_id on /oauth/token must be rejected with 400')
+	const mismatchClientData = await mismatchClientRes.json()
+	assert.equal(mismatchClientData.error, 'invalid_grant')
+	assert.equal(mismatchClientData.error_description, 'client_id mismatch')
+	const unboundCode = db.tokens.createAuthCode({
+		sessionId: mismatchCodeSession.id,
+		clientRedirectUri: 'http://localhost:8080/cb'
+	})
+	const spoofAttemptRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			grant_type: 'authorization_code',
+			client_id: 'client_bearer_spoofed',
+			code: unboundCode,
+			redirect_uri: 'http://localhost:8080/cb'
+		})
+	})
+	assert.equal(spoofAttemptRes.status, 200)
+	const spoofAttemptData = await spoofAttemptRes.json()
+	assert.ok(spoofAttemptData.refresh_token, 'Unauthenticated client_id=client_bearer_... body param must not downgrade an unbound code to static bearer')
+	assert.equal(spoofAttemptData.expires_in, 3600)
 })
 
 test('well-known oauth discovery endpoints', async () => {
@@ -1764,16 +1870,23 @@ test('magic link admin verification flow (/oauth/verify) with connected app sele
 	assert.equal(createdUser.name, null)
 })
 
-test('30-day dormancy pruning scopes only provider = self', () => {
+test('30-day dormancy pruning scopes only expiring self sessions and exempts static bearer sessions', () => {
 	const user = db.users.upsert({ email: 'dormancy@example.com' })
 	const oldDate = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000).toISOString()
 	const activeSession = db.tokens.create({
 		userId: user.id,
-		provider: 'self'
+		provider: 'self',
+		expiresAt: Date.now() + 3600000
 	})
 	const dormantSession = db.tokens.create({
 		userId: user.id,
-		provider: 'self'
+		provider: 'self',
+		expiresAt: Date.now() + 3600000
+	})
+	const staticSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		expiresAt: null
 	})
 	const upstreamApp = db.tokens.create({
 		userId: user.id,
@@ -1782,10 +1895,12 @@ test('30-day dormancy pruning scopes only provider = self', () => {
 		name: 'Upstream App'
 	})
 	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, dormantSession.id)
+	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, staticSession.id)
 	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, upstreamApp.id)
 	db.tokens.pruneDormant(30 * 24 * 60 * 60 * 1000)
 	assert.equal(db.tokens.get(dormantSession.id), null)
 	assert.ok(db.tokens.get(activeSession.id))
+	assert.ok(db.tokens.get(staticSession.id), 'Static bearer sessions (expires_at IS NULL) must not be pruned by dormancy')
 	assert.ok(db.tokens.get(upstreamApp.id), 'Upstream apps must not be pruned by dormancy')
 })
 

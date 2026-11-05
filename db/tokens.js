@@ -149,18 +149,27 @@ function findRevocable (token) {
 	return formatToken(row)
 }
 
-function issueOauthTokens (id) {
+function issueOauthTokens (id, { refresh = true } = {}) {
 	if (!id) return null
 	const session = get(id)
 	if (!session || session.provider !== 'self' || session.type !== 'bearer') return null
 	const now = Date.now()
 	const token = session.token || randomUUID()
-	const expiresAt = now + 3600 * 1000
-	const refreshToken = session.credentials?.refreshToken || randomUUID()
-	const credentials = JSON.stringify({
-		...(session.credentials || {}),
-		refreshToken
-	})
+	let expiresAt = null
+	let credentials = null
+	if (refresh) {
+		expiresAt = now + 3600 * 1000
+		const refreshToken = session.credentials?.refreshToken || randomUUID()
+		credentials = JSON.stringify({
+			...(session.credentials || {}),
+			refreshToken
+		})
+	} else if (session.credentials) {
+		const { refreshToken, ...rest } = session.credentials
+		if (Object.keys(rest).length > 0) {
+			credentials = JSON.stringify(rest)
+		}
+	}
 	const nowIso = new Date(now).toISOString()
 	sqlite.prepare(`
 		UPDATE tokens
@@ -280,7 +289,7 @@ function pruneExpired () {
 function pruneDormant (maxAgeMs = 30 * 24 * 60 * 60 * 1000) {
 	pruneExpired()
 	const minDate = new Date(Date.now() - maxAgeMs).toISOString()
-	sqlite.prepare("DELETE FROM tokens WHERE provider = 'self' AND type = 'bearer' AND updated < ?").run(minDate)
+	sqlite.prepare("DELETE FROM tokens WHERE provider = 'self' AND type = 'bearer' AND expires_at IS NOT NULL AND updated < ?").run(minDate)
 }
 
 function formatState (row) {
@@ -290,6 +299,7 @@ function formatState (row) {
 	return {
 		state: tok.id,
 		userId: tok.userId,
+		clientId: meta.clientId || null,
 		clientRedirectUri: meta.clientRedirectUri || null,
 		clientState: meta.clientState || null,
 		codeChallenge: meta.codeChallenge || null,
@@ -310,6 +320,7 @@ function formatState (row) {
 function createState (opts = {}) {
 	const {
 		userId = null,
+		clientId = null,
 		clientRedirectUri = null,
 		clientState = null,
 		codeChallenge = null,
@@ -335,6 +346,7 @@ function createState (opts = {}) {
 		name: sessionName,
 		token: magicCode,
 		credentials: {
+			clientId,
 			clientRedirectUri,
 			clientState,
 			codeChallenge,
@@ -383,7 +395,7 @@ function consumeMagicCode (magicCode) {
 }
 
 function createAuthCode (opts = {}) {
-	const { sessionId, clientRedirectUri = null, codeChallenge = null, codeChallengeMethod = null } = opts
+	const { sessionId, clientId = null, clientRedirectUri = null, codeChallenge = null, codeChallengeMethod = null } = opts
 	pruneExpired()
 	const code = randomBytes(24).toString('base64url')
 	const session = get(sessionId)
@@ -394,6 +406,7 @@ function createAuthCode (opts = {}) {
 		type: 'oauth_code',
 		credentials: {
 			sessionId,
+			clientId,
 			clientRedirectUri,
 			codeChallenge,
 			codeChallengeMethod
@@ -414,6 +427,7 @@ function consumeAuthCode (code) {
 	return {
 		code: tok.id,
 		sessionId: meta.sessionId,
+		clientId: meta.clientId || null,
 		clientRedirectUri: meta.clientRedirectUri || null,
 		codeChallenge: meta.codeChallenge || null,
 		codeChallengeMethod: meta.codeChallengeMethod || null,

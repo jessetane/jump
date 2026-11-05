@@ -188,21 +188,27 @@ function renderCardPage (title, subtitle, bodyHtml) {
 }
 
 function deriveClientName (clientId, explicitName) {
-	if (explicitName) return explicitName
-	if (!clientId || typeof clientId !== 'string' || !clientId.startsWith('https://')) return null
-	let parsed
-	try {
-		parsed = new URL(clientId)
-	} catch {
-		return null
+	if (explicitName && typeof explicitName === 'string' && explicitName.trim()) {
+		return explicitName.trim()
 	}
-	const host = parsed.hostname.toLowerCase()
-	for (const [domain, label] of Object.entries(KNOWN_CLIENT_NAMES)) {
-		if (host === domain || host.endsWith(`.${domain}`)) {
-			return label
+	if (!clientId || typeof clientId !== 'string') return null
+	if (clientId.startsWith('https://')) {
+		let parsed
+		try {
+			parsed = new URL(clientId)
+		} catch {
+			return null
 		}
+		const host = parsed.hostname.toLowerCase()
+		for (const [domain, label] of Object.entries(KNOWN_CLIENT_NAMES)) {
+			if (host === domain || host.endsWith(`.${domain}`)) {
+				return label
+			}
+		}
+		return host
 	}
-	return host
+	if (clientId.startsWith('client_')) return null
+	return clientId.trim() || null
 }
 
 function verifyCodeChallenge (verifier, challenge, method) {
@@ -307,7 +313,11 @@ async function handleRegister (req, res) {
 		}
 	}
 	const authMethod = body.token_endpoint_auth_method || 'none'
-	const clientId = body.client_id || `client_${randomUUID()}`
+	const grantTypes = (Array.isArray(body.grant_types) && body.grant_types.length > 0 && body.grant_types.every(x => typeof x === 'string'))
+		? body.grant_types
+		: ['authorization_code', 'refresh_token']
+	const clientPrefix = grantTypes.includes('refresh_token') ? 'client_' : 'client_bearer_'
+	const clientId = body.client_id || `${clientPrefix}${randomUUID()}`
 	const needsSecret = authMethod === 'client_secret_basic' || authMethod === 'client_secret_post'
 	const clientSecret = body.client_secret || (needsSecret ? `cs_${randomBytes(24).toString('hex')}` : null)
 	const response = {
@@ -315,7 +325,7 @@ async function handleRegister (req, res) {
 		client_id_issued_at: Math.floor(Date.now() / 1000),
 		client_name: body.client_name || 'MCP Client',
 		redirect_uris: redirectUris,
-		grant_types: body.grant_types || ['authorization_code', 'refresh_token'],
+		grant_types: grantTypes,
 		response_types: body.response_types || ['code'],
 		token_endpoint_auth_method: authMethod
 	}
@@ -413,6 +423,7 @@ async function handleAuthorizeConsent (req, res) {
 		return
 	}
 	const { codeChallenge, codeChallengeMethod } = validation
+	const clientId = query.client_id || null
 	const clientRedirectUri = query.redirect_uri || null
 	const clientState = query.state || null
 	const derivedName = deriveClientName(query.client_id, query.client_name)
@@ -421,6 +432,7 @@ async function handleAuthorizeConsent (req, res) {
 	const magicExpiresAt = Date.now() + (15 * 60 * 1000)
 	const ip = getClientIp(req)
 	db.tokens.createState({
+		clientId,
 		clientRedirectUri,
 		clientState,
 		codeChallenge,
@@ -541,6 +553,7 @@ async function handleVerify (req, res, query) {
 	if (state.clientRedirectUri) {
 		const authCode = db.tokens.createAuthCode({
 			sessionId: session.id,
+			clientId: state.clientId,
 			clientRedirectUri: state.clientRedirectUri,
 			codeChallenge: state.codeChallenge,
 			codeChallengeMethod: state.codeChallengeMethod
@@ -834,6 +847,11 @@ async function handleToken (req, res) {
 		sendJson(res, { error: 'invalid_grant', error_description: 'redirect_uri mismatch' }, 400)
 		return
 	}
+	if (authCode.clientId && params.client_id && authCode.clientId !== params.client_id) {
+		console.warn(`[oauth] Token exchange failed: client_id mismatch (expected "${authCode.clientId}", got "${params.client_id}")`)
+		sendJson(res, { error: 'invalid_grant', error_description: 'client_id mismatch' }, 400)
+		return
+	}
 	if (authCode.codeChallenge) {
 		if (!codeVerifier) {
 			console.warn('[oauth] Token exchange failed: Missing code_verifier')
@@ -851,10 +869,19 @@ async function handleToken (req, res) {
 			return
 		}
 	}
-	const session = db.tokens.issueOauthTokens(authCode.sessionId)
+	const withRefresh = !authCode.clientId?.startsWith('client_bearer_')
+	const session = db.tokens.issueOauthTokens(authCode.sessionId, { refresh: withRefresh })
 	if (!session) {
 		console.warn('[oauth] Token exchange failed: Session not found')
 		sendJson(res, { error: 'invalid_grant', error_description: 'Session not found' }, 400)
+		return
+	}
+	if (!withRefresh) {
+		sendJson(res, {
+			access_token: session.token,
+			token_type: 'Bearer',
+			scope: 'mcp'
+		}, 200, noStoreHeaders)
 		return
 	}
 	sendJson(res, {
