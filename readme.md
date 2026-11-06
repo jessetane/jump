@@ -18,9 +18,7 @@ $ npm i
 $ cp .env.example .env
 ```
 
-For Google OAuth, enable the APIs you want in Google Cloud Console, add `https://<host>/oauth/callback` to your OAuth client's redirect URIs, and set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
-
-For GitHub OAuth, create an OAuth App in GitHub Developer Settings with callback URL `https://<host>/oauth/callback`, and set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` in `.env` (or connect a Personal Access Token directly via `apiKey`).
+For upstream OAuth providers (`google`, `github`, etc.), register `https://<host>/oauth/callback` as the redirect URI in the provider's developer console and set `<PROVIDER>_CLIENT_ID` and `<PROVIDER>_CLIENT_SECRET` in `.env`.
 
 For magic-link emails, set `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, and `MAILGUN_SENDER` in `.env` (when unset, links are printed to stdout).
 
@@ -40,7 +38,7 @@ Point an OAuth-capable MCP client at `https://<host>/mcp` and sign in as an admi
 From an admin session, use the `admin` tool to connect upstream apps, create scoped sessions, and attach policies:
 
 ```javascript
-// connect a Google account (returns an interactive OAuth URL)
+// connect an OAuth provider (returns an interactive authorization URL)
 admin({ action: 'connect_app', provider: 'google', name: 'Work Google' })
 
 // or connect any HTTP API with a Bearer key, Basic auth ("user:pass"), or query params ("?key=val")
