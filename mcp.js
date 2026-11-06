@@ -72,9 +72,13 @@ const adminTool = {
 							type: 'string',
 							description: 'Origin glob pattern (e.g. "https://sheets.googleapis.com" or "https://*.googleapis.com").'
 						},
+						query: {
+							type: 'object',
+							description: 'Optional map of URL query parameter names to expected glob patterns, arrays of patterns, or null (to match an absent parameter, e.g. ["none", null]).'
+						},
 						body: {
 							type: 'object',
-							description: 'Optional map of request body field paths (supporting dot-notation like "recipient.email") to expected glob patterns or arrays of patterns.'
+							description: 'Optional map of request body field paths (supporting dot-notation like "recipient.email") to expected glob patterns, arrays of patterns, or null (to match an absent/null field).'
 						},
 						description: {
 							type: 'string',

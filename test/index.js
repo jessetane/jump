@@ -1405,12 +1405,25 @@ test('validatePolicy validates schema and fails fast on errors', () => {
 	assert.equal(validatePolicy([{ action: 'allow', description: 123 }]).valid, false)
 	assert.match(validatePolicy([{ action: 'allow', description: 123 }]).error, /Rule at index 0 description must be a string/)
 	const validPolicy = [
-		{ action: 'allow', methods: ['GET'], origin: 'https://sheets.googleapis.com', path: '/v4/**', description: 'Allow sheets GET' },
-		{ action: 'allow', methods: ['POST'], path: '/v1/messages', body: { channel: 'C123*', 'recipient.email': ['*@company.com', 'admin@example.org'], urgent: false, retries: 3 } },
+		{ action: 'allow', methods: ['GET'], origin: 'https://sheets.googleapis.com', path: '/v4/**', query: { includeGridData: ['false', null] }, description: 'Allow sheets GET' },
+		{ action: 'allow', methods: ['POST'], path: '/v1/messages', body: { channel: 'C123*', 'recipient.email': ['*@company.com', 'admin@example.org'], urgent: false, retries: 3, debug: null, mode: ['ok', null] } },
 		{ action: 'deny' }
 	]
 	assert.equal(validatePolicy(validPolicy).valid, true)
 	assert.equal(validatePolicy([{ action: 'allow', origin: 'https://sheets.googleapis.com/' }]).valid, true)
+	assert.equal(validatePolicy([{ action: 'allow', query: null }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', query: null }]).error, /query must be a non-empty object/)
+	assert.equal(validatePolicy([{ action: 'allow', query: [] }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', query: [] }]).error, /query must be a non-empty object/)
+	assert.equal(validatePolicy([{ action: 'allow', query: {} }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', query: {} }]).error, /query must be a non-empty object/)
+	assert.equal(validatePolicy([{ action: 'allow', query: { '': 'val' } }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', query: { '': 'val' } }]).error, /query field key must be a non-empty string/)
+	assert.equal(validatePolicy([{ action: 'allow', query: { param: [] } }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', query: { param: [] } }]).error, /query field "param" must be a primitive or non-empty array of primitives/)
+	assert.equal(validatePolicy([{ action: 'allow', query: { param: { nested: 'obj' } } }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', query: { param: { nested: 'obj' } } }]).error, /query field "param" must be a primitive or non-empty array of primitives/)
+	assert.equal(validatePolicy([{ action: 'allow', query: { param: undefined } }]).valid, false)
 	assert.equal(validatePolicy([{ action: 'allow', body: null }]).valid, false)
 	assert.match(validatePolicy([{ action: 'allow', body: null }]).error, /body must be a non-empty object/)
 	assert.equal(validatePolicy([{ action: 'allow', body: [] }]).valid, false)
@@ -1423,7 +1436,7 @@ test('validatePolicy validates schema and fails fast on errors', () => {
 	assert.match(validatePolicy([{ action: 'allow', body: { field: [] } }]).error, /body field "field" must be a primitive or non-empty array of primitives/)
 	assert.equal(validatePolicy([{ action: 'allow', body: { field: { nested: 'obj' } } }]).valid, false)
 	assert.match(validatePolicy([{ action: 'allow', body: { field: { nested: 'obj' } } }]).error, /body field "field" must be a primitive or non-empty array of primitives/)
-	assert.equal(validatePolicy([{ action: 'allow', body: { field: ['ok', null] } }]).valid, false)
+	assert.equal(validatePolicy([{ action: 'allow', body: { field: ['ok', undefined] } }]).valid, false)
 })
 
 test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON string, form-urlencoded)', () => {
@@ -1491,12 +1504,60 @@ test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON
 		body: { metadata: { env: 'staging' }, capture: true }
 	}).allowed, true)
 	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/tags', body: { tags: ['urgent-*', 'normal'] } }
+	], {
+		url: 'https://api.example.com/v1/tags',
+		method: 'POST',
+		body: { tags: ['normal', 'urgent-fix'] }
+	}).allowed, true, 'Array body value must be allowed when every element matches at least one pattern')
+	assert.equal(evaluatePolicy([
 		{ action: 'allow', methods: ['POST'], path: '/v1/tags', body: { tags: 'urgent-*' } }
 	], {
 		url: 'https://api.example.com/v1/tags',
 		method: 'POST',
 		body: { tags: ['normal', 'urgent-fix'] }
-	}).allowed, true)
+	}).allowed, false, 'Array body value must be denied when any element fails to match')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/tags', body: { tags: 'urgent-*' } }
+	], {
+		url: 'https://api.example.com/v1/tags',
+		method: 'POST',
+		body: { tags: [] }
+	}).allowed, false, 'Empty array body value must be denied')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null], debug: null } }
+	], {
+		url: 'https://api.example.com/v1/events',
+		method: 'POST',
+		body: { summary: 'Meeting' }
+	}).allowed, true, 'Absent body fields match null or pattern array containing null')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null], debug: null } }
+	], {
+		url: 'https://api.example.com/v1/events',
+		method: 'POST',
+		body: { summary: 'Meeting', sendUpdates: 'none', debug: null }
+	}).allowed, true, 'Explicit null or allowed value in body matches pattern array containing null')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null], debug: null } }
+	], {
+		url: 'https://api.example.com/v1/events',
+		method: 'POST',
+		body: { summary: 'Meeting', sendUpdates: 'all' }
+	}).allowed, false, 'Disallowed value in body is denied even when null is allowed')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null] } }
+	], {
+		url: 'https://api.example.com/v1/events',
+		method: 'POST'
+	}).allowed, true, 'Missing req.body defaults to empty object and matches null body rule')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null] } }
+	], {
+		url: 'https://api.example.com/v1/events',
+		method: 'POST',
+		body: '<xml>unparseable</xml>'
+	}).allowed, false, 'Unparseable non-empty body does not match null body rule')
 	assert.equal(evaluatePolicy([
 		{ action: 'allow', methods: ['POST'], path: '/v1/proto', body: { toString: '*' } }
 	], {
@@ -1556,6 +1617,94 @@ test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON
 		method: 'POST',
 		body: '<x>=1&currency=btc'
 	}).allowed, false, 'Form-urlencoded string starting with < without explicit contentType must still match body deny rules')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null] } }
+	], {
+		url: 'https://api.example.com/v1/events',
+		method: 'POST',
+		body: '[{"a":"1=2"}]'
+	}).allowed, false, 'JSON array string containing = must not fall through to URLSearchParams and match null body rule')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null] } }
+	], {
+		url: 'https://api.example.com/v1/events',
+		method: 'POST',
+		body: '{"broken": "a=b"',
+		contentType: 'application/json'
+	}).allowed, false, 'Malformed JSON string must not fall through to URLSearchParams')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null] } }
+	], {
+		url: 'https://api.example.com/v1/events',
+		method: 'POST',
+		body: 'foo=bar',
+		contentType: 'text/plain'
+	}).allowed, false, 'Non-form/non-JSON contentType must not parse string body as URL-encoded')
+})
+
+test('evaluatePolicy matches URL query parameters (exact, glob, null absence, optional array, repeated params)', () => {
+	const calendarPolicy = [
+		{
+			action: 'allow',
+			methods: ['GET'],
+			path: '/calendar/v3/calendars/primary/events',
+			query: {
+				singleEvents: 'true',
+				orderBy: ['startTime', 'updated']
+			}
+		},
+		{
+			action: 'allow',
+			methods: ['POST', 'PATCH', 'DELETE'],
+			path: '/calendar/v3/calendars/primary/events/**',
+			query: {
+				sendUpdates: ['none', null],
+				conferenceDataVersion: null
+			}
+		}
+	]
+	assert.equal(evaluatePolicy(calendarPolicy, {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime',
+		method: 'GET'
+	}).allowed, true)
+	assert.equal(evaluatePolicy(calendarPolicy, {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=invalid',
+		method: 'GET'
+	}).allowed, false)
+	assert.equal(evaluatePolicy(calendarPolicy, {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+		method: 'GET'
+	}).allowed, false, 'Required non-null query parameters must reject URL without query string')
+	assert.equal(evaluatePolicy(calendarPolicy, {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events/evt123',
+		method: 'DELETE'
+	}).allowed, true, 'URL without query string matches query rules allowing null')
+	assert.equal(evaluatePolicy(calendarPolicy, {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events/evt123?sendUpdates=none',
+		method: 'DELETE'
+	}).allowed, true, 'URL with allowed query parameter value matches')
+	assert.equal(evaluatePolicy(calendarPolicy, {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events/evt123?sendUpdates=all',
+		method: 'DELETE'
+	}).allowed, false, 'URL with disallowed query parameter value is denied')
+	assert.equal(evaluatePolicy(calendarPolicy, {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events/evt123?sendUpdates=none&sendUpdates=all',
+		method: 'DELETE'
+	}).allowed, false, 'Repeated query parameter must fail when any value is disallowed (.every semantics)')
+	assert.equal(evaluatePolicy(calendarPolicy, {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events/evt123?sendUpdates=none&sendUpdates=none',
+		method: 'DELETE'
+	}).allowed, true, 'Repeated query parameter succeeds when every value matches')
+	assert.equal(evaluatePolicy(calendarPolicy, {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events/evt123?conferenceDataVersion=1',
+		method: 'POST'
+	}).allowed, false, 'Query parameter constrained to standalone null must reject any present value')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', path: '/search', query: { q: 'project-*', toString: null } }
+	], {
+		url: 'https://api.example.com/search?q=project-alpha',
+		method: 'GET'
+	}).allowed, true, 'Glob pattern and prototype key with null work cleanly on query object')
 })
 
 test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
@@ -2753,7 +2902,7 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 					action: 'allow',
 					methods: ['POST'],
 					path: '/v3/messages',
-					body: { from: 'noreply@example.com', tag: 'welcome' }
+					body: { from: 'noreply@example.com', tag: ['onboarding', 'welcome'] }
 				}
 			]
 		}, session.token)

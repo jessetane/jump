@@ -6,10 +6,11 @@ export {
 	validatePolicy
 }
 
-const ALLOWED_RULE_KEYS = new Set(['action', 'methods', 'origin', 'path', 'body', 'description'])
+const ALLOWED_RULE_KEYS = new Set(['action', 'methods', 'origin', 'path', 'query', 'body', 'description'])
 const ALLOWED_HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', '*'])
 
-function isValidBodyScalar (val) {
+function isValidFieldScalar (val) {
+	if (val === null) return true
 	const t = typeof val
 	return t === 'string' || t === 'number' || t === 'boolean'
 }
@@ -24,31 +25,37 @@ function parseUrlEncoded (str) {
 			obj[k] = v
 		}
 	}
-	return Object.keys(obj).length > 0 ? obj : null
+	return obj
 }
 
 function parseBodyObject (body, contentType = '') {
-	if (!body) return null
+	if (body === undefined || body === null || body === '') return {}
 	if (typeof body === 'object' && !Array.isArray(body)) return body
 	if (typeof body === 'string') {
+		const trimmed = body.trim()
+		if (!trimmed) return {}
 		const ct = String(contentType || '').split(';')[0].trim().toLowerCase()
 		if (ct === 'application/x-www-form-urlencoded') {
-			return parseUrlEncoded(body)
+			return parseUrlEncoded(trimmed)
 		}
-		const trimmed = body.trim()
-		if (!trimmed || /^<[a-zA-Z?_!][\s\S]*>$/.test(trimmed)) return null
-		try {
-			const parsed = JSON.parse(trimmed)
-			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
-		} catch {}
-		if (trimmed.includes('=')) {
-			return parseUrlEncoded(body)
+		if (ct && ct !== 'application/json' && !ct.endsWith('+json')) {
+			return null
+		}
+		if (/^<[a-zA-Z?_!][\s\S]*>$/.test(trimmed) || trimmed.startsWith('[') || trimmed.startsWith('{')) {
+			try {
+				const parsed = JSON.parse(trimmed)
+				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+			} catch {}
+			return null
+		}
+		if (!ct && trimmed.split('&').every(part => /^[^=\s&]+=[^]*$/.test(part))) {
+			return parseUrlEncoded(trimmed)
 		}
 	}
 	return null
 }
 
-function resolveBodyField (obj, key) {
+function resolveField (obj, key) {
 	if (!obj || typeof obj !== 'object') return undefined
 	if (Object.hasOwn(obj, key)) return obj[key]
 	if (!key.includes('.')) return undefined
@@ -74,16 +81,48 @@ function matchValuePattern (pattern, str) {
 	}
 }
 
-function matchBodyValue (expected, actual) {
-	if (actual === undefined || actual === null) return false
+function matchFieldValue (expected, actual) {
 	const patterns = Array.isArray(expected) ? expected : [expected]
+	if (actual === undefined || actual === null) return patterns.includes(null)
 	const values = Array.isArray(actual) ? actual : [actual]
 	if (values.length === 0) return false
-	return values.some(val => {
-		if (val === undefined || val === null || typeof val === 'object') return false
+	return values.every(val => {
+		if (val === undefined || val === null) return patterns.includes(null)
+		if (typeof val === 'object') return false
 		const valStr = String(val)
-		return patterns.some(pat => matchValuePattern(String(pat), valStr))
+		return patterns.some(pat => pat !== null && matchValuePattern(String(pat), valStr))
 	})
+}
+
+function validateFieldMap (map, label, ruleIndex) {
+	if (!map || typeof map !== 'object' || Array.isArray(map)) {
+		return `Rule at index ${ruleIndex} ${label} must be a non-empty object`
+	}
+	const entries = Object.entries(map)
+	if (entries.length === 0) {
+		return `Rule at index ${ruleIndex} ${label} must be a non-empty object`
+	}
+	for (const [k, v] of entries) {
+		if (!k.trim()) {
+			return `Rule at index ${ruleIndex} ${label} field key must be a non-empty string`
+		}
+		if (Array.isArray(v)) {
+			if (v.length === 0 || !v.every(isValidFieldScalar)) {
+				return `Rule at index ${ruleIndex} ${label} field "${k}" must be a primitive or non-empty array of primitives`
+			}
+		} else if (!isValidFieldScalar(v)) {
+			return `Rule at index ${ruleIndex} ${label} field "${k}" must be a primitive or non-empty array of primitives`
+		}
+	}
+	return null
+}
+
+function matchFieldMap (expectedMap, actualObj) {
+	if (!actualObj) return false
+	for (const [key, expected] of Object.entries(expectedMap)) {
+		if (!matchFieldValue(expected, resolveField(actualObj, key))) return false
+	}
+	return true
 }
 
 function canonicalizePath (str) {
@@ -172,26 +211,13 @@ function validatePolicy (policy) {
 				return { valid: false, error: `Rule at index ${i} path must be a pathname; use "origin" to specify hostnames` }
 			}
 		}
+		if (rule.query !== undefined) {
+			const queryErr = validateFieldMap(rule.query, 'query', i)
+			if (queryErr) return { valid: false, error: queryErr }
+		}
 		if (rule.body !== undefined) {
-			if (!rule.body || typeof rule.body !== 'object' || Array.isArray(rule.body)) {
-				return { valid: false, error: `Rule at index ${i} body must be a non-empty object` }
-			}
-			const entries = Object.entries(rule.body)
-			if (entries.length === 0) {
-				return { valid: false, error: `Rule at index ${i} body must be a non-empty object` }
-			}
-			for (const [k, v] of entries) {
-				if (!k.trim()) {
-					return { valid: false, error: `Rule at index ${i} body field key must be a non-empty string` }
-				}
-				if (Array.isArray(v)) {
-					if (v.length === 0 || !v.every(isValidBodyScalar)) {
-						return { valid: false, error: `Rule at index ${i} body field "${k}" must be a primitive or non-empty array of primitives` }
-					}
-				} else if (!isValidBodyScalar(v)) {
-					return { valid: false, error: `Rule at index ${i} body field "${k}" must be a primitive or non-empty array of primitives` }
-				}
-			}
+			const bodyErr = validateFieldMap(rule.body, 'body', i)
+			if (bodyErr) return { valid: false, error: bodyErr }
 		}
 		if (rule.description !== undefined && typeof rule.description !== 'string') {
 			return { valid: false, error: `Rule at index ${i} description must be a string` }
@@ -270,6 +296,7 @@ function evaluatePolicy (policy, req = {}) {
 	if (canonicalPath === null) {
 		return { allowed: false, reason: 'Invalid path: path traversal is not permitted' }
 	}
+	let parsedQuery = undefined
 	let parsedBody = undefined
 	for (const rule of parsedPolicy) {
 		const action = rule.action.toLowerCase()
@@ -287,20 +314,17 @@ function evaluatePolicy (policy, req = {}) {
 			const canonicalNormPath = canonicalizePath(normPath)
 			if (!matchPattern(canonicalNormPath, canonicalPath)) continue
 		}
+		if (rule.query) {
+			if (parsedQuery === undefined) {
+				parsedQuery = parseUrlEncoded(parsedUrl.search.slice(1))
+			}
+			if (!matchFieldMap(rule.query, parsedQuery)) continue
+		}
 		if (rule.body) {
 			if (parsedBody === undefined) {
 				parsedBody = parseBodyObject(req.body, req.contentType)
 			}
-			if (!parsedBody) continue
-			let bodyMatched = true
-			for (const [key, expected] of Object.entries(rule.body)) {
-				const actual = resolveBodyField(parsedBody, key)
-				if (!matchBodyValue(expected, actual)) {
-					bodyMatched = false
-					break
-				}
-			}
-			if (!bodyMatched) continue
+			if (!matchFieldMap(rule.body, parsedBody)) continue
 		}
 		if (action === 'deny') {
 			return {

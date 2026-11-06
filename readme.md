@@ -8,7 +8,7 @@ So my trusted agents can do Google stuff. So my untrusted agents can also do Goo
 
 * One `<provider>_api` passthrough tool per linked provider (`google_api`, `github_api`, `stripe_api`, etc).
 * Sessions are decoupled from upstream OAuth and API-key credentials, so multiple accounts can be linked to one or many sessions.
-* Each session-to-app link can carry an ordered `allow`/`deny` policy matching HTTP methods, origins, URL path globs, and request body fields.
+* Each session-to-app link can carry an ordered `allow`/`deny` policy matching HTTP methods, origins, URL path globs, query parameters, and request body fields.
 
 ## Setup
 ```sh
@@ -53,7 +53,7 @@ admin({
 // create a non-admin session for an embedded/untrusted agent (returns a bearer token)
 admin({ action: 'create_session', name: 'Untrusted Agent' })
 
-// link an app to that session with a path/method policy
+// link an app to that session with a path/method/query policy
 admin({
 	action: 'link_app',
 	sessionId: '<session_id>',
@@ -66,7 +66,10 @@ admin({
 		},
 		{
 			action: 'allow',
-			path: '/calendar/v3/calendars/team@group.calendar.google.com/events/**'
+			path: '/calendar/v3/calendars/team@group.calendar.google.com/events/**',
+			query: {
+				sendUpdates: ['none', null]
+			}
 		}
 	]
 })
