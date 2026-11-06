@@ -20,7 +20,7 @@ $ cp .env.example .env
 
 For upstream OAuth providers (`google`, `github`, etc.), register `https://<host>/oauth/callback` as the redirect URI in the provider's developer console and set `<PROVIDER>_CLIENT_ID` and `<PROVIDER>_CLIENT_SECRET` in `.env`.
 
-For magic-link emails, set `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, and `MAILGUN_SENDER` in `.env` (when unset, links are printed to stdout).
+For magic-link emails, set `SENDMAIL` (a shell command receiving an RFC 5322 message on `stdin` with `MAIL_FROM`, `MAIL_TO`, and `MAIL_SUBJECT` in the environment, e.g. `sendmail -t -i`) and optionally `MAIL_FROM` in `.env` (when `SENDMAIL` is unset, links are printed to stdout).
 
 ## Usage
 Point an OAuth-capable MCP client at `https://<host>/mcp` and sign in as an admin:

@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process'
+
 export {
 	getBody,
 	sendJson,
@@ -87,38 +89,44 @@ function getBody (req, maxBytes = 1024 * 1024) {
 	})
 }
 
-async function sendMail (opts = {}) {
-	const { to, subject, html, text } = opts
-	const apiKey = process.env.MAILGUN_API_KEY
-	const domain = process.env.MAILGUN_DOMAIN
-	const sender = process.env.MAILGUN_SENDER || `jump <admin@${domain || 'localhost'}>`
-	if (!apiKey || !domain || process.env.NODE_ENV === 'test') {
+function sendMail (opts = {}) {
+	const { to, subject, text } = opts
+	const cleanFrom = String(process.env.MAIL_FROM || 'jump <noreply@localhost>').replace(/[\r\n]+/g, ' ').trim()
+	const cleanTo = String(to || '').replace(/[\r\n]+/g, ' ').trim()
+	const cleanSubject = String(subject || '').replace(/[\r\n]+/g, ' ').trim()
+	const cmd = process.env.SENDMAIL
+	if (!cmd) {
 		if (process.env.NODE_ENV !== 'test') {
-			console.log(`[mailgun:dev] To: ${to} | Subject: ${subject} | Content: ${text || html}`)
+			console.log(`[sendmail:dev] To: ${cleanTo} | Subject: ${cleanSubject} | Content: ${text}`)
 		}
-		return { ok: true, dev: true }
+		return Promise.resolve({ ok: true, dev: true })
 	}
-	const params = new URLSearchParams()
-	params.set('from', sender)
-	params.set('to', to)
-	params.set('subject', subject)
-	if (text) params.set('text', text)
-	if (html) params.set('html', html)
-	const authHeader = `Basic ${Buffer.from(`api:${apiKey}`).toString('base64')}`
-	const res = await fetch(`https://api.mailgun.net/v3/${domain}/messages`, {
-		method: 'POST',
-		headers: {
-			authorization: authHeader,
-			'content-type': 'application/x-www-form-urlencoded'
-		},
-		body: params.toString()
+	const cleanBody = String(text || '').replace(/\r?\n/g, '\r\n')
+	const message = `From: ${cleanFrom}\r\nTo: ${cleanTo}\r\nSubject: ${cleanSubject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${cleanBody}\r\n`
+	return new Promise((resolve, reject) => {
+		const child = spawn(cmd, {
+			shell: true,
+			stdio: ['pipe', 'ignore', 'pipe'],
+			env: {
+				...process.env,
+				MAIL_FROM: cleanFrom,
+				MAIL_TO: cleanTo,
+				MAIL_SUBJECT: cleanSubject
+			}
+		})
+		let stderr = ''
+		child.stderr.on('data', chunk => {
+			stderr += chunk.toString('utf8')
+		})
+		child.stdin.on('error', () => {})
+		child.on('error', reject)
+		child.on('close', code => {
+			if (code !== 0) {
+				reject(new Error(`SENDMAIL exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ''}`))
+				return
+			}
+			resolve({ ok: true })
+		})
+		child.stdin.end(message)
 	})
-	if (!res.ok) {
-		const errText = await res.text()
-		console.error(`[mailgun] Error sending email (${res.status}): ${errText}`)
-		const err = new Error(`Mailgun delivery failed: ${errText}`)
-		err.status = res.status
-		throw err
-	}
-	return await res.json()
 }

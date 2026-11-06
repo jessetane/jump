@@ -449,8 +449,7 @@ async function handleAuthorizeConsent (req, res) {
 	await sendMail({
 		to: email,
 		subject: 'Sign in to jump',
-		text: `Click the link below to sign in and activate your MCP session token:\n\n${verifyUrl}\n\nThis link expires in 15 minutes.`,
-		html: `<p>Click the link below to sign in and activate your MCP session token:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p>This link expires in 15 minutes.</p>`
+		text: `Click the link below to sign in and activate your MCP session token:\n\n${verifyUrl}\n\nThis link expires in 15 minutes.`
 	})
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/html; charset=utf-8')

@@ -12,6 +12,8 @@ process.env.NODE_ENV = 'test'
 process.env.GOOGLE_CLIENT_ID = 'test-client-id'
 process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret'
 process.env.ALLOWED_REDIRECT_DOMAINS = 'localhost,127.0.0.1,chatgpt.com,antigravity.google,antigravity,cursor,vscode'
+delete process.env.SENDMAIL
+delete process.env.MAIL_FROM
 
 fs.rmSync(testDbPath, { force: true })
 fs.rmSync(`${testDbPath}-wal`, { force: true })
@@ -27,6 +29,7 @@ const { executeTool } = await import('../mcp.js')
 const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
+const { sendMail } = await import('../util.js')
 
 function createTestSession (opts = {}) {
 	const {
@@ -3068,6 +3071,52 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 		assert.equal(capturedUpstream[0].headers['user-agent'], 'jump')
 	} finally {
 		await new Promise(resolve => mockGhServer.close(resolve))
+	}
+})
+
+test('sendMail pipes RFC 5322 message to SENDMAIL stdin with env vars and rejects on non-zero exit', async () => {
+	const devRes = await sendMail({
+		to: 'dev@example.com',
+		subject: 'Dev Test',
+		text: 'Hello dev'
+	})
+	assert.deepEqual(devRes, { ok: true, dev: true })
+	const outPath = path.join(dirname, 'test-sendmail.json')
+	fs.rmSync(outPath, { force: true })
+	const origSendmail = process.env.SENDMAIL
+	const origMailFrom = process.env.MAIL_FROM
+	try {
+		process.env.MAIL_FROM = 'jump <custom@example.com>\r\nBcc: attacker@evil.com'
+		process.env.SENDMAIL = `"${process.execPath}" -e "const fs = require('node:fs'); const stdin = fs.readFileSync(0, 'utf8'); fs.writeFileSync(process.argv[1], JSON.stringify({ stdin, from: process.env.MAIL_FROM, to: process.env.MAIL_TO, subject: process.env.MAIL_SUBJECT }))" "${outPath}"`
+		const sent = await sendMail({
+			to: 'recipient@example.com\r\nCc: leak@evil.com',
+			subject: 'Sign in\r\nX-Injected: yes',
+			text: 'Click here to sign in:\n\nhttps://example.com/verify'
+		})
+		assert.deepEqual(sent, { ok: true })
+		const captured = JSON.parse(fs.readFileSync(outPath, 'utf8'))
+		assert.equal(captured.from, 'jump <custom@example.com> Bcc: attacker@evil.com')
+		assert.equal(captured.to, 'recipient@example.com Cc: leak@evil.com')
+		assert.equal(captured.subject, 'Sign in X-Injected: yes')
+		assert.equal(
+			captured.stdin,
+			'From: jump <custom@example.com> Bcc: attacker@evil.com\r\n' +
+			'To: recipient@example.com Cc: leak@evil.com\r\n' +
+			'Subject: Sign in X-Injected: yes\r\n' +
+			'Content-Type: text/plain; charset=utf-8\r\n\r\n' +
+			'Click here to sign in:\r\n\r\nhttps://example.com/verify\r\n'
+		)
+		process.env.SENDMAIL = `"${process.execPath}" -e "process.stderr.write('relay denied\\n'); process.exit(75)"`
+		await assert.rejects(
+			() => sendMail({ to: 'user@example.com', subject: 'Fail', text: 'Body' }),
+			/SENDMAIL exited with code 75: relay denied/
+		)
+	} finally {
+		if (origSendmail === undefined) delete process.env.SENDMAIL
+		else process.env.SENDMAIL = origSendmail
+		if (origMailFrom === undefined) delete process.env.MAIL_FROM
+		else process.env.MAIL_FROM = origMailFrom
+		fs.rmSync(outPath, { force: true })
 	}
 })
 
