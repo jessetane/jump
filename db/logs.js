@@ -40,7 +40,7 @@ function format (row) {
 		id: row.id,
 		userId: row.user_id,
 		sessionId: row.session_id,
-		appId: row.app_id,
+		appId: row.resolved_app_id !== undefined ? row.resolved_app_id : row.app_id,
 		provider: row.provider,
 		method: row.method,
 		url: row.url,
@@ -111,27 +111,33 @@ function listByUserId (userId, opts = {}) {
 	if (!userId) return []
 	pruneIfNeeded()
 	const { sessionId, appId, provider, allowed, limit = 100 } = opts
-	let query = 'SELECT * FROM logs WHERE user_id = ?'
-	const params = [userId]
+	let query = `
+		SELECT logs.*, COALESCE(owned.id, share.id) AS resolved_app_id
+		FROM logs
+		LEFT JOIN tokens AS owned ON owned.id = logs.app_id AND owned.user_id = ? AND owned.type != 'share'
+		LEFT JOIN tokens AS share ON share.user_id = ? AND share.type = 'share' AND json_extract(share.credentials, '$.appId') = logs.app_id
+		WHERE (logs.user_id = ? OR owned.id IS NOT NULL)
+	`
+	const params = [userId, userId, userId]
 	if (sessionId) {
-		query += ' AND session_id = ?'
+		query += ' AND logs.session_id = ?'
 		params.push(sessionId)
 	}
 	if (appId) {
-		query += ' AND app_id = ?'
+		query += ' AND COALESCE(owned.id, share.id) = ?'
 		params.push(appId)
 	}
 	if (provider) {
-		query += ' AND provider = ?'
+		query += ' AND logs.provider = ?'
 		params.push(provider)
 	}
 	const normalizedAllowed = normalizeAllowed(allowed)
 	if (normalizedAllowed !== undefined) {
-		query += ' AND allowed = ?'
+		query += ' AND logs.allowed = ?'
 		params.push(normalizedAllowed)
 	}
 	const clampedLimit = Math.max(1, Math.min(Number(limit) || 100, 1000))
-	query += ' ORDER BY created DESC, rowid DESC LIMIT ?'
+	query += ' ORDER BY logs.created DESC, logs.rowid DESC LIMIT ?'
 	params.push(clampedLimit)
 	const rows = sqlite.prepare(query).all(...params)
 	return rows.map(format)

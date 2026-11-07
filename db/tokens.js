@@ -10,6 +10,9 @@ export {
 	issueOauthTokens,
 	refreshOauthSession,
 	listByUserId,
+	listSharesByOwnerId,
+	upsertShare,
+	removeShare,
 	updateCredentials,
 	updateName,
 	setAdmin,
@@ -25,8 +28,24 @@ export {
 	consumeMagicCode,
 	createAuthCode,
 	consumeAuthCode,
-	formatToken
+	formatToken,
+	UPSTREAM_SELECT,
+	UPSTREAM_JOIN
 }
+
+const UPSTREAM_SELECT = `
+	upstream.name AS upstream_name,
+	upstream.scopes AS upstream_scopes,
+	upstream.expires_at AS upstream_expires_at,
+	json_extract(upstream.credentials, '$.account') AS upstream_account,
+	json_extract(upstream.credentials, '$.baseUrl') AS upstream_base_url,
+	owner.email AS shared_by_email
+`
+
+const UPSTREAM_JOIN = `
+	LEFT JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
+	LEFT JOIN users AS owner ON upstream.user_id = owner.id
+`
 
 function init () {
 	sqlite.exec(`
@@ -50,6 +69,7 @@ function init () {
 		CREATE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);
 		CREATE INDEX IF NOT EXISTS idx_tokens_user_provider ON tokens(user_id, provider);
 		CREATE INDEX IF NOT EXISTS idx_tokens_updated ON tokens(updated);
+		CREATE INDEX IF NOT EXISTS idx_tokens_share_app ON tokens(json_extract(credentials, '$.appId')) WHERE type = 'share';
 	`)
 }
 
@@ -63,23 +83,29 @@ function formatToken (row) {
 			credentials = row.credentials
 		}
 	}
+	const isShare = row.type === 'share'
 	return {
 		id: row.id,
 		userId: row.user_id,
 		provider: row.provider,
 		type: row.type,
-		name: row.name,
+		name: isShare ? (row.upstream_name || null) : row.name,
 		token: row.token,
-		credentials,
-		expiresAt: row.expires_at,
-		scopes: row.scopes,
+		credentials: isShare && credentials ? {
+			...credentials,
+			...(row.upstream_account ? { account: row.upstream_account } : {}),
+			...(row.upstream_base_url ? { baseUrl: row.upstream_base_url } : {})
+		} : credentials,
+		expiresAt: isShare ? (row.upstream_expires_at ?? null) : row.expires_at,
+		scopes: isShare ? (row.upstream_scopes || null) : row.scopes,
 		admin: Boolean(row.admin),
 		ip: row.ip,
 		ua: row.ua,
 		created: row.created,
 		updated: row.updated,
 		email: row.email,
-		userName: row.user_name
+		userName: row.user_name,
+		...(row.shared_by_email ? { sharedBy: row.shared_by_email } : {})
 	}
 }
 
@@ -111,9 +137,10 @@ function create (opts = {}) {
 function get (id) {
 	if (!id) return null
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.email, users.name AS user_name
+		SELECT tokens.*, users.email, users.name AS user_name, ${UPSTREAM_SELECT}
 		FROM tokens
 		LEFT JOIN users ON tokens.user_id = users.id
+		${UPSTREAM_JOIN}
 		WHERE tokens.id = ?
 	`).get(id)
 	return formatToken(row)
@@ -216,9 +243,10 @@ function listByUserId (userId, opts = {}) {
 	if (!userId) return []
 	pruneDormant()
 	let query = `
-		SELECT tokens.*, users.email, users.name AS user_name
+		SELECT tokens.*, users.email, users.name AS user_name, ${UPSTREAM_SELECT}
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
+		${UPSTREAM_JOIN}
 		WHERE tokens.user_id = ? AND tokens.type NOT IN ('oauth_state', 'oauth_code')
 			AND NOT (tokens.provider = 'self' AND tokens.type = 'bearer' AND tokens.token IS NULL)
 	`
@@ -230,6 +258,46 @@ function listByUserId (userId, opts = {}) {
 	query += ' ORDER BY tokens.created DESC'
 	const rows = sqlite.prepare(query).all(...params)
 	return rows.map(formatToken)
+}
+
+function listSharesByOwnerId (ownerUserId) {
+	if (!ownerUserId) return []
+	const rows = sqlite.prepare(`
+		SELECT tokens.*, users.email, users.name AS user_name
+		FROM tokens
+		JOIN users ON tokens.user_id = users.id
+		JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
+		WHERE upstream.user_id = ?
+		ORDER BY tokens.created ASC
+	`).all(ownerUserId)
+	return rows.map(formatToken)
+}
+
+function upsertShare ({ userId, appId, provider, policy = null }) {
+	const existing = sqlite.prepare(`
+		SELECT id FROM tokens
+		WHERE user_id = ? AND type = 'share' AND json_extract(credentials, '$.appId') = ?
+	`).get(userId, appId)
+	if (existing) {
+		return updateCredentials(existing.id, {
+			credentials: { appId, policy }
+		})
+	}
+	return create({
+		userId,
+		provider,
+		type: 'share',
+		credentials: { appId, policy }
+	})
+}
+
+function removeShare (userId, appId) {
+	if (!userId || !appId) return false
+	const res = sqlite.prepare(`
+		DELETE FROM tokens
+		WHERE user_id = ? AND type = 'share' AND json_extract(credentials, '$.appId') = ?
+	`).run(userId, appId)
+	return res.changes > 0
 }
 
 function updateCredentials (id, opts = {}) {
@@ -277,6 +345,10 @@ function rotateToken (id, newToken = randomUUID()) {
 
 function remove (id) {
 	if (!id) return false
+	sqlite.prepare(`
+		DELETE FROM tokens
+		WHERE type = 'share' AND json_extract(credentials, '$.appId') = ?
+	`).run(id)
 	const res = sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(id)
 	return res.changes > 0
 }

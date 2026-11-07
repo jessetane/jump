@@ -1,5 +1,5 @@
 import { sqlite } from './index.js'
-import { formatToken } from './tokens.js'
+import { formatToken, UPSTREAM_SELECT, UPSTREAM_JOIN } from './tokens.js'
 
 export {
 	init,
@@ -34,24 +34,9 @@ function formatLink (row) {
 		sessionId: row.session_id,
 		appId: row.app_id,
 		policy: row.policy,
-		created: row.link_created || row.created,
-		updated: row.link_updated || row.updated,
-		app: row.target_app_id ? formatToken({
-			id: row.target_app_id,
-			user_id: row.app_user_id,
-			provider: row.app_provider,
-			type: row.app_type,
-			name: row.app_name,
-			token: row.app_token,
-			credentials: row.app_credentials,
-			expires_at: row.app_expires_at,
-			scopes: row.app_scopes,
-			admin: row.app_admin,
-			created: row.app_created,
-			updated: row.app_updated,
-			email: row.email,
-			user_name: row.user_name
-		}) : undefined
+		created: row.link_created,
+		updated: row.link_updated,
+		app: row.id ? formatToken(row) : undefined
 	}
 }
 
@@ -72,16 +57,13 @@ function create (opts = {}) {
 function get (sessionId, appId) {
 	if (!sessionId || !appId) return null
 	const row = sqlite.prepare(`
-		SELECT links.*,
-			tokens.id AS target_app_id, tokens.user_id AS app_user_id, tokens.provider AS app_provider,
-			tokens.type AS app_type, tokens.name AS app_name, tokens.token AS app_token,
-			tokens.credentials AS app_credentials, tokens.expires_at AS app_expires_at,
-			tokens.scopes AS app_scopes, tokens.admin AS app_admin,
-			tokens.created AS app_created, tokens.updated AS app_updated,
-			users.email, users.name AS user_name
+		SELECT tokens.*, users.email, users.name AS user_name, ${UPSTREAM_SELECT},
+			links.session_id, links.app_id, links.policy,
+			links.created AS link_created, links.updated AS link_updated
 		FROM links
 		JOIN tokens ON links.app_id = tokens.id
 		JOIN users ON tokens.user_id = users.id
+		${UPSTREAM_JOIN}
 		WHERE links.session_id = ? AND links.app_id = ?
 	`).get(sessionId, appId)
 	return formatLink(row)
@@ -90,17 +72,13 @@ function get (sessionId, appId) {
 function listBySessionId (sessionId) {
 	if (!sessionId) return []
 	const rows = sqlite.prepare(`
-		SELECT links.session_id, links.app_id, links.policy,
-			links.created AS link_created, links.updated AS link_updated,
-			tokens.id AS target_app_id, tokens.user_id AS app_user_id, tokens.provider AS app_provider,
-			tokens.type AS app_type, tokens.name AS app_name, tokens.token AS app_token,
-			tokens.credentials AS app_credentials, tokens.expires_at AS app_expires_at,
-			tokens.scopes AS app_scopes, tokens.admin AS app_admin,
-			tokens.created AS app_created, tokens.updated AS app_updated,
-			users.email, users.name AS user_name
+		SELECT tokens.*, users.email, users.name AS user_name, ${UPSTREAM_SELECT},
+			links.session_id, links.app_id, links.policy,
+			links.created AS link_created, links.updated AS link_updated
 		FROM links
 		JOIN tokens ON links.app_id = tokens.id
 		JOIN users ON tokens.user_id = users.id
+		${UPSTREAM_JOIN}
 		WHERE links.session_id = ?
 		ORDER BY links.created ASC
 	`).all(sessionId)
