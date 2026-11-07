@@ -3269,6 +3269,404 @@ test('sendMail pipes RFC 5322 message to SENDMAIL stdin with env vars and reject
 	}
 })
 
+test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit logs, and REST /api/shares', async () => {
+	const http = await import('node:http')
+	const upstreamCaptured = []
+	const mockUpstream = http.createServer((req, res) => {
+		upstreamCaptured.push({
+			method: req.method,
+			url: req.url,
+			auth: req.headers.authorization
+		})
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.end(JSON.stringify({ ok: true, path: req.url, method: req.method, auth: req.headers.authorization }))
+	})
+	await new Promise(resolve => mockUpstream.listen(0, '127.0.0.1', resolve))
+	const upstreamPort = mockUpstream.address().port
+	const baseUrl = `http://127.0.0.1:${upstreamPort}`
+	try {
+		const addr = server.address()
+		const sarah = db.users.upsert({ email: 'sarah@acme.com', name: 'Sarah' })
+		const sarahAdmin = db.tokens.create({ userId: sarah.id, provider: 'self', admin: 1 })
+		const sarahWorker = db.tokens.create({ userId: sarah.id, provider: 'self', admin: 0 })
+		const connectRes = await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'stripe',
+			name: 'Acme Stripe',
+			account: 'acct_acme_main',
+			apiKey: 'sk_live_sarah_secret_123',
+			baseUrl
+		}, sarahAdmin.token)
+		assert.equal(connectRes.isError, undefined)
+		const sarahApp = JSON.parse(connectRes.content[0].text).app
+		const nonAdminShare = await executeTool('admin', {
+			action: 'share_app',
+			appId: sarahApp.id,
+			email: 'dan@acme.com'
+		}, sarahWorker.token)
+		assert.equal(nonAdminShare.isError, true)
+		assert.match(nonAdminShare.content[0].text, /requires admin privileges/)
+		const missingAppShare = await executeTool('admin', {
+			action: 'share_app',
+			email: 'dan@acme.com'
+		}, sarahAdmin.token)
+		assert.equal(missingAppShare.isError, true)
+		assert.match(missingAppShare.content[0].text, /appId is required/)
+		const invalidEmailShare = await executeTool('admin', {
+			action: 'share_app',
+			appId: sarahApp.id,
+			email: 'invalid-email'
+		}, sarahAdmin.token)
+		assert.equal(invalidEmailShare.isError, true)
+		assert.match(invalidEmailShare.content[0].text, /Valid recipient email address is required/)
+		const selfShare = await executeTool('admin', {
+			action: 'share_app',
+			appId: sarahApp.id,
+			email: 'SARAH@acme.com'
+		}, sarahAdmin.token)
+		assert.equal(selfShare.isError, true)
+		assert.match(selfShare.content[0].text, /Cannot share an app with yourself/)
+		const invalidPolicyShare = await executeTool('admin', {
+			action: 'share_app',
+			appId: sarahApp.id,
+			email: 'dan@acme.com',
+			policy: [{ action: 'not_valid' }]
+		}, sarahAdmin.token)
+		assert.equal(invalidPolicyShare.isError, true)
+		assert.match(invalidPolicyShare.content[0].text, /action must be "allow" or "deny"/)
+		const ceilingPolicy = [
+			{ action: 'allow', methods: ['GET'], path: '/v1/customers/**' },
+			{ action: 'allow', methods: ['GET', 'POST'], path: '/v1/invoices/**' }
+		]
+		const shareRes = await executeTool('admin', {
+			action: 'share_app',
+			appId: sarahApp.id,
+			email: 'Dan@acme.com',
+			policy: ceilingPolicy
+		}, sarahAdmin.token)
+		assert.equal(shareRes.isError, undefined)
+		const shareData = JSON.parse(shareRes.content[0].text)
+		assert.equal(shareData.shared, true)
+		assert.equal(shareData.appId, sarahApp.id)
+		assert.equal(shareData.email, 'dan@acme.com')
+		assert.deepEqual(shareData.policy, ceilingPolicy)
+		const shareId = shareData.shareId
+		assert.ok(shareId)
+		assert.notEqual(shareId, sarahApp.id)
+		const updatedCeilingPolicy = [
+			{ action: 'allow', methods: ['GET'], path: '/v1/customers/**' },
+			{ action: 'allow', methods: ['GET'], path: '/v1/invoices/**' }
+		]
+		const reshareRes = await executeTool('admin', {
+			action: 'share_app',
+			appId: sarahApp.id,
+			email: 'dan@acme.com',
+			policy: updatedCeilingPolicy
+		}, sarahAdmin.token)
+		assert.equal(reshareRes.isError, undefined)
+		const reshareData = JSON.parse(reshareRes.content[0].text)
+		assert.equal(reshareData.shareId, shareId, 'Re-sharing updates existing share token in place without creating duplicates')
+		assert.deepEqual(reshareData.policy, updatedCeilingPolicy)
+		const sarahAppsRes = await executeTool('admin', { action: 'list_apps' }, sarahAdmin.token)
+		const sarahApps = JSON.parse(sarahAppsRes.content[0].text).apps
+		const sarahStripe = sarahApps.find(a => a.id === sarahApp.id)
+		assert.ok(sarahStripe)
+		assert.equal(sarahStripe.shares.length, 1)
+		assert.equal(sarahStripe.shares[0].email, 'dan@acme.com')
+		assert.deepEqual(sarahStripe.shares[0].policy, updatedCeilingPolicy)
+		const dan = db.users.getByEmail('dan@acme.com')
+		assert.ok(dan)
+		const danAdmin = db.tokens.create({ userId: dan.id, provider: 'self', admin: 1 })
+		const danAppsRes = await executeTool('admin', { action: 'list_apps' }, danAdmin.token)
+		const danApps = JSON.parse(danAppsRes.content[0].text).apps
+		assert.equal(danApps.length, 1)
+		const danShare = danApps[0]
+		assert.equal(danShare.id, shareId)
+		assert.equal(danShare.provider, 'stripe')
+		assert.equal(danShare.type, 'share')
+		assert.equal(danShare.name, 'Acme Stripe')
+		assert.equal(danShare.account, 'acct_acme_main')
+		assert.equal(danShare.baseUrl, baseUrl)
+		assert.equal(danShare.sharedBy, 'sarah@acme.com')
+		assert.deepEqual(danShare.policy, updatedCeilingPolicy)
+		assert.equal(JSON.stringify(danShare).includes('sk_live_sarah_secret_123'), false, 'Upstream API key must never leak in recipient list_apps')
+		const rawShareToken = db.tokens.get(shareId)
+		assert.equal(JSON.stringify(rawShareToken).includes('sk_live_sarah_secret_123'), false, 'Upstream API key must never leak in formatted share token')
+		await executeTool('admin', {
+			action: 'update_app',
+			appId: sarahApp.id,
+			name: ''
+		}, sarahAdmin.token)
+		const danAppsAfterClearName = JSON.parse((await executeTool('admin', { action: 'list_apps' }, danAdmin.token)).content[0].text).apps
+		assert.equal(danAppsAfterClearName[0].name, null, 'Clearing upstream app name reflects as null on recipient share without falling back to stale snapshot')
+		await executeTool('admin', {
+			action: 'update_app',
+			appId: sarahApp.id,
+			name: 'Acme Global Stripe'
+		}, sarahAdmin.token)
+		const danAppsAfterRename = JSON.parse((await executeTool('admin', { action: 'list_apps' }, danAdmin.token)).content[0].text).apps
+		assert.equal(danAppsAfterRename[0].name, 'Acme Global Stripe', 'Upstream app rename dynamically reflects in recipient list_apps')
+		const danUpdateAttempt = await executeTool('admin', {
+			action: 'update_app',
+			appId: shareId,
+			name: 'Hacked Name'
+		}, danAdmin.token)
+		assert.equal(danUpdateAttempt.isError, true)
+		assert.match(danUpdateAttempt.content[0].text, /App not found/)
+		const danReshareAttempt = await executeTool('admin', {
+			action: 'share_app',
+			appId: shareId,
+			email: 'eve@acme.com'
+		}, danAdmin.token)
+		assert.equal(danReshareAttempt.isError, true)
+		assert.match(danReshareAttempt.content[0].text, /App not found/)
+		const danReauthAttempt = await executeTool('admin', {
+			action: 'connect_app',
+			appId: shareId
+		}, danAdmin.token)
+		assert.equal(danReauthAttempt.isError, true)
+		assert.match(danReauthAttempt.content[0].text, /App not found/)
+		const danAgentRes = await executeTool('admin', {
+			action: 'create_session',
+			name: 'Dan Agent',
+			linkAppIds: [shareId],
+			policy: [
+				{ action: 'allow', methods: ['GET'], path: '/v1/customers/**' },
+				{ action: 'allow', methods: ['POST'], path: '/v1/invoices/**' }
+			]
+		}, danAdmin.token)
+		assert.equal(danAgentRes.isError, undefined)
+		const danAgentSession = JSON.parse(danAgentRes.content[0].text).session
+		const danWhoamiRes = await executeTool('admin', { action: 'whoami' }, danAgentSession.token)
+		const danWhoami = JSON.parse(danWhoamiRes.content[0].text)
+		assert.equal(danWhoami.session.apps.length, 1)
+		assert.equal(danWhoami.session.apps[0].id, shareId)
+		assert.equal(danWhoami.session.apps[0].type, 'share')
+		assert.equal(danWhoami.session.apps[0].name, 'Acme Global Stripe')
+		assert.equal(danWhoami.session.apps[0].account, 'acct_acme_main')
+		assert.equal(danWhoami.session.apps[0].sharedBy, 'sarah@acme.com')
+		const danToolsRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				authorization: `Bearer ${danAgentSession.token}`
+			},
+			body: JSON.stringify({
+				jsonrpc: '2.0',
+				id: 301,
+				method: 'tools/list',
+				params: {}
+			})
+		})
+		const danTools = (await danToolsRes.json()).result.tools
+		assert.equal(danTools.length, 1)
+		assert.equal(danTools[0].name, 'stripe_api')
+		assert.match(danTools[0].description, /acct_acme_main/)
+		const allowedCustRes = await executeTool('stripe_api', {
+			url: '/v1/customers/cus_shared_1'
+		}, danAgentSession.token)
+		assert.equal(allowedCustRes.isError, undefined)
+		const allowedCustData = JSON.parse(allowedCustRes.content[0].text)
+		assert.equal(allowedCustData.ok, true)
+		assert.equal(allowedCustData.auth, 'Bearer sk_live_sarah_secret_123')
+		const deniedByCeilingRes = await executeTool('stripe_api', {
+			url: '/v1/invoices/inv_1',
+			method: 'POST',
+			body: { amount: 500 }
+		}, danAgentSession.token)
+		assert.equal(deniedByCeilingRes.isError, true, 'POST /v1/invoices/inv_1 is allowed by Dan session link policy, but must be denied by Sarah ceiling policy')
+		assert.match(deniedByCeilingRes.content[0].text, /Policy violation/)
+		const deniedBySessionRes = await executeTool('stripe_api', {
+			url: '/v1/invoices/inv_1',
+			method: 'GET'
+		}, danAgentSession.token)
+		assert.equal(deniedBySessionRes.isError, true, 'GET /v1/invoices/inv_1 is allowed by Sarah ceiling policy, but must be denied by Dan session link policy')
+		assert.match(deniedBySessionRes.content[0].text, /Policy violation/)
+		const danLogsRes = await executeTool('admin', { action: 'list_logs', appId: shareId }, danAdmin.token)
+		const danLogs = JSON.parse(danLogsRes.content[0].text).logs
+		assert.equal(danLogs.length, 3, 'Dan sees all 3 requests when filtering by his shareId')
+		assert.ok(danLogs.every(l => l.appId === shareId), 'Recipient logs resolve appId to shareId and never leak owner upstreamApp.id')
+		assert.ok(danLogs.every(l => l.appId !== sarahApp.id), 'Owner upstreamApp.id is never exposed to recipient')
+		const danAllLogs = JSON.parse((await executeTool('admin', { action: 'list_logs' }, danAdmin.token)).content[0].text).logs
+		assert.equal(danAllLogs.length, 3)
+		assert.ok(danAllLogs.every(l => l.appId === shareId), 'Unfiltered recipient logs also resolve appId to shareId')
+		const danProbeUpstreamIdLogs = JSON.parse((await executeTool('admin', { action: 'list_logs', appId: sarahApp.id }, danAdmin.token)).content[0].text).logs
+		assert.equal(danProbeUpstreamIdLogs.length, 0, 'Recipient filtering by owner upstreamApp.id returns 0 logs')
+		const eve = db.users.upsert({ email: 'eve@acme.com', name: 'Eve' })
+		const eveSession = db.tokens.create({ userId: eve.id, provider: 'self', admin: 1 })
+		const eveSpoofRes = await executeTool('stripe_api', {
+			url: '/v1/customers/spoof_attempt',
+			appId: sarahApp.id
+		}, eveSession.token)
+		assert.equal(eveSpoofRes.isError, true)
+		const sarahLogsRes = await executeTool('admin', { action: 'list_logs', appId: sarahApp.id }, sarahAdmin.token)
+		const sarahLogs = JSON.parse(sarahLogsRes.content[0].text).logs
+		assert.equal(sarahLogs.length, 3, 'Sarah sees all 3 requests made by Dan through her shared app (and 0 spoofed unlinked requests from Eve)')
+		assert.equal(sarahLogs[0].userId, dan.id)
+		assert.equal(sarahLogs[0].appId, sarahApp.id)
+		const expiredOauthApp = db.tokens.create({
+			userId: sarah.id,
+			provider: 'google',
+			type: 'oauth',
+			name: 'Sarah Expired Google',
+			credentials: { accessToken: 'ya29.expired', refreshToken: '1//invalid-refresh', account: 'sarah@acme.com' },
+			expiresAt: Date.now() - 120000
+		})
+		const googleShare = JSON.parse((await executeTool('admin', {
+			action: 'share_app',
+			appId: expiredOauthApp.id,
+			email: 'dan@acme.com',
+			policy: [{ action: 'allow' }]
+		}, sarahAdmin.token)).content[0].text)
+		await executeTool('admin', {
+			action: 'link_app',
+			sessionId: danAgentSession.id,
+			appId: googleShare.shareId
+		}, danAdmin.token)
+		const origFetch = globalThis.fetch
+		globalThis.fetch = async (input, init) => {
+			const u = typeof input === 'string' ? input : input.url
+			if (u === 'https://oauth2.googleapis.com/token') {
+				return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }), {
+					status: 400,
+					headers: { 'content-type': 'application/json' }
+				})
+			}
+			return origFetch(input, init)
+		}
+		try {
+			const refreshFailRes = await executeTool('google_api', {
+				url: 'https://www.googleapis.com/drive/v3/files'
+			}, danAgentSession.token)
+			assert.equal(refreshFailRes.isError, true)
+			assert.match(refreshFailRes.content[0].text, /Ask the app owner \(sarah@acme\.com\) to re-authenticate/)
+			assert.doesNotMatch(refreshFailRes.content[0].text, /reauth_app_id/, 'Shared app refresh failure must not leak upstreamApp.id or broken reauth URL to recipient')
+			assert.equal(refreshFailRes.content[0].text.includes(expiredOauthApp.id), false)
+		} finally {
+			globalThis.fetch = origFetch
+		}
+		await executeTool('admin', {
+			action: 'disconnect_app',
+			appId: expiredOauthApp.id,
+			revoke: false
+		}, sarahAdmin.token)
+		const restShareRes = await fetch(`http://127.0.0.1:${addr.port}/api/shares`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${sarahAdmin.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({
+				appId: sarahApp.id,
+				email: 'chloe@acme.com',
+				policy: [{ action: 'allow', methods: ['GET'], path: '/v1/**' }]
+			})
+		})
+		assert.equal(restShareRes.status, 201)
+		const restShareData = await restShareRes.json()
+		assert.equal(restShareData.shared, true)
+		assert.equal(restShareData.email, 'chloe@acme.com')
+		const restUnshareRes = await fetch(`http://127.0.0.1:${addr.port}/api/shares?appId=${encodeURIComponent(sarahApp.id)}&email=${encodeURIComponent('chloe@acme.com')}`, {
+			method: 'DELETE',
+			headers: {
+				authorization: `Bearer ${sarahAdmin.token}`,
+				'content-type': 'text/plain'
+			},
+			body: 'non-json-payload-ignored-by-delete'
+		})
+		assert.equal(restUnshareRes.status, 200)
+		const restUnshareData = await restUnshareRes.json()
+		assert.equal(restUnshareData.unshared, true)
+		const unshareDanRes = await executeTool('admin', {
+			action: 'unshare_app',
+			appId: sarahApp.id,
+			email: 'dan@acme.com'
+		}, sarahAdmin.token)
+		assert.equal(unshareDanRes.isError, undefined)
+		assert.equal(JSON.parse(unshareDanRes.content[0].text).unshared, true)
+		assert.equal(db.tokens.get(shareId), null, 'Share token is removed on unshare_app')
+		assert.equal(db.links.listBySessionId(danAgentSession.id).length, 0, 'Session links to the share token are cascade-deleted on unshare_app')
+		const danLogsAfterUnshare = JSON.parse((await executeTool('admin', { action: 'list_logs' }, danAdmin.token)).content[0].text).logs
+		assert.ok(danLogsAfterUnshare.length >= 3)
+		assert.ok(danLogsAfterUnshare.every(l => l.appId === null), 'After unshare_app, recipient historical logs resolve appId to null and never leak owner upstreamApp.id')
+		const danProbeAfterUnshare = JSON.parse((await executeTool('admin', { action: 'list_logs', appId: sarahApp.id }, danAdmin.token)).content[0].text).logs
+		assert.equal(danProbeAfterUnshare.length, 0, 'Probing owner upstreamApp.id after unshare_app still returns 0 logs')
+		const sarahLogsAfterUnshare = JSON.parse((await executeTool('admin', { action: 'list_logs', appId: sarahApp.id }, sarahAdmin.token)).content[0].text).logs
+		assert.equal(sarahLogsAfterUnshare.length, 3, 'Owner still sees all historical logs for her upstreamApp.id after unsharing')
+		const afterUnshareProxy = await executeTool('stripe_api', {
+			url: '/v1/customers/cus_shared_1'
+		}, danAgentSession.token)
+		assert.equal(afterUnshareProxy.isError, true)
+		assert.match(afterUnshareProxy.content[0].text, /No Stripe app linked to session/)
+		const reshare2 = JSON.parse((await executeTool('admin', {
+			action: 'share_app',
+			appId: sarahApp.id,
+			email: 'dan@acme.com',
+			policy: [{ action: 'allow' }]
+		}, sarahAdmin.token)).content[0].text)
+		const verifyMagicCode = 'magic_verify_shared_123'
+		db.tokens.createState({
+			email: 'dan@acme.com',
+			admin: 1,
+			magicCode: verifyMagicCode,
+			magicExpiresAt: Date.now() + 600000
+		})
+		const verifyGetRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${verifyMagicCode}`)
+		assert.equal(verifyGetRes.status, 200)
+		const verifyHtml = await verifyGetRes.text()
+		assert.match(verifyHtml, /Acme Global Stripe/)
+		assert.match(verifyHtml, /acct_acme_main/)
+		assert.match(verifyHtml, new RegExp(reshare2.shareId))
+		const verifyPostRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: verifyMagicCode, app_id: reshare2.shareId }).toString()
+		})
+		assert.equal(verifyPostRes.status, 200)
+		const verifyPostText = await verifyPostRes.text()
+		const tokenMatch = verifyPostText.match(/token:\s*([a-f0-9-]+)/)
+		assert.ok(tokenMatch)
+		const verifiedSession = db.tokens.getByToken(tokenMatch[1])
+		assert.equal(db.links.listBySessionId(verifiedSession.id).length, 1)
+		assert.equal(db.links.listBySessionId(verifiedSession.id)[0].appId, reshare2.shareId)
+		await executeTool('admin', {
+			action: 'link_app',
+			sessionId: danAgentSession.id,
+			appId: reshare2.shareId
+		}, danAdmin.token)
+		assert.equal(db.links.listBySessionId(danAgentSession.id).length, 1)
+		const danSelfDisconnect = await executeTool('admin', {
+			action: 'disconnect_app',
+			appId: reshare2.shareId
+		}, danAdmin.token)
+		assert.equal(danSelfDisconnect.isError, undefined)
+		assert.equal(db.tokens.get(reshare2.shareId), null, 'Recipient can disconnect/remove a shared app from their own account')
+		assert.ok(db.tokens.get(sarahApp.id), 'Recipient disconnecting a shared app does not remove owner upstream app')
+		const reshare3 = JSON.parse((await executeTool('admin', {
+			action: 'share_app',
+			appId: sarahApp.id,
+			email: 'dan@acme.com',
+			policy: [{ action: 'allow' }]
+		}, sarahAdmin.token)).content[0].text)
+		await executeTool('admin', {
+			action: 'link_app',
+			sessionId: danAgentSession.id,
+			appId: reshare3.shareId
+		}, danAdmin.token)
+		assert.equal(db.links.listBySessionId(danAgentSession.id).length, 1)
+		await executeTool('admin', {
+			action: 'disconnect_app',
+			appId: sarahApp.id,
+			revoke: false
+		}, sarahAdmin.token)
+		assert.equal(db.tokens.get(reshare3.shareId), null, 'Disconnecting upstream app cleans up all downstream share tokens')
+		assert.equal(db.links.listBySessionId(danAgentSession.id).length, 0, 'Disconnecting upstream app cascade-deletes all recipient session links')
+	} finally {
+		await new Promise(resolve => mockUpstream.close(resolve))
+	}
+})
+
 test('teardown server', (t, done) => {
 	server.close(() => {
 		fs.rmSync(testDbPath, { force: true })
