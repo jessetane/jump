@@ -8,9 +8,11 @@ import { fileURLToPath } from 'node:url'
 import { handleOauth, getBaseUrl } from './oauth.js'
 import { handleMcp } from './mcp.js'
 import { handleRest } from './rest.js'
+import { listAuthProviders } from './providers/index.js'
+import * as db from './db/index.js'
 import { sendJson } from './util.js'
 
-export { server }
+export { server, bootstrapLocalAdmin }
 
 const dirname = path.dirname(fileURLToPath(import.meta.url))
 const host = process.env.HOST || '::1'
@@ -90,7 +92,26 @@ const server = http.createServer(async (req, res) => {
 	}
 })
 
+function bootstrapLocalAdmin () {
+	if (listAuthProviders().length > 0) return null
+	const existing = db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE provider = 'self' AND type = 'bearer' AND token IS NOT NULL").get()
+	if (existing?.count > 0) return null
+	const user = db.users.upsert({ account: 'localhost' })
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		type: 'bearer',
+		name: 'Local Admin',
+		admin: 1
+	})
+	return session
+}
+
 if (process.env.NODE_ENV !== 'test') {
+	const bootstrapped = bootstrapLocalAdmin()
+	if (bootstrapped) {
+		console.log(`[bootstrap] Admin session created for localhost: ${bootstrapped.token}`)
+	}
 	server.listen(port, host, () => {
 		console.log(`jump listening on ${host}:${port}`)
 	})

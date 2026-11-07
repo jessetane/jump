@@ -1,9 +1,6 @@
-import { spawn } from 'node:child_process'
-
 export {
 	getBody,
 	sendJson,
-	sendMail,
 	isAllowedUpstreamHost,
 	validateBaseUrl
 }
@@ -86,47 +83,5 @@ function getBody (req, maxBytes = 1024 * 1024) {
 				resolve(Buffer.concat(buffers).toString('utf8'))
 			}
 		})
-	})
-}
-
-function sendMail (opts = {}) {
-	const { to, subject, text } = opts
-	const cleanFrom = String(process.env.MAIL_FROM || 'jump <noreply@localhost>').replace(/[\r\n]+/g, ' ').trim()
-	const cleanTo = String(to || '').replace(/[\r\n]+/g, ' ').trim()
-	const cleanSubject = String(subject || '').replace(/[\r\n]+/g, ' ').trim()
-	const cmd = process.env.SENDMAIL
-	if (!cmd) {
-		if (process.env.NODE_ENV !== 'test') {
-			console.log(`[sendmail:dev] To: ${cleanTo} | Subject: ${cleanSubject} | Content: ${text}`)
-		}
-		return Promise.resolve({ ok: true, dev: true })
-	}
-	const cleanBody = String(text || '').replace(/\r?\n/g, '\r\n')
-	const message = `From: ${cleanFrom}\r\nTo: ${cleanTo}\r\nSubject: ${cleanSubject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${cleanBody}\r\n`
-	return new Promise((resolve, reject) => {
-		const child = spawn(cmd, {
-			shell: true,
-			stdio: ['pipe', 'ignore', 'pipe'],
-			env: {
-				...process.env,
-				MAIL_FROM: cleanFrom,
-				MAIL_TO: cleanTo,
-				MAIL_SUBJECT: cleanSubject
-			}
-		})
-		let stderr = ''
-		child.stderr.on('data', chunk => {
-			stderr += chunk.toString('utf8')
-		})
-		child.stdin.on('error', () => {})
-		child.on('error', reject)
-		child.on('close', code => {
-			if (code !== 0) {
-				reject(new Error(`SENDMAIL exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ''}`))
-				return
-			}
-			resolve({ ok: true })
-		})
-		child.stdin.end(message)
 	})
 }

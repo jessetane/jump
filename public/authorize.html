@@ -63,8 +63,8 @@
 				color: #333;
 			}
 
-			.form-group input[type=email],
-			.form-group input[type=text] {
+			.form-group input[type=text],
+			.form-group input[type=password] {
 				width: 100%;
 				padding: 10px 12px;
 				font-size: 0.95rem;
@@ -103,7 +103,7 @@
 				border-radius: 6px;
 				font-size: 1rem;
 				cursor: pointer;
-				margin-bottom: 1.5rem;
+				margin-bottom: 0.75rem;
 			}
 
 			button[type=submit]:hover {
@@ -117,10 +117,6 @@
 			<p class="subtitle" id="page-subtitle">Generate bearer token</p>
 			<form id="consent-form" method="POST" action="/oauth/authorize/consent">
 				<div id="hidden-inputs"></div>
-				<div class="form-group" id="email-group">
-					<label for="email">Email Address</label>
-					<input type="email" name="email" id="email" required placeholder="you@example.com">
-				</div>
 				<div class="form-group" id="session-name-group">
 					<label for="session_name">Session Name (optional)</label>
 					<input type="text" name="session_name" id="session_name" placeholder="e.g. Coding Agent, Chef Assistant">
@@ -132,7 +128,11 @@
 					</label>
 					<div class="admin-hint">Grant permission to manage sessions, connect upstream apps, and configure routing policies. Leave unchecked for restricted or untrusted agents.</div>
 				</div>
-				<button type="submit" id="submit-btn">Send magic link</button>
+				<div class="form-group" id="token-group" style="display: none;">
+					<label for="token">Admin Bearer Token</label>
+					<input type="password" name="token" id="token" placeholder="Paste existing admin token">
+				</div>
+				<div id="provider-buttons"></div>
 			</form>
 		</div>
 		<script>
@@ -141,27 +141,55 @@
 			function init () {
 				const params = initData.params || {}
 				const clientName = initData.clientName || null
-				if (params.email) {
-					const emailEl = document.getElementById('email')
-					if (emailEl) emailEl.value = params.email
-				}
+				const providers = Array.isArray(initData.providers) ? initData.providers : []
+				const localAuth = Boolean(initData.localAuth)
 				const nameEl = document.getElementById('session_name')
 				if (params.session_name && nameEl) {
 					nameEl.value = params.session_name
 				} else if (clientName && nameEl) {
 					nameEl.value = clientName
 				}
-				if (clientName) {
-					const subEl = document.getElementById('page-subtitle')
-					if (subEl) subEl.textContent = 'Authorize ' + clientName
+				const subEl = document.getElementById('page-subtitle')
+				if (params.session_id) {
+					const nameGroup = document.getElementById('session-name-group')
+					const adminGroup = document.getElementById('admin-group')
+					if (nameGroup) nameGroup.style.display = 'none'
+					if (adminGroup) adminGroup.style.display = 'none'
+					if (subEl) subEl.textContent = 'Update account sign-in'
+				} else if (clientName && subEl) {
+					subEl.textContent = 'Authorize ' + clientName
 				}
 				if (params.admin !== undefined) {
 					const adminEl = document.getElementById('admin')
 					if (adminEl) adminEl.checked = params.admin === 'true' || params.admin === '1' || params.admin === 'on'
 				}
+				const btnContainer = document.getElementById('provider-buttons')
+				const filteredProviders = params.provider
+					? providers.filter(p => p.id === String(params.provider).toLowerCase())
+					: providers
+				const listToRender = filteredProviders.length > 0 ? filteredProviders : providers
+				for (const p of listToRender) {
+					const btn = document.createElement('button')
+					btn.type = 'submit'
+					btn.name = 'provider'
+					btn.value = p.id
+					btn.textContent = 'Continue with ' + p.name
+					btnContainer.appendChild(btn)
+				}
+				if (localAuth || listToRender.length === 0) {
+					const tokenGroup = document.getElementById('token-group')
+					const tokenInput = document.getElementById('token')
+					if (tokenGroup) tokenGroup.style.display = 'block'
+					if (tokenInput && listToRender.length === 0) tokenInput.required = true
+					const btn = document.createElement('button')
+					btn.type = 'submit'
+					btn.id = 'submit-btn'
+					btn.textContent = 'Continue with Token'
+					btnContainer.appendChild(btn)
+				}
 				const hiddenContainer = document.getElementById('hidden-inputs')
 				for (const [key, value] of Object.entries(params)) {
-					if (key === 'email' || key === 'admin' || key === 'session_name') continue
+					if (key === 'provider' || key === 'token' || key === 'admin' || key === 'session_name') continue
 					const input = document.createElement('input')
 					input.type = 'hidden'
 					input.name = key

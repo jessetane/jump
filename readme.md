@@ -18,9 +18,7 @@ $ npm i
 $ cp .env.example .env
 ```
 
-For upstream OAuth providers (`google`, `github`, etc.), register `https://<host>/oauth/callback` as the redirect URI in the provider's developer console and set `<PROVIDER>_CLIENT_ID` and `<PROVIDER>_CLIENT_SECRET` in `.env`.
-
-For magic-link emails, set `SENDMAIL` (a shell command receiving an RFC 5322 message on `stdin` with `MAIL_FROM`, `MAIL_TO`, and `MAIL_SUBJECT` in the environment, e.g. `sendmail -t -i`) and optionally `MAIL_FROM` in `.env` (when `SENDMAIL` is unset, links are printed to stdout).
+For upstream OAuth providers (`google`, `github`, etc.), register `https://<host>/oauth/callback` as the redirect URI in the provider's developer console and set `<PROVIDER>_CLIENT_ID` and `<PROVIDER>_CLIENT_SECRET` in `.env`. If no OAuth providers are configured, `jump` bootstraps a `localhost` admin bearer token on first startup and prints it to stdout.
 
 ## Usage
 Point an OAuth-capable MCP client at `https://<host>/mcp` and sign in as an admin:
@@ -95,15 +93,15 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 ### Tools
 
 * `<provider>_api({ url, method?, body?, headers?, account?, appId? })` - Proxies an HTTP request to the linked upstream provider.
-* `admin({ action, ... })` - Manages sessions, apps, shares, links, and usage logs (`whoami`, `list`, `get`, `create_session`, `update_session`, `revoke`, `list_apps`, `connect_app`, `disconnect_app`, `update_app`, `share_app`, `unshare_app`, `link_app`, `unlink_app`, `update_email`, `update_user`, `list_logs`). Exposed only to admin sessions.
+* `admin({ action, ... })` - Manages sessions, apps, shares, links, and usage logs (`whoami`, `list`, `get`, `create_session`, `update_session`, `revoke`, `list_apps`, `connect_app`, `disconnect_app`, `update_app`, `share_app`, `unshare_app`, `link_app`, `unlink_app`, `update_user`, `list_logs`). Exposed only to admin sessions.
 
 ## HTTP
 ```
 POST   /mcp                                     # json-rpc mcp endpoint (also POST /)
-GET    /oauth/authorize                         # magic-link sign-in screen
-POST   /oauth/authorize/consent                 # magic-link submission
-GET    /oauth/verify                            # magic-link confirmation screen
-POST   /oauth/verify                            # magic-link verification
+GET    /oauth/authorize                         # oauth / token sign-in screen
+POST   /oauth/authorize/consent                 # oauth / token sign-in submission
+GET    /oauth/verify                            # session activation & app selection screen
+POST   /oauth/verify                            # session activation & app linking
 POST   /oauth/register                          # rfc 7591 dynamic client registration
 POST   /oauth/token                             # oauth 2.0 pkce token exchange
 POST   /oauth/revoke                            # rfc 7009 token revocation
@@ -114,6 +112,7 @@ GET    /.well-known/oauth-protected-resource    # rfc 9728 discovery
 GET    /.well-known/oauth-authorization-server  # rfc 8414 discovery
 GET    /api/health                              # health check
 GET    /api/whoami                              # session & linked apps info
+PATCH  /api/user                                # update user profile or link login provider (admin)
 GET    /api/sessions                            # list sessions (admin)
 POST   /api/sessions                            # create session (admin)
 DELETE /api/sessions                            # revoke session

@@ -1,10 +1,10 @@
-import { createHash, timingSafeEqual, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, timingSafeEqual, randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as db from './db/index.js'
-import { getProvider, summarizeScopes } from './providers/index.js'
-import { getBody, sendJson, sendMail } from './util.js'
+import { getProvider, listAuthProviders, summarizeScopes } from './providers/index.js'
+import { getBody, sendJson } from './util.js'
 
 export {
 	handleOauth,
@@ -377,8 +377,11 @@ async function handleAuthorize (req, res, query) {
 		return
 	}
 	const clientName = deriveClientName(query.client_id, query.client_name)
+	const authProviders = listAuthProviders().map(p => ({ id: p.id, name: p.name }))
 	const initData = {
 		params: query,
+		providers: authProviders,
+		localAuth: authProviders.length === 0,
 		...(clientName && { clientName })
 	}
 	const authorizeHtml = await fs.readFile(path.join(dirname, 'public/authorize.html'), 'utf8')
@@ -397,23 +400,25 @@ async function handleAuthorizeConsent (req, res) {
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
 	const query = {}
-	let email = null
+	let providerName = null
+	let localToken = null
 	let sessionName = null
+	let sessionId = null
 	let admin = 0
 	for (const [key, value] of params.entries()) {
-		if (key === 'email') {
-			email = value.trim().toLowerCase() || null
+		if (key === 'provider') {
+			providerName = value.trim().toLowerCase() || null
+		} else if (key === 'token') {
+			localToken = value.trim() || null
 		} else if (key === 'session_name') {
 			sessionName = value.trim() || null
+		} else if (key === 'session_id') {
+			sessionId = value.trim() || null
 		} else if (key === 'admin') {
 			admin = value === 'true' || value === '1' || value === 'on' ? 1 : 0
 		} else {
 			query[key] = value
 		}
-	}
-	if (!email || !email.includes('@')) {
-		sendJson(res, { error: 'invalid_request', error_description: 'Valid email address is required' }, 400)
-		return
 	}
 	let validation
 	try {
@@ -428,10 +433,55 @@ async function handleAuthorizeConsent (req, res) {
 	const clientState = query.state || null
 	const derivedName = deriveClientName(query.client_id, query.client_name)
 	const effectiveSessionName = sessionName || derivedName || null
-	const magicCode = randomBytes(24).toString('base64url')
-	const magicExpiresAt = Date.now() + (15 * 60 * 1000)
 	const ip = getClientIp(req)
-	db.tokens.createState({
+	const base = getBaseUrl(req)
+	if (localToken && !providerName) {
+		const adminSession = db.tokens.getByToken(localToken)
+		if (!adminSession || !adminSession.admin) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: valid admin bearer token required.')
+			return
+		}
+		const verifyCode = db.tokens.createState({
+			userId: adminSession.userId,
+			account: adminSession.account,
+			clientId,
+			clientRedirectUri,
+			clientState,
+			codeChallenge,
+			codeChallengeMethod,
+			sessionName: effectiveSessionName,
+			admin,
+			ip
+		})
+		res.statusCode = 302
+		res.setHeader('location', `${base}/oauth/verify?code=${verifyCode}`)
+		res.end()
+		return
+	}
+	if (!providerName) {
+		sendJson(res, { error: 'invalid_request', error_description: 'OAuth provider or admin token is required' }, 400)
+		return
+	}
+	const provider = getProvider(providerName)
+	if (!provider || provider.type !== 'oauth' || !provider.buildAuthUrl) {
+		sendJson(res, { error: 'invalid_request', error_description: `Unsupported OAuth provider: ${providerName}` }, 400)
+		return
+	}
+	if (sessionId) {
+		const session = db.tokens.getActiveSession(sessionId)
+		if (!session || !session.admin) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: admin session required.')
+			return
+		}
+	}
+	const callbackUrl = `${base}/oauth/callback`
+	const stateToken = db.tokens.createState({
+		mode: sessionId ? 'auth' : 'login',
+		provider: provider.id,
 		clientId,
 		clientRedirectUri,
 		clientState,
@@ -439,25 +489,25 @@ async function handleAuthorizeConsent (req, res) {
 		codeChallengeMethod,
 		sessionName: effectiveSessionName,
 		admin,
-		email,
-		magicCode,
-		magicExpiresAt,
+		sessionId,
 		ip
 	})
-	const base = getBaseUrl(req)
-	const verifyUrl = `${base}/oauth/verify?code=${magicCode}`
-	await sendMail({
-		to: email,
-		subject: 'Sign in to jump',
-		text: `Click the link below to sign in and activate your MCP session token:\n\n${verifyUrl}\n\nThis link expires in 15 minutes.`
-	})
-	res.statusCode = 200
-	res.setHeader('content-type', 'text/html; charset=utf-8')
-	res.end(renderCardPage(
-		'jump sign in',
-		'Check your email',
-		`<p class="subtitle">A sign-in link has been sent to <strong>${escapeHtml(email)}</strong>.</p>`
-	))
+	let authUrl
+	try {
+		authUrl = provider.buildAuthUrl({
+			state: stateToken,
+			callbackUrl,
+			login: true
+		})
+	} catch (err) {
+		res.statusCode = err.status || 500
+		res.setHeader('content-type', 'text/plain')
+		res.end(err.message)
+		return
+	}
+	res.statusCode = 302
+	res.setHeader('location', authUrl)
+	res.end()
 }
 
 async function handleVerify (req, res, query) {
@@ -469,17 +519,15 @@ async function handleVerify (req, res, query) {
 			res.end('Invalid or expired verification code')
 			return
 		}
-		const state = db.tokens.findStateByMagicCode(code)
-		if (!state) {
+		const state = db.tokens.getState(code)
+		const existingUser = state?.userId ? db.users.get(state.userId) : null
+		if (!state || !existingUser) {
 			res.statusCode = 400
 			res.setHeader('content-type', 'text/plain')
 			res.end('Invalid or expired verification code')
 			return
 		}
-		const existingUser = state.email ? db.users.getByEmail(state.email) : null
-		const userApps = existingUser
-			? db.tokens.listByUserId(existingUser.id).filter(t => t.provider !== 'self')
-			: []
+		const userApps = db.tokens.listByUserId(existingUser.id).filter(t => t.provider !== 'self')
 		let appsHtml = ''
 		if (userApps.length > 0) {
 			const checkedAttr = state.admin ? ' checked' : ''
@@ -494,11 +542,12 @@ async function handleVerify (req, res, query) {
 			appsHtml = `<div class="app-list"><div class="app-list-title">Link connected apps</div>${items}</div>`
 		}
 		const autoSubmitScript = userApps.length === 0 ? '<script>document.forms[0].submit()</script>' : ''
+		const displayAccount = state.account || existingUser.account
 		res.statusCode = 200
 		res.setHeader('content-type', 'text/html; charset=utf-8')
 		res.end(renderCardPage(
 			'jump verify',
-			`Activate session for <strong>${escapeHtml(state.email || 'user')}</strong>`,
+			`Activate session for <strong>${escapeHtml(displayAccount)}</strong>`,
 			`<form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${escapeHtml(code)}">${appsHtml}<button type="submit">Continue</button></form>${autoSubmitScript}`
 		))
 		return
@@ -517,15 +566,14 @@ async function handleVerify (req, res, query) {
 		res.end('Missing verification code.')
 		return
 	}
-	const state = db.tokens.consumeMagicCode(code)
-	if (!state) {
+	const state = db.tokens.consumeState(code)
+	const user = state?.userId ? db.users.get(state.userId) : null
+	if (!state || !user) {
 		res.statusCode = 400
 		res.setHeader('content-type', 'text/plain')
 		res.end('Invalid or expired verification code')
 		return
 	}
-	const email = state.email || 'user@localhost'
-	const user = db.users.upsert({ email })
 	const ip = getClientIp(req)
 	const ua = req.headers['user-agent'] || null
 	const session = db.tokens.create({
@@ -542,7 +590,7 @@ async function handleVerify (req, res, query) {
 	const selectedAppIds = params.getAll('app_id')
 	for (const appId of selectedAppIds) {
 		const app = db.tokens.get(appId)
-		if (app && app.userId === user.id && app.provider !== 'self') {
+		if (app && app.userId === user.id && app.provider !== 'self' && app.type !== 'auth') {
 			db.links.create({
 				sessionId: session.id,
 				appId: app.id
@@ -567,7 +615,7 @@ async function handleVerify (req, res, query) {
 	}
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/plain; charset=utf-8')
-	res.end(`user: ${email}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
+	res.end(`user: ${user.account}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
 }
 
 async function handleProviderConnect (req, res, query, providerName = 'google') {
@@ -626,18 +674,17 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	}
 	const sessionId = params.get('session_id') || null
 	const reauthAppId = params.get('reauth_app_id') || null
+	const session = sessionId ? db.tokens.getActiveSession(sessionId) : null
 	if (reauthAppId) {
-		const session = sessionId ? db.tokens.get(sessionId) : null
 		const existingApp = db.tokens.get(reauthAppId)
-		if (!session || session.provider !== 'self' || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type === 'share') {
+		if (!session || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type === 'share') {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: unauthorized re-authentication request.')
 			return
 		}
 	} else {
-		const session = sessionId ? db.tokens.get(sessionId) : null
-		if (!session || session.provider !== 'self' || !session.admin) {
+		if (!session || !session.admin) {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: admin session required.')
@@ -705,10 +752,80 @@ async function handleCallback (req, res, query) {
 		return
 	}
 	const { accessToken, refreshToken, expiresAt, scopes, account } = exchanged
+	if (oauthState.mode === 'auth') {
+		const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
+		if (!session || !session.admin) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: admin session required.')
+			return
+		}
+		const existingAuths = db.tokens.listAuthByUserId(session.userId)
+		const otherProviderAuths = existingAuths.filter(a => a.provider !== provider.id)
+		const hasSsoLock = otherProviderAuths.some(a => getProvider(a.provider)?.ssoOnly) || (provider.ssoOnly && otherProviderAuths.length > 0)
+		if (hasSsoLock) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: SSO-only provider restriction prevents linking multiple sign-in providers.')
+			return
+		}
+		const cleanAccount = String(account).trim().toLowerCase()
+		const existingAuthUser = db.tokens.resolveUserByAuth(provider.id, cleanAccount, { createIfMissing: false })
+		if (existingAuthUser && existingAuthUser.id !== session.userId) {
+			res.statusCode = 409
+			res.setHeader('content-type', 'text/plain')
+			res.end(`Account ${cleanAccount} is already registered to another user.`)
+			return
+		}
+		const existingAccountUser = db.users.getByAccount(cleanAccount)
+		let targetUserAccount = cleanAccount
+		if (existingAccountUser && existingAccountUser.id !== session.userId) {
+			if (!db.tokens.hasAuthTokens(existingAccountUser.id)) {
+				db.tokens.claimStubUser(existingAccountUser.id, session.userId)
+			} else {
+				targetUserAccount = `${provider.id}:${cleanAccount}`
+			}
+		}
+		db.tokens.upsertAuth({
+			userId: session.userId,
+			provider: provider.id,
+			account: cleanAccount
+		})
+		db.users.updateAccount(session.userId, targetUserAccount)
+		res.statusCode = 200
+		res.setHeader('content-type', 'text/html; charset=utf-8')
+		res.end(renderCardPage(
+			'Account Updated',
+			`Signed in as <strong>${escapeHtml(cleanAccount)}</strong>`,
+			`<p class="subtitle">You can close this window and return to your agent.</p>`
+		))
+		return
+	}
+	if (oauthState.mode === 'login') {
+		const cleanAccount = String(account).trim().toLowerCase()
+		const user = db.tokens.resolveUserByAuth(provider.id, cleanAccount)
+		const verifyCode = db.tokens.createState({
+			userId: user.id,
+			account: cleanAccount,
+			provider: provider.id,
+			clientId: oauthState.clientId,
+			clientRedirectUri: oauthState.clientRedirectUri,
+			clientState: oauthState.clientState,
+			codeChallenge: oauthState.codeChallenge,
+			codeChallengeMethod: oauthState.codeChallengeMethod,
+			sessionName: oauthState.sessionName,
+			admin: oauthState.admin,
+			ip: oauthState.ip
+		})
+		res.statusCode = 302
+		res.setHeader('location', `${base}/oauth/verify?code=${verifyCode}`)
+		res.end()
+		return
+	}
 	if (oauthState.reauthAppId) {
-		const session = oauthState.sessionId ? db.tokens.get(oauthState.sessionId) : null
+		const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
 		const existingApp = db.tokens.get(oauthState.reauthAppId)
-		if (!session || session.provider !== 'self' || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type === 'share') {
+		if (!session || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type === 'share') {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: unauthorized re-authentication request.')
@@ -734,8 +851,8 @@ async function handleCallback (req, res, query) {
 		))
 		return
 	}
-	const session = oauthState.sessionId ? db.tokens.get(oauthState.sessionId) : null
-	if (!session || session.provider !== 'self' || !session.admin) {
+	const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
+	if (!session || !session.admin) {
 		res.statusCode = 403
 		res.setHeader('content-type', 'text/plain')
 		res.end('Access denied: admin session required.')

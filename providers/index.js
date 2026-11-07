@@ -6,6 +6,7 @@ import githubConfig from './github.js'
 export {
 	createProvider,
 	getProvider,
+	listAuthProviders,
 	summarizeScopes,
 	google,
 	github
@@ -124,11 +125,13 @@ function createProvider (config) {
 		}
 	}
 	const envPrefix = id.toUpperCase()
+	const ssoOnly = Boolean(rawConfig.ssoOnly || oauth?.ssoOnly)
 	return {
 		id,
 		name: label,
 		type,
 		baseUrl,
+		ssoOnly,
 		...(services && { services }),
 		toolDescription (baseHint) {
 			if (typeof rawConfig.toolDescription === 'string') return rawConfig.toolDescription
@@ -145,20 +148,22 @@ function createProvider (config) {
 				: 'Target HTTPS URL (or relative path if baseUrl is configured on the app).'
 		},
 		...(oauth && {
-			buildAuthUrl ({ state, callbackUrl, services: selectedServices = [], write = [] }) {
+			buildAuthUrl ({ state, callbackUrl, services: selectedServices = [], write = [], login = false }) {
 				const clientId = process.env[`${envPrefix}_CLIENT_ID`]
 				if (!clientId) {
 					const err = new Error(`${envPrefix}_CLIENT_ID environment variable is missing`)
 					err.status = 500
 					throw err
 				}
-				const scopes = buildScopesFromSelection(services, oauth.baseScopes, selectedServices, write)
+				const scopes = login
+					? (oauth.baseScopes || []).join(' ')
+					: buildScopesFromSelection(services, oauth.baseScopes, selectedServices, write)
 				const u = new URL(oauth.authUrl)
 				u.searchParams.set('client_id', clientId)
 				u.searchParams.set('redirect_uri', callbackUrl)
 				u.searchParams.set('response_type', 'code')
 				if (scopes) u.searchParams.set('scope', scopes)
-				if (oauth.authParams) {
+				if (!login && oauth.authParams) {
 					for (const [k, v] of Object.entries(oauth.authParams)) {
 						u.searchParams.set(k, v)
 					}
@@ -374,4 +379,8 @@ function getProvider (name) {
 	if (!name) return null
 	const key = String(name).toLowerCase()
 	return providers[key] || createProvider(key)
+}
+
+function listAuthProviders () {
+	return Object.values(providers).filter(p => p.type === 'oauth' && Boolean(process.env[`${p.id.toUpperCase()}_CLIENT_ID`]))
 }

@@ -100,6 +100,18 @@ const routes = {
 			sendJson(res, result)
 		}
 	},
+	'/api/user': {
+		async PATCH (req, res, { token, appUrl }) {
+			const body = await parseJsonBody(req)
+			const result = await api.auth.updateUser(token, { ...body, appUrl })
+			sendJson(res, result)
+		},
+		async PUT (req, res, { token, appUrl }) {
+			const body = await parseJsonBody(req)
+			const result = await api.auth.updateUser(token, { ...body, appUrl })
+			sendJson(res, result)
+		}
+	},
 	'/api/sessions': {
 		async GET (req, res, { token, appUrl }) {
 			const result = await api.auth.list(token, { appUrl })
@@ -150,7 +162,7 @@ const routes = {
 		async DELETE (req, res, { token, query, appUrl }) {
 			const result = await api.auth.unshareApp(token, {
 				appId: query.appId,
-				email: query.email,
+				account: query.account,
 				appUrl
 			})
 			sendJson(res, result)

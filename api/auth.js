@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { getProvider } from '../providers/index.js'
+import { getProvider, listAuthProviders } from '../providers/index.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
 import { validateBaseUrl } from '../util.js'
 
@@ -18,7 +18,6 @@ export {
 	unshareApp,
 	linkApp,
 	unlinkApp,
-	updateEmail,
 	updateUser,
 	listLogs,
 	validateBaseUrl
@@ -61,12 +60,17 @@ async function whoami (token, opts = {}) {
 			message: 'Missing or expired Bearer token.'
 		}
 	}
+	const authTokens = db.tokens.listAuthByUserId(session.userId)
 	return {
 		authenticated: true,
 		user: {
 			id: session.userId,
-			email: session.email,
-			name: session.userName
+			account: session.account,
+			name: session.userName,
+			logins: authTokens.map(a => ({
+				provider: a.provider,
+				account: a.credentials?.account || a.name
+			}))
 		},
 		session: formatSession(session)
 	}
@@ -100,7 +104,7 @@ function requireApp (userId, appId, { allowShare = true, requireId = false } = {
 		throw error
 	}
 	const targetApp = db.tokens.get(appId)
-	if (!targetApp || targetApp.userId !== userId || targetApp.provider === 'self' || (!allowShare && targetApp.type === 'share')) {
+	if (!targetApp || targetApp.userId !== userId || targetApp.provider === 'self' || targetApp.type === 'auth' || (!allowShare && targetApp.type === 'share')) {
 		const error = new Error(`App not found: ${appId}`)
 		error.status = 404
 		throw error
@@ -119,20 +123,20 @@ function requireTargetSession (userId, sessionId) {
 }
 
 function requireShareTarget (token, opts = {}) {
-	const { appId, email } = opts
+	const { appId, account } = opts
 	const { session } = requireAdmin(token, opts)
 	if (!appId) {
 		const error = new Error('appId is required')
 		error.status = 400
 		throw error
 	}
-	if (!email || typeof email !== 'string' || !email.includes('@')) {
-		const error = new Error('Valid recipient email address is required')
+	if (!account || typeof account !== 'string' || !account.trim()) {
+		const error = new Error('Valid recipient account identifier is required')
 		error.status = 400
 		throw error
 	}
 	const targetApp = requireApp(session.userId, appId, { allowShare: false })
-	return { session, targetApp, normalizedEmail: email.trim().toLowerCase() }
+	return { session, targetApp, normalizedAccount: account.trim().toLowerCase() }
 }
 
 async function list (token, opts = {}) {
@@ -170,7 +174,7 @@ async function createSession (token, opts = {}) {
 	})
 	for (const appId of (Array.isArray(linkAppIds) ? linkAppIds : [])) {
 		const app = db.tokens.get(appId)
-		if (app && app.userId === session.userId && app.provider !== 'self') {
+		if (app && app.userId === session.userId && app.provider !== 'self' && app.type !== 'auth') {
 			db.links.create({
 				sessionId: newSession.id,
 				appId: app.id,
@@ -257,7 +261,7 @@ async function listApps (token, opts = {}) {
 		if (!sharesByAppId.has(targetAppId)) sharesByAppId.set(targetAppId, [])
 		sharesByAppId.get(targetAppId).push({
 			userId: s.userId,
-			email: s.email,
+			account: s.account,
 			policy: parsePolicy(s.credentials?.policy)
 		})
 	}
@@ -401,41 +405,34 @@ async function unlinkApp (token, opts = {}) {
 	}
 }
 
-async function updateEmail (token, opts = {}) {
-	const newEmail = opts.email || opts.newEmail
-	const { session } = requireAdmin(token, opts, 'Access denied: updating account email requires admin privileges')
-	if (!newEmail || typeof newEmail !== 'string' || !newEmail.includes('@')) {
-		const error = new Error('Valid new email address is required')
-		error.status = 400
-		throw error
-	}
-	const normalizedEmail = newEmail.trim().toLowerCase()
-	const existing = db.users.getByEmail(normalizedEmail)
-	if (existing && existing.id !== session.userId) {
-		const error = new Error(`Email already registered to another account: ${normalizedEmail}`)
-		error.status = 409
-		throw error
-	}
-	const user = db.users.updateEmail(session.userId, normalizedEmail)
-	return {
-		updated: true,
-		user: {
-			id: user.id,
-			email: user.email,
-			name: user.name
+async function updateUser (token, opts = {}) {
+	const { session, appUrl } = requireAdmin(token, opts, 'Access denied: updating user profile requires admin privileges')
+	const { id, account, provider, appUrl: _appUrl, ...updates } = opts
+	let providerDef = null
+	if (provider !== undefined && provider !== null) {
+		providerDef = getProvider(provider)
+		const configured = listAuthProviders().some(p => p.id === providerDef?.id)
+		if (!providerDef || providerDef.type !== 'oauth' || !configured) {
+			const error = new Error(`Invalid or unsupported OAuth provider: ${provider}`)
+			error.status = 400
+			throw error
 		}
 	}
-}
-
-async function updateUser (token, opts = {}) {
-	const { session } = requireAdmin(token, opts, 'Access denied: updating user profile requires admin privileges')
-	const { id, email, appUrl, ...updates } = opts
-	const user = db.users.updateUser(session.userId, updates)
+	if ('name' in updates) {
+		db.users.updateUser(session.userId, { name: updates.name })
+	}
+	if (providerDef) {
+		return {
+			actionRequired: 'oauth_flow',
+			connectUrl: `${appUrl}/oauth/authorize?session_id=${encodeURIComponent(session.id)}&provider=${encodeURIComponent(providerDef.id)}`
+		}
+	}
+	const user = db.users.get(session.userId)
 	return {
 		updated: true,
 		user: {
 			id: user.id,
-			email: user.email,
+			account: user.account,
 			name: user.name
 		}
 	}
@@ -485,9 +482,12 @@ async function updateApp (token, opts = {}) {
 }
 
 async function shareApp (token, opts = {}) {
-	const { policy = null } = opts
-	const { session, targetApp, normalizedEmail } = requireShareTarget(token, opts)
-	if (normalizedEmail === (session.email || '').toLowerCase()) {
+	const { policy = null, provider = null } = opts
+	const { session, targetApp, normalizedAccount } = requireShareTarget(token, opts)
+	const selfAuths = db.tokens.listAuthByUserId(session.userId)
+	const isSelf = normalizedAccount === (session.account || '').toLowerCase() ||
+		selfAuths.some(a => (a.credentials?.account || a.name || '').toLowerCase() === normalizedAccount || (a.token || '').toLowerCase() === normalizedAccount)
+	if (isSelf) {
 		const error = new Error('Cannot share an app with yourself')
 		error.status = 400
 		throw error
@@ -498,7 +498,7 @@ async function shareApp (token, opts = {}) {
 		error.status = 400
 		throw error
 	}
-	const recipient = db.users.upsert({ email: normalizedEmail })
+	const recipient = db.tokens.findUserByAccount(normalizedAccount, provider) || db.users.upsert({ account: normalizedAccount })
 	const share = db.tokens.upsertShare({
 		userId: recipient.id,
 		appId: targetApp.id,
@@ -510,19 +510,20 @@ async function shareApp (token, opts = {}) {
 		shareId: share.id,
 		appId: targetApp.id,
 		userId: recipient.id,
-		email: recipient.email,
+		account: recipient.account,
 		policy: policyCheck.policy
 	}
 }
 
 async function unshareApp (token, opts = {}) {
-	const { targetApp, normalizedEmail } = requireShareTarget(token, opts)
-	const recipient = db.users.getByEmail(normalizedEmail)
+	const { provider = null } = opts
+	const { targetApp, normalizedAccount } = requireShareTarget(token, opts)
+	const recipient = db.tokens.findUserByAccount(normalizedAccount, provider)
 	const removed = recipient ? db.tokens.removeShare(recipient.id, targetApp.id) : false
 	return {
 		unshared: removed,
 		appId: targetApp.id,
-		email: normalizedEmail
+		account: normalizedAccount
 	}
 }
 

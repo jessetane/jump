@@ -35,7 +35,6 @@ const adminTool = {
 					'unlink_app',
 					'update_app',
 					'update_session',
-					'update_email',
 					'update_user',
 					'list_logs'
 				],
@@ -44,10 +43,9 @@ const adminTool = {
 			sessionId: { type: 'string', description: 'Target session token ID.' },
 			appId: { type: 'string', description: 'Target upstream app token ID (used for connect_app, update_app, disconnect_app, share_app, unshare_app, link_app, unlink_app).' },
 			name: { type: 'string', description: 'Human-readable label or user display name.' },
-			account: { type: 'string', description: 'Upstream account or tenant identifier (e.g. email, username, account ID).' },
+			account: { type: 'string', description: 'Upstream account or recipient user account identifier (e.g. email, username, account ID).' },
 			baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or API-key providers (e.g. "https://api.stripe.com").' },
 			apiKey: { type: 'string', description: 'Upstream API credential when connecting an API-key provider: Bearer token, HTTP Basic "user:pass", or query string "?key=val".' },
-			email: { type: 'string', description: 'Target email address (recipient email for share_app/unshare_app, or new account email for update_email).' },
 			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe", "github").' },
 			policy: {
 				type: 'array',
@@ -158,7 +156,6 @@ const adminActions = {
 	unshare_app: (args, token, appUrl) => api.auth.unshareApp(token, { ...args, appUrl }),
 	link_app: (args, token, appUrl) => api.auth.linkApp(token, { ...args, appUrl }),
 	unlink_app: (args, token, appUrl) => api.auth.unlinkApp(token, { ...args, appUrl }),
-	update_email: (args, token, appUrl) => api.auth.updateEmail(token, { ...args, appUrl }),
 	update_user: (args, token, appUrl) => api.auth.updateUser(token, { ...args, appUrl }),
 	list_logs: (args, token, appUrl) => api.auth.listLogs(token, { ...args, appUrl })
 }
