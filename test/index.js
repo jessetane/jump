@@ -12,16 +12,14 @@ process.env.NODE_ENV = 'test'
 process.env.GOOGLE_CLIENT_ID = 'test-client-id'
 process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret'
 process.env.ALLOWED_REDIRECT_DOMAINS = 'localhost,127.0.0.1,chatgpt.com,antigravity.google,antigravity,cursor,vscode'
-delete process.env.SENDMAIL
-delete process.env.MAIL_FROM
 
 fs.rmSync(testDbPath, { force: true })
 fs.rmSync(`${testDbPath}-wal`, { force: true })
 fs.rmSync(`${testDbPath}-shm`, { force: true })
 
-const { server } = await import('../index.js')
+const { server, bootstrapLocalAdmin } = await import('../index.js')
 const db = await import('../db/index.js')
-const { google, github, createProvider, getProvider, summarizeScopes } = await import('../providers/index.js')
+const { google, github, createProvider, getProvider, listAuthProviders, summarizeScopes } = await import('../providers/index.js')
 const { isAllowedUrl: isGoogleAllowedUrl, services: googleServices } = google
 const { isAllowedUrl: isGithubAllowedUrl, services: githubServices } = github
 const { readResponseBody } = await import('../api/proxy.js')
@@ -29,11 +27,10 @@ const { executeTool } = await import('../mcp.js')
 const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
-const { sendMail } = await import('../util.js')
 
 function createTestSession (opts = {}) {
 	const {
-		email = 'user@example.com',
+		account = 'user@example.com',
 		name = 'Test User',
 		admin = false,
 		accessToken = 'ya29.fake-token',
@@ -44,7 +41,7 @@ function createTestSession (opts = {}) {
 		ip = '127.0.0.1',
 		ua = 'TestClient/1.0'
 	} = opts
-	const user = db.users.upsert({ email, name })
+	const user = db.users.upsert({ account, name })
 	const session = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -122,7 +119,7 @@ test('mcp initialize & tools/list and RFC 9728 401 WWW-Authenticate when unauthe
 	})
 	assert.equal(getUnauthRes.status, 401)
 	assert.match(getUnauthRes.headers.get('www-authenticate') || '', /\/\.well-known\/oauth-protected-resource/)
-	const user = db.users.upsert({ email: 'mcp-init@example.com' })
+	const user = db.users.upsert({ account: 'mcp-init@example.com' })
 	const bareSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
 	const authHeaders = {
 		'content-type': 'application/json',
@@ -197,7 +194,7 @@ test('mcp google_api tool requires auth', async () => {
 
 test('mcp rejects tool call without name', async () => {
 	const addr = server.address()
-	const { session } = createTestSession({ email: 'missing-name@example.com' })
+	const { session } = createTestSession({ account: 'missing-name@example.com' })
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: {
@@ -221,7 +218,7 @@ test('mcp rejects tool call without name', async () => {
 
 test('mcp rejects unknown tool call', async () => {
 	const addr = server.address()
-	const { session } = createTestSession({ email: 'unknown-tool@example.com' })
+	const { session } = createTestSession({ account: 'unknown-tool@example.com' })
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: {
@@ -301,7 +298,7 @@ test('summarizeScopes formats provider service scope combinations concisely', ()
 })
 
 test('rejects non-googleapis URLs in google_api tool', async () => {
-	const { session } = createTestSession({ email: 'user@example.com' })
+	const { session } = createTestSession({ account: 'user@example.com' })
 	const result = await executeTool('google_api', {
 		url: 'https://evil.com/steal-token'
 	}, session.token)
@@ -310,7 +307,7 @@ test('rejects non-googleapis URLs in google_api tool', async () => {
 })
 
 test('mcp google_api tool ignores body on GET requests', async () => {
-	const { session } = createTestSession({ email: 'getbody@example.com' })
+	const { session } = createTestSession({ account: 'getbody@example.com' })
 	const result = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/drive/v3/files',
 		method: 'GET',
@@ -333,7 +330,7 @@ test('oauth state flow', async () => {
 })
 
 test('oauth code exchange flow', async () => {
-	const { session } = createTestSession({ email: 'test@example.com', name: 'Test User' })
+	const { session } = createTestSession({ account: 'test@example.com', name: 'Test User' })
 	const code = db.tokens.createAuthCode({
 		sessionId: session.id,
 		clientRedirectUri: 'https://chatgpt.com/callback'
@@ -389,7 +386,7 @@ test('oauth code exchange flow', async () => {
 
 test('oauth refresh_token grant rotation, access_token expiration, and embedded session indefinite TTL', async () => {
 	const addr = server.address()
-	const { session } = createTestSession({ email: 'refresh-flow@example.com', name: 'Refresh User', admin: true })
+	const { session } = createTestSession({ account: 'refresh-flow@example.com', name: 'Refresh User', admin: true })
 	const code = db.tokens.createAuthCode({
 		sessionId: session.id,
 		clientRedirectUri: 'https://chatgpt.com/callback'
@@ -557,22 +554,43 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
-			email: 'embedded-oauth@example.com',
+			provider: 'google',
 			client_id: bearerRegData.client_id,
 			redirect_uri: 'http://localhost:8080/cb',
 			code_challenge: bearerChallenge,
 			code_challenge_method: 'S256'
-		}).toString()
+		}).toString(),
+		redirect: 'manual'
 	})
-	assert.equal(bearerConsentRes.status, 200)
-	const bearerStateRow = db.sqlite.prepare("SELECT * FROM tokens WHERE type = 'oauth_state' AND json_extract(credentials, '$.email') = ?").get('embedded-oauth@example.com')
-	const bearerState = db.tokens.getState(bearerStateRow.id)
+	assert.equal(bearerConsentRes.status, 302)
+	const bearerStateToken = new URL(bearerConsentRes.headers.get('location')).searchParams.get('state')
+	const bearerState = db.tokens.getState(bearerStateToken)
 	assert.equal(bearerState.clientId, bearerRegData.client_id)
 	assert.equal(bearerState.sessionName, null, 'DCR client_id without explicit name must not pollute sessionName')
+	const origFetch = globalThis.fetch
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://oauth2.googleapis.com/token') {
+			return new Response(JSON.stringify({ access_token: 'ya29.embedded_login', token_type: 'Bearer' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+			return new Response(JSON.stringify({ email: 'embedded-oauth@example.com' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		return origFetch(input, init)
+	}
+	let verifyLoc
+	try {
+		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=google-code&state=${bearerStateToken}`, { redirect: 'manual' })
+		assert.equal(cbRes.status, 302)
+		verifyLoc = cbRes.headers.get('location')
+	} finally {
+		globalThis.fetch = origFetch
+	}
+	const verifyMagicCode = new URL(verifyLoc).searchParams.get('code')
 	const bearerVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ code: bearerState.magicCode }).toString(),
+		body: new URLSearchParams({ code: verifyMagicCode }).toString(),
 		redirect: 'manual'
 	})
 	assert.equal(bearerVerifyRes.status, 302)
@@ -680,7 +698,7 @@ test('well-known oauth discovery endpoints', async () => {
 })
 
 test('oauth pkce flow with S256', async () => {
-	const { session } = createTestSession({ email: 'pkce@example.com', name: 'PKCE User' })
+	const { session } = createTestSession({ account: 'pkce@example.com', name: 'PKCE User' })
 	const addr = server.address()
 	const verifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
 	const challenge = createHash('sha256').update(verifier).digest('base64url')
@@ -793,7 +811,7 @@ test('oauth pkce authorize endpoint validation and stateless rendering', async (
 	assert.doesNotMatch(authHtml, /consent_token/)
 })
 
-test('oauth consent html page, post consent, and scanner-safe two-step verify flow', async () => {
+test('oauth consent html page, post consent, callback login, and scanner-safe two-step verify flow', async () => {
 	const addr = server.address()
 	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
 	const pageRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?redirect_uri=https://chatgpt.com/callback&state=client-state-123&code_challenge=${challenge}&code_challenge_method=S256`)
@@ -805,7 +823,7 @@ test('oauth consent html page, post consent, and scanner-safe two-step verify fl
 	assert.match(html, /"redirect_uri":"https:\/\/chatgpt\.com\/callback"/)
 	assert.match(html, /"state":"client-state-123"/)
 	const consentBody = new URLSearchParams({
-		email: 'agent@example.com',
+		provider: 'google',
 		redirect_uri: 'https://chatgpt.com/callback',
 		state: 'client-state-123',
 		code_challenge: challenge,
@@ -818,26 +836,50 @@ test('oauth consent html page, post consent, and scanner-safe two-step verify fl
 		body: consentBody.toString(),
 		redirect: 'manual'
 	})
-	assert.equal(consentRes.status, 200)
-	const consentText = await consentRes.text()
-	assert.match(consentText, /Check your email/)
-	const row = db.sqlite.prepare("SELECT * FROM tokens WHERE type = 'oauth_state' AND json_extract(credentials, '$.email') = ?").get('agent@example.com')
-	assert.ok(row)
-	const stateObj = db.tokens.getState(row.id)
+	assert.equal(consentRes.status, 302)
+	const googleAuthUrl = new URL(consentRes.headers.get('location'))
+	assert.equal(googleAuthUrl.hostname, 'accounts.google.com')
+	assert.equal(googleAuthUrl.searchParams.get('access_type'), null, 'Login redirect must not request offline refresh tokens')
+	assert.equal(googleAuthUrl.searchParams.get('prompt'), null, 'Login redirect must not force consent prompt')
+	const loginStateToken = googleAuthUrl.searchParams.get('state')
+	assert.ok(loginStateToken)
+	const stateObj = db.tokens.getState(loginStateToken)
+	assert.equal(stateObj.mode, 'login')
 	assert.equal(stateObj.clientRedirectUri, 'https://chatgpt.com/callback')
 	assert.equal(stateObj.sessionName, 'Coding Agent')
-	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${stateObj.magicCode}`, {
+	const origFetch = globalThis.fetch
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://oauth2.googleapis.com/token') {
+			return new Response(JSON.stringify({ access_token: 'ya29.login', token_type: 'Bearer' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+			return new Response(JSON.stringify({ email: 'agent@example.com' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		return origFetch(input, init)
+	}
+	let verifyLocation
+	try {
+		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=google-auth-code&state=${loginStateToken}`, { redirect: 'manual' })
+		assert.equal(cbRes.status, 302)
+		verifyLocation = cbRes.headers.get('location')
+	} finally {
+		globalThis.fetch = origFetch
+	}
+	const verifyCode = new URL(verifyLocation).searchParams.get('code')
+	assert.ok(verifyCode)
+	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${verifyCode}`, {
 		redirect: 'manual'
 	})
 	assert.equal(getVerifyRes.status, 200)
 	assert.equal(getVerifyRes.headers.get('content-type'), 'text/html; charset=utf-8')
 	const getVerifyHtml = await getVerifyRes.text()
 	assert.match(getVerifyHtml, /<form method="POST" action="\/oauth\/verify">/)
-	assert.ok(db.tokens.findStateByMagicCode(stateObj.magicCode), 'GET /oauth/verify must not consume magicCode')
+	assert.ok(db.tokens.getState(verifyCode), 'GET /oauth/verify must not consume verify state')
 	const postVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ code: stateObj.magicCode }).toString(),
+		body: new URLSearchParams({ code: verifyCode }).toString(),
 		redirect: 'manual'
 	})
 	assert.equal(postVerifyRes.status, 302)
@@ -847,8 +889,8 @@ test('oauth consent html page, post consent, and scanner-safe two-step verify fl
 	assert.equal(targetUrl.searchParams.get('state'), 'client-state-123')
 	const code = targetUrl.searchParams.get('code')
 	assert.ok(code)
-	assert.equal(db.tokens.findStateByMagicCode(stateObj.magicCode), null, 'POST /oauth/verify must consume magicCode')
-	const agentUser = db.users.getByEmail('agent@example.com')
+	assert.equal(db.tokens.getState(verifyCode), null, 'POST /oauth/verify must consume verify state')
+	const agentUser = db.users.getByAccount('agent@example.com')
 	const unexchangedSessions = db.tokens.listByUserId(agentUser.id, { provider: 'self' })
 	assert.deepEqual(unexchangedSessions, [], 'listByUserId must filter out unexchanged pending self sessions')
 	const codeRow = db.sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_code'").get(code)
@@ -868,7 +910,7 @@ test('direct browser authorize without redirect_uri', async () => {
 	assert.match(html, /Generate bearer token/)
 	assert.match(html, /action="\/oauth\/authorize\/consent"/)
 	const consentBody = new URLSearchParams({
-		email: 'browser@example.com',
+		provider: 'google',
 		session_name: 'Browser Session'
 	})
 	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
@@ -877,26 +919,43 @@ test('direct browser authorize without redirect_uri', async () => {
 		body: consentBody.toString(),
 		redirect: 'manual'
 	})
-	assert.equal(consentRes.status, 200)
-	const consentText = await consentRes.text()
-	assert.match(consentText, /Check your email/)
-	const row = db.sqlite.prepare("SELECT * FROM tokens WHERE type = 'oauth_state' AND json_extract(credentials, '$.email') = ?").get('browser@example.com')
-	assert.ok(row)
-	const stateObj = db.tokens.getState(row.id)
+	assert.equal(consentRes.status, 302)
+	const loginStateToken = new URL(consentRes.headers.get('location')).searchParams.get('state')
+	const stateObj = db.tokens.getState(loginStateToken)
 	assert.equal(stateObj.sessionName, 'Browser Session')
-	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${stateObj.magicCode}`)
+	const origFetch = globalThis.fetch
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://oauth2.googleapis.com/token') {
+			return new Response(JSON.stringify({ access_token: 'ya29.browser', token_type: 'Bearer' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+			return new Response(JSON.stringify({ email: 'browser@example.com' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		return origFetch(input, init)
+	}
+	let verifyLoc
+	try {
+		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=browser-code&state=${loginStateToken}`, { redirect: 'manual' })
+		assert.equal(cbRes.status, 302)
+		verifyLoc = cbRes.headers.get('location')
+	} finally {
+		globalThis.fetch = origFetch
+	}
+	const magicCode = new URL(verifyLoc).searchParams.get('code')
+	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${magicCode}`)
 	assert.equal(getVerifyRes.status, 200)
 	assert.match(await getVerifyRes.text(), /<form method="POST" action="\/oauth\/verify">/)
 	const postVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ code: stateObj.magicCode }).toString()
+		body: new URLSearchParams({ code: magicCode }).toString()
 	})
 	assert.equal(postVerifyRes.status, 200)
 	const verifyText = await postVerifyRes.text()
-	assert.match(verifyText, /user: browser@example.com/)
+	assert.match(verifyText, /user: browser@example\.com/)
 	assert.match(verifyText, /Authorization: Bearer/)
-	const browserUser = db.users.getByEmail('browser@example.com')
+	const browserUser = db.users.getByAccount('browser@example.com')
 	const browserSessions = db.tokens.listByUserId(browserUser.id, { provider: 'self' })
 	assert.equal(browserSessions.length, 1)
 	assert.equal(browserSessions[0].expiresAt, null, 'Direct browser verify without redirect_uri must have expiresAt: null')
@@ -904,8 +963,8 @@ test('direct browser authorize without redirect_uri', async () => {
 
 test('google provider connect screen and consent flow', async () => {
 	const addr = server.address()
-	const { session } = createTestSession({ email: 'connect-flow@example.com', admin: true })
-	const { session: workerSession, app: nonSelfToken } = createTestSession({ email: 'nonself-consent@example.com', admin: false })
+	const { session } = createTestSession({ account: 'connect-flow@example.com', admin: true })
+	const { session: workerSession, app: nonSelfToken } = createTestSession({ account: 'nonself-consent@example.com', admin: false })
 	const connectRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?session_id=${session.id}`)
 	assert.equal(connectRes.status, 200)
 	const connectHtml = await connectRes.text()
@@ -990,7 +1049,7 @@ test('not found returns 404 json', async () => {
 
 test('unknown rpc method returns -32601 error', async () => {
 	const addr = server.address()
-	const { session } = createTestSession({ email: 'unknown-rpc@example.com' })
+	const { session } = createTestSession({ account: 'unknown-rpc@example.com' })
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: {
@@ -1012,7 +1071,7 @@ test('unknown rpc method returns -32601 error', async () => {
 
 test('mcp invalid json returns jsonrpc parse error', async () => {
 	const addr = server.address()
-	const { session } = createTestSession({ email: 'invalid-json@example.com' })
+	const { session } = createTestSession({ account: 'invalid-json@example.com' })
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'POST',
 		headers: {
@@ -1028,7 +1087,7 @@ test('mcp invalid json returns jsonrpc parse error', async () => {
 
 test('mcp non-POST request returns 405 Method Not Allowed', async () => {
 	const addr = server.address()
-	const { session } = createTestSession({ email: 'non-post@example.com' })
+	const { session } = createTestSession({ account: 'non-post@example.com' })
 	const res = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
 		method: 'GET',
 		headers: { authorization: `Bearer ${session.token}` }
@@ -1096,7 +1155,7 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 		body: new URLSearchParams({ token: 'nonexistent-token' }).toString()
 	})
 	assert.equal(unknownRes.status, 200)
-	const { session, app: sharedApp } = createTestSession({ email: 'revoke-endpoint@example.com' })
+	const { session, app: sharedApp } = createTestSession({ account: 'revoke-endpoint@example.com' })
 	assert.ok(db.tokens.get(session.id))
 	assert.ok(db.tokens.get(sharedApp.id))
 	const revokeRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
@@ -1107,7 +1166,7 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 	assert.equal(revokeRes.status, 200)
 	assert.equal(db.tokens.get(session.id), null)
 	assert.ok(db.tokens.get(sharedApp.id), 'Revoking a session via /oauth/revoke must not delete shared upstream app credentials')
-	const { session: sessionJson } = createTestSession({ email: 'revoke-json@example.com' })
+	const { session: sessionJson } = createTestSession({ account: 'revoke-json@example.com' })
 	assert.ok(db.tokens.get(sessionJson.id))
 	const revokeJsonRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
 		method: 'POST',
@@ -1116,7 +1175,7 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 	})
 	assert.equal(revokeJsonRes.status, 200)
 	assert.equal(db.tokens.get(sessionJson.id), null)
-	const { session: sessionRefreshRevoke, app: refreshSharedApp } = createTestSession({ email: 'revoke-refresh@example.com' })
+	const { session: sessionRefreshRevoke, app: refreshSharedApp } = createTestSession({ account: 'revoke-refresh@example.com' })
 	const issuedRefresh = db.tokens.issueOauthTokens(sessionRefreshRevoke.id)
 	assert.ok(issuedRefresh.credentials?.refreshToken)
 	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id = ?').run(Date.now() - 5000, sessionRefreshRevoke.id)
@@ -1131,7 +1190,7 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 })
 
 test('mcp auth whoami, list, and revoke', async () => {
-	const user = db.users.upsert({ email: 'sessions-tool@example.com' })
+	const user = db.users.upsert({ account: 'sessions-tool@example.com' })
 	const session1 = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -1334,7 +1393,7 @@ test('executeTool google_api enforces link policy and auth tools decode policy',
 		}
 	]
 	const { session } = createTestSession({
-		email: 'policy-test@example.com',
+		account: 'policy-test@example.com',
 		admin: true,
 		policy: policyObj
 	})
@@ -1716,7 +1775,7 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	assert.match(unauthData.signInUrl, /\/oauth\/authorize/)
 	const unauthSessions = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`)
 	assert.equal(unauthSessions.status, 401)
-	const user = db.users.upsert({ email: 'rest-test@example.com' })
+	const user = db.users.upsert({ account: 'rest-test@example.com' })
 	const session1 = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -1744,7 +1803,7 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	const whoamiData = await whoamiRes.json()
 	assert.equal(whoamiData.authenticated, true)
 	assert.equal(whoamiData.user.id, user.id)
-	assert.equal(whoamiData.user.email, 'rest-test@example.com')
+	assert.equal(whoamiData.user.account, 'rest-test@example.com')
 	assert.equal(whoamiData.session.id, session1.id)
 	const listRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
 		headers: { authorization: `Bearer ${session1.token}` }
@@ -1785,13 +1844,13 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 })
 
 test('mcp admin tool with whoami and get actions', async () => {
-	const { user, session } = createTestSession({ email: 'mcp-whoami@example.com' })
+	const { user, session } = createTestSession({ account: 'mcp-whoami@example.com' })
 	const whoamiResult = await executeTool('admin', { action: 'whoami' }, session.token)
 	assert.equal(whoamiResult.isError, undefined)
 	const parsedWhoami = JSON.parse(whoamiResult.content[0].text)
 	assert.equal(parsedWhoami.authenticated, true)
 	assert.equal(parsedWhoami.user.id, user.id)
-	assert.equal(parsedWhoami.user.email, 'mcp-whoami@example.com')
+	assert.equal(parsedWhoami.user.account, 'mcp-whoami@example.com')
 	assert.equal(parsedWhoami.session.id, session.id)
 	const getResult = await executeTool('admin', { action: 'get', sessionId: session.id }, session.token)
 	assert.equal(getResult.isError, undefined)
@@ -1802,7 +1861,7 @@ test('mcp admin tool with whoami and get actions', async () => {
 
 test('transparent rest proxy /api/google/*', async () => {
 	const addr = server.address()
-	const { session } = createTestSession({ email: 'rest-proxy@example.com' })
+	const { session } = createTestSession({ account: 'rest-proxy@example.com' })
 	const notFoundRes = await fetch(`http://127.0.0.1:${addr.port}/api/google`, {
 		headers: { authorization: `Bearer ${session.token}` }
 	})
@@ -1817,7 +1876,7 @@ test('transparent rest proxy /api/google/*', async () => {
 
 test('mcp tools/list filtering based on session admin status', async () => {
 	const addr = server.address()
-	const user = db.users.upsert({ email: 'mcp-tools-filter@example.com' })
+	const user = db.users.upsert({ account: 'mcp-tools-filter@example.com' })
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -1872,7 +1931,7 @@ test('mcp tools/list filtering based on session admin status', async () => {
 })
 
 test('non-admin session auth restrictions and self-management', async () => {
-	const user = db.users.upsert({ email: 'non-admin-auth@example.com' })
+	const user = db.users.upsert({ account: 'non-admin-auth@example.com' })
 	const session1 = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -1916,7 +1975,7 @@ test('oauth consent flow with admin parameter', async () => {
 	const addr = server.address()
 	const challenge = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM'
 	const consentAdmin = new URLSearchParams({
-		email: 'admin-param@example.com',
+		provider: 'google',
 		redirect_uri: 'https://chatgpt.com/callback',
 		state: 'client-state-admin',
 		code_challenge: challenge,
@@ -1929,12 +1988,13 @@ test('oauth consent flow with admin parameter', async () => {
 		body: consentAdmin.toString(),
 		redirect: 'manual'
 	})
-	assert.equal(consentAdminRes.status, 200)
-	const rowAdmin = db.sqlite.prepare("SELECT * FROM tokens WHERE type = 'oauth_state' AND json_extract(credentials, '$.email') = ?").get('admin-param@example.com')
+	assert.equal(consentAdminRes.status, 302)
+	const stateAdminToken = new URL(consentAdminRes.headers.get('location')).searchParams.get('state')
+	const rowAdmin = db.tokens.get(stateAdminToken)
 	assert.ok(rowAdmin)
-	assert.equal(rowAdmin.admin, 1)
+	assert.equal(rowAdmin.admin, true)
 	const consentNoAdmin = new URLSearchParams({
-		email: 'no-admin-param@example.com',
+		provider: 'google',
 		redirect_uri: 'https://chatgpt.com/callback',
 		state: 'client-state-no-admin',
 		code_challenge: challenge,
@@ -1946,15 +2006,16 @@ test('oauth consent flow with admin parameter', async () => {
 		body: consentNoAdmin.toString(),
 		redirect: 'manual'
 	})
-	assert.equal(consentNoAdminRes.status, 200)
-	const rowNoAdmin = db.sqlite.prepare("SELECT * FROM tokens WHERE type = 'oauth_state' AND json_extract(credentials, '$.email') = ?").get('no-admin-param@example.com')
+	assert.equal(consentNoAdminRes.status, 302)
+	const stateNoAdminToken = new URL(consentNoAdminRes.headers.get('location')).searchParams.get('state')
+	const rowNoAdmin = db.tokens.get(stateNoAdminToken)
 	assert.ok(rowNoAdmin)
-	assert.equal(rowNoAdmin.admin, 0)
+	assert.equal(rowNoAdmin.admin, false)
 })
 
-test('magic link admin verification flow (/oauth/verify) with connected app selection and JSON token exchange', async () => {
+test('admin verification flow (/oauth/verify) with connected app selection and JSON token exchange', async () => {
 	const addr = server.address()
-	const existingUser = db.users.upsert({ email: 'magic-admin@example.com' })
+	const existingUser = db.users.upsert({ account: 'magic-admin@example.com' })
 	const existingApp = db.tokens.create({
 		userId: existingUser.id,
 		provider: 'google',
@@ -1964,17 +2025,24 @@ test('magic link admin verification flow (/oauth/verify) with connected app sele
 		scopes: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.readonly',
 		expiresAt: Date.now() + 3600000
 	})
-	const magicCode = 'test-magic-code-123'
-	db.tokens.createState({
-		email: 'magic-admin@example.com',
+	const stateWithoutUser = db.tokens.createState({ account: 'missing-user@example.com' })
+	const invalidGetVerify = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${stateWithoutUser}`)
+	assert.equal(invalidGetVerify.status, 400, 'GET /oauth/verify must fail loud with 400 when state has no valid userId')
+	const invalidPostVerify = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ code: stateWithoutUser }).toString()
+	})
+	assert.equal(invalidPostVerify.status, 400, 'POST /oauth/verify must fail loud with 400 when state has no valid userId')
+	const verifyCode = db.tokens.createState({
+		userId: existingUser.id,
+		account: 'magic-admin@example.com',
 		sessionName: 'Admin Magic Session',
 		admin: 1,
 		clientRedirectUri: 'https://antigravity.google/oauth-callback',
-		clientState: 'magic-state-abc',
-		magicCode,
-		magicExpiresAt: Date.now() + 600000
+		clientState: 'magic-state-abc'
 	})
-	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${magicCode}`, {
+	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${verifyCode}`, {
 		redirect: 'manual'
 	})
 	assert.equal(getVerifyRes.status, 200)
@@ -1983,7 +2051,7 @@ test('magic link admin verification flow (/oauth/verify) with connected app sele
 	assert.match(verifyHtml, /Personal Google · drive \(rw\), gmail \(ro\)/)
 	assert.match(verifyHtml, new RegExp(`value="${existingApp.id}" checked`))
 	const verifyBody = new URLSearchParams({
-		code: magicCode,
+		code: verifyCode,
 		app_id: existingApp.id
 	})
 	const verifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
@@ -2024,7 +2092,7 @@ test('magic link admin verification flow (/oauth/verify) with connected app sele
 })
 
 test('30-day dormancy pruning scopes only expiring self sessions and exempts static bearer sessions', () => {
-	const user = db.users.upsert({ email: 'dormancy@example.com' })
+	const user = db.users.upsert({ account: 'dormancy@example.com' })
 	const oldDate = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000).toISOString()
 	const activeSession = db.tokens.create({
 		userId: user.id,
@@ -2058,7 +2126,7 @@ test('30-day dormancy pruning scopes only expiring self sessions and exempts sta
 })
 
 test('admin tool administrative actions: create_session, list_apps, connect_app, link_app, unlink_app', async () => {
-	const user = db.users.upsert({ email: 'admin-actions@example.com' })
+	const user = db.users.upsert({ account: 'admin-actions@example.com' })
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2144,7 +2212,7 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(unlinkRes.isError, undefined)
 	const unlinkData = JSON.parse(unlinkRes.content[0].text)
 	assert.equal(unlinkData.unlinked, true)
-	const otherTenant = db.users.upsert({ email: 'other-tenant@example.com' })
+	const otherTenant = db.users.upsert({ account: 'other-tenant@example.com' })
 	const otherAdmin = db.tokens.create({ userId: otherTenant.id, provider: 'self', admin: 1 })
 	const crossTenantUnlinkSessionRes = await executeTool('admin', {
 		action: 'unlink_app',
@@ -2174,7 +2242,7 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 })
 
 test('multi-account disambiguation in google_api tool', async () => {
-	const user = db.users.upsert({ email: 'multi-account@example.com' })
+	const user = db.users.upsert({ account: 'multi-account@example.com' })
 	const session = db.tokens.create({
 		userId: user.id,
 		provider: 'self'
@@ -2207,8 +2275,8 @@ test('multi-account disambiguation in google_api tool', async () => {
 
 test('in-place upstream re-auth flow enforces ownership and updates app credentials without changing session token', async () => {
 	const addr = server.address()
-	const user = db.users.upsert({ email: 'reauth@example.com' })
-	const otherUser = db.users.upsert({ email: 'attacker@example.com' })
+	const user = db.users.upsert({ account: 'reauth@example.com' })
+	const otherUser = db.users.upsert({ account: 'attacker@example.com' })
 	const session = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2271,7 +2339,7 @@ test('in-place upstream re-auth flow enforces ownership and updates app credenti
 
 test('rest api /api/apps and /api/links endpoints', async () => {
 	const addr = server.address()
-	const user = db.users.upsert({ email: 'rest-apps@example.com' })
+	const user = db.users.upsert({ account: 'rest-apps@example.com' })
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2332,55 +2400,10 @@ test('rest api /api/apps and /api/links endpoints', async () => {
 	assert.equal(db.tokens.get(newAppId), null)
 })
 
-test('admin update_email action', async () => {
-	const user1 = db.users.upsert({ email: 'email-owner@example.com', name: 'Original User' })
-	const adminSession = db.tokens.create({
-		userId: user1.id,
-		provider: 'self',
-		admin: 1
-	})
-	const workerSession = db.tokens.create({
-		userId: user1.id,
-		provider: 'self',
-		admin: 0
-	})
-	db.users.upsert({ email: 'taken@example.com', name: 'Other User' })
-	const nonAdminRes = await executeTool('admin', {
-		action: 'update_email',
-		email: 'new-email@example.com'
-	}, workerSession.token)
-	assert.equal(nonAdminRes.isError, true)
-	assert.match(nonAdminRes.content[0].text, /requires admin privileges/)
-	const invalidEmailRes = await executeTool('admin', {
-		action: 'update_email',
-		email: 'not-an-email'
-	}, adminSession.token)
-	assert.equal(invalidEmailRes.isError, true)
-	assert.match(invalidEmailRes.content[0].text, /Valid new email address is required/)
-	const conflictRes = await executeTool('admin', {
-		action: 'update_email',
-		email: 'taken@example.com'
-	}, adminSession.token)
-	assert.equal(conflictRes.isError, true)
-	assert.match(conflictRes.content[0].text, /already registered/)
-	const successRes = await executeTool('admin', {
-		action: 'update_email',
-		email: 'updated-email@example.com'
-	}, adminSession.token)
-	assert.equal(successRes.isError, undefined)
-	const successData = JSON.parse(successRes.content[0].text)
-	assert.equal(successData.updated, true)
-	assert.equal(successData.user.id, user1.id)
-	assert.equal(successData.user.email, 'updated-email@example.com')
-	const updatedUser = db.users.get(user1.id)
-	assert.equal(updatedUser.email, 'updated-email@example.com')
-	const whoamiRes = await executeTool('admin', { action: 'whoami' }, adminSession.token)
-	const whoamiData = JSON.parse(whoamiRes.content[0].text)
-	assert.equal(whoamiData.user.email, 'updated-email@example.com')
-})
-
-test('admin update_user action', async () => {
-	const user = db.users.upsert({ email: 'user-props@example.com', name: 'Initial Name' })
+test('admin update_user action with name and multi-key OAuth provider linking + ssoOnly', async () => {
+	const addr = server.address()
+	const user = db.users.upsert({ account: 'user-props@example.com', name: 'Initial Name' })
+	db.tokens.upsertAuth({ userId: user.id, provider: 'google', account: 'user-props@example.com' })
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2400,23 +2423,257 @@ test('admin update_user action', async () => {
 	const updateRes = await executeTool('admin', {
 		action: 'update_user',
 		id: 'fake-id-attempt',
-		email: 'fake-email-attempt@example.com',
+		account: 'fake-account-attempt@example.com',
 		name: 'Jesse Tane'
 	}, adminSession.token)
 	assert.equal(updateRes.isError, undefined)
 	const updateData = JSON.parse(updateRes.content[0].text)
 	assert.equal(updateData.updated, true)
 	assert.equal(updateData.user.id, user.id)
-	assert.equal(updateData.user.email, 'user-props@example.com')
+	assert.equal(updateData.user.account, 'user-props@example.com')
 	assert.equal(updateData.user.name, 'Jesse Tane')
 	const whoamiRes = await executeTool('admin', { action: 'whoami' }, adminSession.token)
 	const whoamiData = JSON.parse(whoamiRes.content[0].text)
 	assert.equal(whoamiData.user.name, 'Jesse Tane')
-	assert.equal(whoamiData.user.email, 'user-props@example.com')
+	assert.equal(whoamiData.user.account, 'user-props@example.com')
+	assert.deepEqual(whoamiData.user.logins, [{ provider: 'google', account: 'user-props@example.com' }])
+	const invalidProviderRes = await executeTool('admin', {
+		action: 'update_user',
+		name: 'Should Not Persist',
+		provider: 'stripe'
+	}, adminSession.token)
+	assert.equal(invalidProviderRes.isError, true)
+	assert.match(invalidProviderRes.content[0].text, /Invalid or unsupported OAuth provider/)
+	assert.equal(db.users.get(user.id).name, 'Jesse Tane', 'update_user must validate provider before mutating name')
+	delete process.env.GITHUB_CLIENT_ID
+	const unconfiguredProviderRes = await executeTool('admin', {
+		action: 'update_user',
+		provider: 'github'
+	}, adminSession.token)
+	assert.equal(unconfiguredProviderRes.isError, true, 'Unconfigured OAuth provider must be rejected in update_user')
+	const unconfiguredAuthPage = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?provider=github`)
+	assert.doesNotMatch(await unconfiguredAuthPage.text(), /"id":"github"/, 'handleAuthorize must not inject unconfigured query.provider into providers list')
+	process.env.GITHUB_CLIENT_ID = 'gh-test-client-id'
+	process.env.GITHUB_CLIENT_SECRET = 'gh-test-client-secret'
+	const restUserPatchRes = await fetch(`http://127.0.0.1:${addr.port}/api/user`, {
+		method: 'PATCH',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ name: 'Jesse Updated Via REST' })
+	})
+	assert.equal(restUserPatchRes.status, 200)
+	const restUserPatchData = await restUserPatchRes.json()
+	assert.equal(restUserPatchData.updated, true)
+	assert.equal(restUserPatchData.user.name, 'Jesse Updated Via REST')
+	const expiredAdminSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 1,
+		expiresAt: Date.now() - 5000
+	})
+	const unexchangedAdminSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 1,
+		token: null,
+		expiresAt: Date.now() + 60000
+	})
+	for (const invalidSid of [expiredAdminSession.id, unexchangedAdminSession.id]) {
+		const expConsent = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ session_id: invalidSid, provider: 'github' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(expConsent.status, 403, 'Inactive/expired session_id must be rejected on /oauth/authorize/consent')
+		const expProvConsent = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ session_id: invalidSid }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(expProvConsent.status, 403, 'Inactive/expired session_id must be rejected on /providers/:provider/consent')
+	}
+	const shay = db.users.upsert({ account: 'shay@example.com' })
+	const shayAdmin = db.tokens.create({ userId: shay.id, provider: 'self', admin: 1 })
+	const shayApp = db.tokens.create({
+		userId: shay.id,
+		provider: 'stripe',
+		type: 'api_key',
+		name: 'Shay Pre-Shared Stripe',
+		credentials: { apiKey: 'sk_test_preshared', baseUrl: 'https://api.stripe.com' }
+	})
+	const shayApp2 = db.tokens.create({
+		userId: shay.id,
+		provider: 'stripe',
+		type: 'api_key',
+		name: 'Shay Overlap Stripe',
+		credentials: { apiKey: 'sk_test_overlap', baseUrl: 'https://api.stripe.com' }
+	})
+	const preShareRes = await executeTool('admin', {
+		action: 'share_app',
+		appId: shayApp.id,
+		account: 'jessetane'
+	}, shayAdmin.token)
+	assert.equal(preShareRes.isError, undefined)
+	const overlapStubShareRes = await executeTool('admin', {
+		action: 'share_app',
+		appId: shayApp2.id,
+		account: 'jessetane'
+	}, shayAdmin.token)
+	assert.equal(overlapStubShareRes.isError, undefined)
+	const overlapDirectShareRes = await executeTool('admin', {
+		action: 'share_app',
+		appId: shayApp2.id,
+		account: 'user-props@example.com'
+	}, shayAdmin.token)
+	assert.equal(overlapDirectShareRes.isError, undefined)
+	const preSharedStubUser = db.users.getByAccount('jessetane')
+	assert.ok(preSharedStubUser)
+	assert.notEqual(preSharedStubUser.id, user.id, 'Pre-sharing with unlinked handle creates an unclaimed stub user')
+	assert.equal(db.tokens.hasAuthTokens(preSharedStubUser.id), false)
+	const providerFlowRes = await executeTool('admin', {
+		action: 'update_user',
+		provider: 'github'
+	}, adminSession.token, `http://127.0.0.1:${addr.port}`)
+	assert.equal(providerFlowRes.isError, undefined)
+	const providerFlowData = JSON.parse(providerFlowRes.content[0].text)
+	assert.equal(providerFlowData.actionRequired, 'oauth_flow')
+	assert.ok(providerFlowData.connectUrl.includes(`session_id=${adminSession.id}`))
+	assert.ok(providerFlowData.connectUrl.includes('provider=github'))
+	const authPageRes = await fetch(providerFlowData.connectUrl)
+	assert.equal(authPageRes.status, 200)
+	const authPageHtml = await authPageRes.text()
+	assert.match(authPageHtml, /Update account sign-in/)
+	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			session_id: adminSession.id,
+			provider: 'github'
+		}).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(consentRes.status, 302)
+	const authStateToken = new URL(consentRes.headers.get('location')).searchParams.get('state')
+	assert.ok(authStateToken)
+	let ghMockLogin = 'jessetane'
+	const origFetch = globalThis.fetch
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://github.com/login/oauth/access_token') {
+			return new Response(JSON.stringify({ access_token: 'gho_auth_link', token_type: 'bearer' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://api.github.com/user') {
+			return new Response(JSON.stringify({ login: ghMockLogin }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://oauth2.googleapis.com/token') {
+			return new Response(JSON.stringify({ access_token: 'ya29.auth_link', token_type: 'Bearer' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+			return new Response(JSON.stringify({ email: 'user-props@example.com' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		return origFetch(input, init)
+	}
+	try {
+		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${authStateToken}`)
+		assert.equal(cbRes.status, 200, 'Linking GitHub handle that had an unclaimed pre-share stub must claim stub and succeed with 200')
+		const cbHtml = await cbRes.text()
+		assert.match(cbHtml, /Account Updated/)
+		assert.match(cbHtml, /Signed in as <strong>jessetane<\/strong>/)
+		assert.equal(db.users.get(preSharedStubUser.id), null, 'Unclaimed stub user is deleted after being claimed')
+		const userAppsAfterClaim = JSON.parse((await executeTool('admin', { action: 'list_apps' }, adminSession.token)).content[0].text).apps
+		assert.ok(userAppsAfterClaim.some(a => a.type === 'share' && a.name === 'Shay Pre-Shared Stripe'), 'Pre-shared app on stub user is transferred to authenticated user on claim')
+		const overlapShares = userAppsAfterClaim.filter(a => a.type === 'share' && a.name === 'Shay Overlap Stripe')
+		assert.equal(overlapShares.length, 1, 'claimStubUser deduplicates overlapping shares for the same upstream appId')
+		const updatedWhoami = JSON.parse((await executeTool('admin', { action: 'whoami' }, adminSession.token)).content[0].text)
+		assert.equal(updatedWhoami.user.account, 'jessetane')
+		assert.deepEqual(updatedWhoami.user.logins, [
+			{ provider: 'google', account: 'user-props@example.com' },
+			{ provider: 'github', account: 'jessetane' }
+		])
+		const shareViaOldLoginRes = await executeTool('admin', {
+			action: 'share_app',
+			appId: shayApp.id,
+			account: 'user-props@example.com',
+			policy: [{ action: 'allow', methods: ['GET'] }]
+		}, shayAdmin.token)
+		assert.equal(shareViaOldLoginRes.isError, undefined)
+		assert.equal(JSON.parse(shareViaOldLoginRes.content[0].text).userId, user.id, 'Sharing via secondary linked login handle resolves to existing multi-key user without creating a duplicate user')
+		const unshareViaOldLoginRes = await executeTool('admin', {
+			action: 'unshare_app',
+			appId: shayApp.id,
+			account: 'user-props@example.com'
+		}, shayAdmin.token)
+		assert.equal(unshareViaOldLoginRes.isError, undefined)
+		assert.equal(JSON.parse(unshareViaOldLoginRes.content[0].text).unshared, true, 'Unsharing via secondary linked login handle removes share from multi-key user')
+		const collidingOtherProviderUser = db.tokens.resolveUserByAuth('custom_idp', 'jessetane')
+		assert.notEqual(collidingOtherProviderUser.id, user.id, 'resolveUserByAuth for a different provider with same handle must not hijack existing authenticated user')
+		assert.equal(db.tokens.resolveUserByAuth('google', 'user-props@example.com').id, user.id)
+		assert.equal(db.tokens.resolveUserByAuth('github', 'jessetane').id, user.id)
+		const crossProvHolder = db.tokens.resolveUserByAuth('custom_idp', 'sharedhandle')
+		assert.equal(crossProvHolder.account, 'sharedhandle')
+		const crossProvLinker = db.tokens.resolveUserByAuth('google', 'linker@example.com')
+		const crossProvSession = db.tokens.create({ userId: crossProvLinker.id, provider: 'self', admin: 1 })
+		const crossProvState = db.tokens.createState({
+			mode: 'auth',
+			sessionId: crossProvSession.id,
+			provider: 'github'
+		})
+		ghMockLogin = 'sharedhandle'
+		const crossProvCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${crossProvState}`)
+		assert.equal(crossProvCbRes.status, 200, 'Linking an unclaimed provider:account handle when another provider user holds unqualified users.account must succeed with 200')
+		assert.equal(db.users.get(crossProvLinker.id).account, 'github:sharedhandle')
+		assert.equal(db.tokens.findUserByAccount('github:sharedhandle').id, crossProvLinker.id)
+		assert.equal(db.tokens.findUserByAccount('sharedhandle', 'github').id, crossProvLinker.id)
+		assert.equal(db.tokens.findUserByAccount('sharedhandle', 'custom_idp').id, crossProvHolder.id)
+		ghMockLogin = 'jessetane'
+		const googleLoginState = db.tokens.createState({ mode: 'login', provider: 'google', sessionName: 'Google Key Login' })
+		const googleLoginCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${googleLoginState}`, { redirect: 'manual' })
+		assert.equal(googleLoginCb.status, 302)
+		const googleVerifyCode = new URL(googleLoginCb.headers.get('location'), `http://127.0.0.1:${addr.port}`).searchParams.get('code')
+		assert.equal(db.tokens.getState(googleVerifyCode).userId, user.id)
+		const githubLoginState = db.tokens.createState({ mode: 'login', provider: 'github', sessionName: 'GitHub Key Login' })
+		const githubLoginCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${githubLoginState}`, { redirect: 'manual' })
+		assert.equal(githubLoginCb.status, 302)
+		const githubVerifyCode = new URL(githubLoginCb.headers.get('location'), `http://127.0.0.1:${addr.port}`).searchParams.get('code')
+		assert.equal(db.tokens.getState(githubVerifyCode).userId, user.id)
+		const otherUser = db.users.upsert({ account: 'taken-gh-user' })
+		db.tokens.upsertAuth({ userId: otherUser.id, provider: 'github', account: 'taken-gh-user' })
+		const otherAdmin = db.tokens.create({ userId: otherUser.id, provider: 'self', admin: 1 })
+		const conflictState = db.tokens.createState({
+			mode: 'auth',
+			sessionId: otherAdmin.id,
+			provider: 'github'
+		})
+		const conflictCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${conflictState}`)
+		assert.equal(conflictCbRes.status, 409)
+		assert.match(await conflictCbRes.text(), /already registered to another user/)
+		google.ssoOnly = true
+		try {
+			const ssoUser = db.users.upsert({ account: 'sso-locked@example.com' })
+			db.tokens.upsertAuth({ userId: ssoUser.id, provider: 'google', account: 'sso-locked@example.com' })
+			const ssoAdmin = db.tokens.create({ userId: ssoUser.id, provider: 'self', admin: 1 })
+			const ssoState = db.tokens.createState({
+				mode: 'auth',
+				sessionId: ssoAdmin.id,
+				provider: 'github'
+			})
+			const ssoCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${ssoState}`)
+			assert.equal(ssoCbRes.status, 403)
+			assert.match(await ssoCbRes.text(), /SSO-only provider restriction/)
+		} finally {
+			google.ssoOnly = false
+		}
+	} finally {
+		globalThis.fetch = origFetch
+	}
 })
 
 test('admin update_app action', async () => {
-	const user = db.users.upsert({ email: 'update-app@example.com' })
+	const user = db.users.upsert({ account: 'update-app@example.com' })
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2468,7 +2725,7 @@ test('admin update_app action', async () => {
 })
 
 test('admin update_session action', async () => {
-	const user = db.users.upsert({ email: 'update-session@example.com' })
+	const user = db.users.upsert({ account: 'update-session@example.com' })
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2542,7 +2799,7 @@ test('admin update_session action', async () => {
 })
 
 test('provider_api fail-loud on unlinked session or missing appId', async () => {
-	const user = db.users.upsert({ email: 'unlinked-fail@example.com' })
+	const user = db.users.upsert({ account: 'unlinked-fail@example.com' })
 	const sessionNoApps = db.tokens.create({
 		userId: user.id,
 		provider: 'self'
@@ -2557,7 +2814,7 @@ test('provider_api fail-loud on unlinked session or missing appId', async () => 
 	}, sessionNoApps.token)
 	assert.equal(noStripeRes.isError, true)
 	assert.match(noStripeRes.content[0].text, /No Stripe app linked to session/)
-	const { session } = createTestSession({ email: 'linked-fail@example.com' })
+	const { session } = createTestSession({ account: 'linked-fail@example.com' })
 	const invalidAppRes = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/drive/v3/files',
 		appId: 'non-existent-app-id'
@@ -2624,7 +2881,7 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 		assert.ok(regData.client_id)
 		assert.equal(regData.client_name, 'Test MCP Agent')
 		assert.deepEqual(regData.grant_types, ['authorization_code', 'refresh_token'])
-		const user = db.users.upsert({ email: 'multi-provider@example.com' })
+		const user = db.users.upsert({ account: 'multi-provider@example.com' })
 		const session = db.tokens.create({
 			userId: user.id,
 			provider: 'self',
@@ -2740,7 +2997,7 @@ test('usage logging: 30-day rolling window, proxy log capture, MCP list_logs, an
 	const baseUrl = `http://127.0.0.1:${upstreamPort}`
 	try {
 		const addr = server.address()
-		const user = db.users.upsert({ email: 'logs-test@example.com' })
+		const user = db.users.upsert({ account: 'logs-test@example.com' })
 		const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
 		const workerSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
 		const app = db.tokens.create({
@@ -2877,7 +3134,7 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 	const baseUrl = `http://127.0.0.1:${upstreamPort}`
 	try {
 		const addr = server.address()
-		const user = db.users.upsert({ email: 'conventions@example.com' })
+		const user = db.users.upsert({ account: 'conventions@example.com' })
 		const session = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
 		const mailgunConnect = await executeTool('admin', {
 			action: 'connect_app',
@@ -3050,7 +3307,7 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 	assert.equal(wildcardNoBaseProv.isAllowedUrl('https://api.example.org/v1/test').allowed, true)
 	assert.equal(wildcardNoBaseProv.isAllowedUrl('https://evil.org/v1/test').allowed, false)
 	const addr = server.address()
-	const user = db.users.upsert({ email: 'github-test@example.com', name: 'GitHub Tester' })
+	const user = db.users.upsert({ account: 'github-test@example.com', name: 'GitHub Tester' })
 	const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
 	const noParamsConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/consent`, {
 		method: 'POST',
@@ -3223,50 +3480,104 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 	}
 })
 
-test('sendMail pipes RFC 5322 message to SENDMAIL stdin with env vars and rejects on non-zero exit', async () => {
-	const devRes = await sendMail({
-		to: 'dev@example.com',
-		subject: 'Dev Test',
-		text: 'Hello dev'
-	})
-	assert.deepEqual(devRes, { ok: true, dev: true })
-	const outPath = path.join(dirname, 'test-sendmail.json')
-	fs.rmSync(outPath, { force: true })
-	const origSendmail = process.env.SENDMAIL
-	const origMailFrom = process.env.MAIL_FROM
+test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite email-to-account migration', async () => {
+	const addr = server.address()
+	const origGoogleId = process.env.GOOGLE_CLIENT_ID
+	const origGithubId = process.env.GITHUB_CLIENT_ID
 	try {
-		process.env.MAIL_FROM = 'jump <custom@example.com>\r\nBcc: attacker@evil.com'
-		process.env.SENDMAIL = `"${process.execPath}" -e "const fs = require('node:fs'); const stdin = fs.readFileSync(0, 'utf8'); fs.writeFileSync(process.argv[1], JSON.stringify({ stdin, from: process.env.MAIL_FROM, to: process.env.MAIL_TO, subject: process.env.MAIL_SUBJECT }))" "${outPath}"`
-		const sent = await sendMail({
-			to: 'recipient@example.com\r\nCc: leak@evil.com',
-			subject: 'Sign in\r\nX-Injected: yes',
-			text: 'Click here to sign in:\n\nhttps://example.com/verify'
+		delete process.env.GOOGLE_CLIENT_ID
+		delete process.env.GITHUB_CLIENT_ID
+		assert.deepEqual(listAuthProviders(), [])
+		const authPageRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize`)
+		assert.equal(authPageRes.status, 200)
+		const authHtml = await authPageRes.text()
+		assert.match(authHtml, /"providers":\[\]/)
+		assert.match(authHtml, /"localAuth":true/)
+		const localUser = db.users.upsert({ account: 'localadmin' })
+		const localAdminSession = db.tokens.create({
+			userId: localUser.id,
+			provider: 'self',
+			name: 'Local Admin',
+			admin: 1
 		})
-		assert.deepEqual(sent, { ok: true })
-		const captured = JSON.parse(fs.readFileSync(outPath, 'utf8'))
-		assert.equal(captured.from, 'jump <custom@example.com> Bcc: attacker@evil.com')
-		assert.equal(captured.to, 'recipient@example.com Cc: leak@evil.com')
-		assert.equal(captured.subject, 'Sign in X-Injected: yes')
-		assert.equal(
-			captured.stdin,
-			'From: jump <custom@example.com> Bcc: attacker@evil.com\r\n' +
-			'To: recipient@example.com Cc: leak@evil.com\r\n' +
-			'Subject: Sign in X-Injected: yes\r\n' +
-			'Content-Type: text/plain; charset=utf-8\r\n\r\n' +
-			'Click here to sign in:\r\n\r\nhttps://example.com/verify\r\n'
-		)
-		process.env.SENDMAIL = `"${process.execPath}" -e "process.stderr.write('relay denied\\n'); process.exit(75)"`
-		await assert.rejects(
-			() => sendMail({ to: 'user@example.com', subject: 'Fail', text: 'Body' }),
-			/SENDMAIL exited with code 75: relay denied/
-		)
+		const localWorkerSession = db.tokens.create({
+			userId: localUser.id,
+			provider: 'self',
+			name: 'Local Worker',
+			admin: 0
+		})
+		const nonAdminConsent = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: localWorkerSession.token, session_name: 'Via Worker' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(nonAdminConsent.status, 403)
+		assert.match(await nonAdminConsent.text(), /valid admin bearer token required/)
+		const adminConsent = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: localAdminSession.token, session_name: 'Via Local Token', admin: '1' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(adminConsent.status, 302)
+		const verifyLoc = new URL(adminConsent.headers.get('location'), `http://127.0.0.1:${addr.port}`)
+		assert.equal(verifyLoc.pathname, '/oauth/verify')
+		const code = verifyLoc.searchParams.get('code')
+		assert.ok(code)
+		const verifyPostRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code }).toString()
+		})
+		assert.equal(verifyPostRes.status, 200)
+		const verifyText = await verifyPostRes.text()
+		const tokenMatch = verifyText.match(/token:\s*([a-f0-9-]+)/)
+		assert.ok(tokenMatch)
+		const newSession = db.tokens.getByToken(tokenMatch[1])
+		assert.equal(newSession.userId, localUser.id)
+		assert.equal(newSession.name, 'Via Local Token')
+		assert.equal(newSession.admin, true)
+		db.sqlite.exec("DELETE FROM tokens WHERE provider = 'self'")
+		const bootstrapped = bootstrapLocalAdmin()
+		assert.ok(bootstrapped)
+		assert.equal(bootstrapped.provider, 'self')
+		assert.equal(bootstrapped.admin, true)
+		assert.equal(bootstrapped.account, 'localhost')
+		assert.equal(bootstrapLocalAdmin(), null, 'bootstrapLocalAdmin is a no-op once a session exists')
 	} finally {
-		if (origSendmail === undefined) delete process.env.SENDMAIL
-		else process.env.SENDMAIL = origSendmail
-		if (origMailFrom === undefined) delete process.env.MAIL_FROM
-		else process.env.MAIL_FROM = origMailFrom
-		fs.rmSync(outPath, { force: true })
+		if (origGoogleId !== undefined) process.env.GOOGLE_CLIENT_ID = origGoogleId
+		if (origGithubId !== undefined) process.env.GITHUB_CLIENT_ID = origGithubId
 	}
+	db.sqlite.exec('DROP INDEX IF EXISTS idx_users_account')
+	db.sqlite.exec('ALTER TABLE users RENAME COLUMN account TO email')
+	db.sqlite.exec('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)')
+	const legacyUserId = 'legacy-google-user-1'
+	const now = new Date().toISOString()
+	db.sqlite.prepare('INSERT INTO users (id, email, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
+		legacyUserId,
+		'legacy@gmail.com',
+		'Legacy User',
+		now,
+		now
+	)
+	db.users.init()
+	db.tokens.init()
+	const migratedUser = db.users.getByAccount('legacy@gmail.com')
+	assert.ok(migratedUser)
+	assert.equal(migratedUser.id, legacyUserId)
+	assert.equal(migratedUser.account, 'legacy@gmail.com')
+	const backfilledLogins = db.tokens.listAuthByUserId(legacyUserId)
+	assert.equal(backfilledLogins.length, 1)
+	assert.equal(backfilledLogins[0].provider, 'google')
+	assert.equal(backfilledLogins[0].token, 'google:legacy@gmail.com')
+	assert.equal(backfilledLogins[0].credentials.account, 'legacy@gmail.com')
+	const resolvedLegacy = db.tokens.resolveUserByAuth('google', 'LEGACY@gmail.com')
+	assert.equal(resolvedLegacy.id, legacyUserId)
+	const postMigrationStub = db.users.upsert({ account: 'stub-after-migration@acme.com' })
+	db.users.init()
+	db.tokens.init()
+	assert.equal(db.tokens.hasAuthTokens(postMigrationStub.id), false, 'Re-running init() on an already-migrated DB must not bind unclaimed pre-share stubs to google')
 })
 
 test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit logs, and REST /api/shares', async () => {
@@ -3287,7 +3598,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 	const baseUrl = `http://127.0.0.1:${upstreamPort}`
 	try {
 		const addr = server.address()
-		const sarah = db.users.upsert({ email: 'sarah@acme.com', name: 'Sarah' })
+		const sarah = db.users.upsert({ account: 'sarah@acme.com', name: 'Sarah' })
 		const sarahAdmin = db.tokens.create({ userId: sarah.id, provider: 'self', admin: 1 })
 		const sarahWorker = db.tokens.create({ userId: sarah.id, provider: 'self', admin: 0 })
 		const connectRes = await executeTool('admin', {
@@ -3303,34 +3614,34 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const nonAdminShare = await executeTool('admin', {
 			action: 'share_app',
 			appId: sarahApp.id,
-			email: 'dan@acme.com'
+			account: 'dan@acme.com'
 		}, sarahWorker.token)
 		assert.equal(nonAdminShare.isError, true)
 		assert.match(nonAdminShare.content[0].text, /requires admin privileges/)
 		const missingAppShare = await executeTool('admin', {
 			action: 'share_app',
-			email: 'dan@acme.com'
+			account: 'dan@acme.com'
 		}, sarahAdmin.token)
 		assert.equal(missingAppShare.isError, true)
 		assert.match(missingAppShare.content[0].text, /appId is required/)
-		const invalidEmailShare = await executeTool('admin', {
+		const missingAccountShare = await executeTool('admin', {
 			action: 'share_app',
 			appId: sarahApp.id,
-			email: 'invalid-email'
+			account: '   '
 		}, sarahAdmin.token)
-		assert.equal(invalidEmailShare.isError, true)
-		assert.match(invalidEmailShare.content[0].text, /Valid recipient email address is required/)
+		assert.equal(missingAccountShare.isError, true)
+		assert.match(missingAccountShare.content[0].text, /Valid recipient account identifier is required/)
 		const selfShare = await executeTool('admin', {
 			action: 'share_app',
 			appId: sarahApp.id,
-			email: 'SARAH@acme.com'
+			account: 'SARAH@acme.com'
 		}, sarahAdmin.token)
 		assert.equal(selfShare.isError, true)
 		assert.match(selfShare.content[0].text, /Cannot share an app with yourself/)
 		const invalidPolicyShare = await executeTool('admin', {
 			action: 'share_app',
 			appId: sarahApp.id,
-			email: 'dan@acme.com',
+			account: 'dan@acme.com',
 			policy: [{ action: 'not_valid' }]
 		}, sarahAdmin.token)
 		assert.equal(invalidPolicyShare.isError, true)
@@ -3342,14 +3653,14 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const shareRes = await executeTool('admin', {
 			action: 'share_app',
 			appId: sarahApp.id,
-			email: 'Dan@acme.com',
+			account: 'Dan@acme.com',
 			policy: ceilingPolicy
 		}, sarahAdmin.token)
 		assert.equal(shareRes.isError, undefined)
 		const shareData = JSON.parse(shareRes.content[0].text)
 		assert.equal(shareData.shared, true)
 		assert.equal(shareData.appId, sarahApp.id)
-		assert.equal(shareData.email, 'dan@acme.com')
+		assert.equal(shareData.account, 'dan@acme.com')
 		assert.deepEqual(shareData.policy, ceilingPolicy)
 		const shareId = shareData.shareId
 		assert.ok(shareId)
@@ -3361,7 +3672,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const reshareRes = await executeTool('admin', {
 			action: 'share_app',
 			appId: sarahApp.id,
-			email: 'dan@acme.com',
+			account: 'dan@acme.com',
 			policy: updatedCeilingPolicy
 		}, sarahAdmin.token)
 		assert.equal(reshareRes.isError, undefined)
@@ -3373,9 +3684,9 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const sarahStripe = sarahApps.find(a => a.id === sarahApp.id)
 		assert.ok(sarahStripe)
 		assert.equal(sarahStripe.shares.length, 1)
-		assert.equal(sarahStripe.shares[0].email, 'dan@acme.com')
+		assert.equal(sarahStripe.shares[0].account, 'dan@acme.com')
 		assert.deepEqual(sarahStripe.shares[0].policy, updatedCeilingPolicy)
-		const dan = db.users.getByEmail('dan@acme.com')
+		const dan = db.users.getByAccount('dan@acme.com')
 		assert.ok(dan)
 		const danAdmin = db.tokens.create({ userId: dan.id, provider: 'self', admin: 1 })
 		const danAppsRes = await executeTool('admin', { action: 'list_apps' }, danAdmin.token)
@@ -3417,7 +3728,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const danReshareAttempt = await executeTool('admin', {
 			action: 'share_app',
 			appId: shareId,
-			email: 'eve@acme.com'
+			account: 'eve@acme.com'
 		}, danAdmin.token)
 		assert.equal(danReshareAttempt.isError, true)
 		assert.match(danReshareAttempt.content[0].text, /App not found/)
@@ -3493,7 +3804,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		assert.ok(danAllLogs.every(l => l.appId === shareId), 'Unfiltered recipient logs also resolve appId to shareId')
 		const danProbeUpstreamIdLogs = JSON.parse((await executeTool('admin', { action: 'list_logs', appId: sarahApp.id }, danAdmin.token)).content[0].text).logs
 		assert.equal(danProbeUpstreamIdLogs.length, 0, 'Recipient filtering by owner upstreamApp.id returns 0 logs')
-		const eve = db.users.upsert({ email: 'eve@acme.com', name: 'Eve' })
+		const eve = db.users.upsert({ account: 'eve@acme.com', name: 'Eve' })
 		const eveSession = db.tokens.create({ userId: eve.id, provider: 'self', admin: 1 })
 		const eveSpoofRes = await executeTool('stripe_api', {
 			url: '/v1/customers/spoof_attempt',
@@ -3504,6 +3815,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const sarahLogs = JSON.parse(sarahLogsRes.content[0].text).logs
 		assert.equal(sarahLogs.length, 3, 'Sarah sees all 3 requests made by Dan through her shared app (and 0 spoofed unlinked requests from Eve)')
 		assert.equal(sarahLogs[0].userId, dan.id)
+		assert.equal(sarahLogs[0].account, 'dan@acme.com')
 		assert.equal(sarahLogs[0].appId, sarahApp.id)
 		const expiredOauthApp = db.tokens.create({
 			userId: sarah.id,
@@ -3516,7 +3828,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const googleShare = JSON.parse((await executeTool('admin', {
 			action: 'share_app',
 			appId: expiredOauthApp.id,
-			email: 'dan@acme.com',
+			account: 'dan@acme.com',
 			policy: [{ action: 'allow' }]
 		}, sarahAdmin.token)).content[0].text)
 		await executeTool('admin', {
@@ -3559,15 +3871,15 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 			},
 			body: JSON.stringify({
 				appId: sarahApp.id,
-				email: 'chloe@acme.com',
+				account: 'chloe@acme.com',
 				policy: [{ action: 'allow', methods: ['GET'], path: '/v1/**' }]
 			})
 		})
 		assert.equal(restShareRes.status, 201)
 		const restShareData = await restShareRes.json()
 		assert.equal(restShareData.shared, true)
-		assert.equal(restShareData.email, 'chloe@acme.com')
-		const restUnshareRes = await fetch(`http://127.0.0.1:${addr.port}/api/shares?appId=${encodeURIComponent(sarahApp.id)}&email=${encodeURIComponent('chloe@acme.com')}`, {
+		assert.equal(restShareData.account, 'chloe@acme.com')
+		const restUnshareRes = await fetch(`http://127.0.0.1:${addr.port}/api/shares?appId=${encodeURIComponent(sarahApp.id)}&account=${encodeURIComponent('chloe@acme.com')}`, {
 			method: 'DELETE',
 			headers: {
 				authorization: `Bearer ${sarahAdmin.token}`,
@@ -3581,7 +3893,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const unshareDanRes = await executeTool('admin', {
 			action: 'unshare_app',
 			appId: sarahApp.id,
-			email: 'dan@acme.com'
+			account: 'dan@acme.com'
 		}, sarahAdmin.token)
 		assert.equal(unshareDanRes.isError, undefined)
 		assert.equal(JSON.parse(unshareDanRes.content[0].text).unshared, true)
@@ -3602,17 +3914,15 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const reshare2 = JSON.parse((await executeTool('admin', {
 			action: 'share_app',
 			appId: sarahApp.id,
-			email: 'dan@acme.com',
+			account: 'dan@acme.com',
 			policy: [{ action: 'allow' }]
 		}, sarahAdmin.token)).content[0].text)
-		const verifyMagicCode = 'magic_verify_shared_123'
-		db.tokens.createState({
-			email: 'dan@acme.com',
-			admin: 1,
-			magicCode: verifyMagicCode,
-			magicExpiresAt: Date.now() + 600000
+		const verifyCode = db.tokens.createState({
+			userId: dan.id,
+			account: 'dan@acme.com',
+			admin: 1
 		})
-		const verifyGetRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${verifyMagicCode}`)
+		const verifyGetRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${verifyCode}`)
 		assert.equal(verifyGetRes.status, 200)
 		const verifyHtml = await verifyGetRes.text()
 		assert.match(verifyHtml, /Acme Global Stripe/)
@@ -3621,7 +3931,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const verifyPostRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({ code: verifyMagicCode, app_id: reshare2.shareId }).toString()
+			body: new URLSearchParams({ code: verifyCode, app_id: reshare2.shareId }).toString()
 		})
 		assert.equal(verifyPostRes.status, 200)
 		const verifyPostText = await verifyPostRes.text()
@@ -3646,7 +3956,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const reshare3 = JSON.parse((await executeTool('admin', {
 			action: 'share_app',
 			appId: sarahApp.id,
-			email: 'dan@acme.com',
+			account: 'dan@acme.com',
 			policy: [{ action: 'allow' }]
 		}, sarahAdmin.token)).content[0].text)
 		await executeTool('admin', {
