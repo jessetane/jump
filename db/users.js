@@ -1,25 +1,42 @@
 import { sqlite } from './index.js'
 import { randomUUID } from 'node:crypto'
 
+let migratedLegacyEmail = false
+
 export {
 	init,
+	consumeLegacyEmailMigration,
 	upsert,
 	get,
-	getByEmail,
-	updateEmail,
+	getByAccount,
+	updateAccount,
 	updateUser
 }
 
+function consumeLegacyEmailMigration () {
+	const val = migratedLegacyEmail
+	migratedLegacyEmail = false
+	return val
+}
+
 function init () {
+	const cols = sqlite.prepare('PRAGMA table_info(users)').all()
+	if (cols.some(c => c.name === 'email') && !cols.some(c => c.name === 'account')) {
+		sqlite.exec(`
+			DROP INDEX IF EXISTS idx_users_email;
+			ALTER TABLE users RENAME COLUMN email TO account;
+		`)
+		migratedLegacyEmail = true
+	}
 	sqlite.exec(`
 		CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
-			email TEXT UNIQUE NOT NULL,
+			account TEXT UNIQUE NOT NULL,
 			name TEXT,
 			created TEXT NOT NULL,
 			updated TEXT NOT NULL
 		);
-		CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+		CREATE INDEX IF NOT EXISTS idx_users_account ON users(account);
 	`)
 }
 
@@ -28,31 +45,31 @@ function get (id) {
 	return sqlite.prepare('SELECT * FROM users WHERE id = ?').get(id) || null
 }
 
-function getByEmail (email) {
-	if (!email) return null
-	const normalizedEmail = email.trim().toLowerCase()
-	return sqlite.prepare('SELECT * FROM users WHERE email = ?').get(normalizedEmail) || null
+function getByAccount (account) {
+	if (!account) return null
+	const normalizedAccount = String(account).trim().toLowerCase()
+	return sqlite.prepare('SELECT * FROM users WHERE account = ?').get(normalizedAccount) || null
 }
 
 function upsert (opts = {}) {
-	const { id = randomUUID(), email, name = null } = opts
+	const { id = randomUUID(), account, name = null } = opts
 	const now = new Date().toISOString()
-	const normalizedEmail = email.trim().toLowerCase()
+	const normalizedAccount = String(account).trim().toLowerCase()
 	sqlite.prepare(`
-		INSERT INTO users (id, email, name, created, updated)
+		INSERT INTO users (id, account, name, created, updated)
 		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(email) DO UPDATE SET
+		ON CONFLICT(account) DO UPDATE SET
 			name = COALESCE(excluded.name, users.name),
 			updated = excluded.updated
-	`).run(id, normalizedEmail, name, now, now)
-	return sqlite.prepare('SELECT * FROM users WHERE email = ?').get(normalizedEmail)
+	`).run(id, normalizedAccount, name, now, now)
+	return sqlite.prepare('SELECT * FROM users WHERE account = ?').get(normalizedAccount)
 }
 
-function updateEmail (id, newEmail) {
-	if (!id || !newEmail) return null
+function updateAccount (id, newAccount) {
+	if (!id || !newAccount) return null
 	const now = new Date().toISOString()
-	const normalizedEmail = newEmail.trim().toLowerCase()
-	sqlite.prepare('UPDATE users SET email = ?, updated = ? WHERE id = ?').run(normalizedEmail, now, id)
+	const normalizedAccount = String(newAccount).trim().toLowerCase()
+	sqlite.prepare('UPDATE users SET account = ?, updated = ? WHERE id = ?').run(normalizedAccount, now, id)
 	return get(id)
 }
 

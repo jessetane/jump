@@ -1,15 +1,23 @@
 import { sqlite } from './index.js'
+import * as users from './users.js'
 import { randomUUID, randomBytes } from 'node:crypto'
 
 export {
 	init,
 	create,
 	get,
+	getActiveSession,
 	getByToken,
 	findRevocable,
 	issueOauthTokens,
 	refreshOauthSession,
 	listByUserId,
+	listAuthByUserId,
+	hasAuthTokens,
+	findUserByAccount,
+	claimStubUser,
+	upsertAuth,
+	resolveUserByAuth,
 	listSharesByOwnerId,
 	upsertShare,
 	removeShare,
@@ -24,8 +32,6 @@ export {
 	createState,
 	getState,
 	consumeState,
-	findStateByMagicCode,
-	consumeMagicCode,
 	createAuthCode,
 	consumeAuthCode,
 	formatToken,
@@ -39,7 +45,7 @@ const UPSTREAM_SELECT = `
 	upstream.expires_at AS upstream_expires_at,
 	json_extract(upstream.credentials, '$.account') AS upstream_account,
 	json_extract(upstream.credentials, '$.baseUrl') AS upstream_base_url,
-	owner.email AS shared_by_email
+	owner.account AS shared_by_account
 `
 
 const UPSTREAM_JOIN = `
@@ -71,6 +77,24 @@ function init () {
 		CREATE INDEX IF NOT EXISTS idx_tokens_updated ON tokens(updated);
 		CREATE INDEX IF NOT EXISTS idx_tokens_share_app ON tokens(json_extract(credentials, '$.appId')) WHERE type = 'share';
 	`)
+	if (users.consumeLegacyEmailMigration()) {
+		const missingAuthUsers = sqlite.prepare(`
+			SELECT users.* FROM users
+			WHERE NOT EXISTS (
+				SELECT 1 FROM tokens WHERE tokens.user_id = users.id AND tokens.type = 'auth'
+			)
+		`).all()
+		for (const u of missingAuthUsers) {
+			if (!u.account || !u.account.includes('@')) continue
+			const cleanAccount = u.account.trim().toLowerCase()
+			const authKey = `google:${cleanAccount}`
+			const now = new Date().toISOString()
+			sqlite.prepare(`
+				INSERT OR IGNORE INTO tokens (id, user_id, provider, type, name, token, credentials, created, updated)
+				VALUES (?, ?, 'google', 'auth', ?, ?, ?, ?, ?)
+			`).run(randomUUID(), u.id, cleanAccount, authKey, JSON.stringify({ account: cleanAccount }), now, now)
+		}
+	}
 }
 
 function formatToken (row) {
@@ -103,9 +127,9 @@ function formatToken (row) {
 		ua: row.ua,
 		created: row.created,
 		updated: row.updated,
-		email: row.email,
+		account: row.account,
 		userName: row.user_name,
-		...(row.shared_by_email ? { sharedBy: row.shared_by_email } : {})
+		...(row.shared_by_account ? { sharedBy: row.shared_by_account } : {})
 	}
 }
 
@@ -137,7 +161,7 @@ function create (opts = {}) {
 function get (id) {
 	if (!id) return null
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.email, users.name AS user_name, ${UPSTREAM_SELECT}
+		SELECT tokens.*, users.account, users.name AS user_name, ${UPSTREAM_SELECT}
 		FROM tokens
 		LEFT JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
@@ -146,11 +170,19 @@ function get (id) {
 	return formatToken(row)
 }
 
+function getActiveSession (id) {
+	if (!id) return null
+	const session = get(id)
+	if (!session || session.provider !== 'self' || session.type !== 'bearer' || !session.token) return null
+	if (session.expiresAt && session.expiresAt <= Date.now()) return null
+	return session
+}
+
 function getByToken (token) {
 	if (!token) return null
 	const now = Date.now()
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.email, users.name AS user_name
+		SELECT tokens.*, users.account, users.name AS user_name
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.token = ? AND tokens.provider = 'self' AND tokens.type = 'bearer'
@@ -167,7 +199,7 @@ function findRevocable (token) {
 	if (!token || typeof token !== 'string') return null
 	pruneDormant()
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.email, users.name AS user_name
+		SELECT tokens.*, users.account, users.name AS user_name
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.provider = 'self' AND tokens.type = 'bearer'
@@ -210,7 +242,7 @@ function refreshOauthSession (refreshToken) {
 	if (!refreshToken) return null
 	pruneDormant()
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.email, users.name AS user_name
+		SELECT tokens.*, users.account, users.name AS user_name
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.provider = 'self' AND tokens.type = 'bearer'
@@ -243,11 +275,11 @@ function listByUserId (userId, opts = {}) {
 	if (!userId) return []
 	pruneDormant()
 	let query = `
-		SELECT tokens.*, users.email, users.name AS user_name, ${UPSTREAM_SELECT}
+		SELECT tokens.*, users.account, users.name AS user_name, ${UPSTREAM_SELECT}
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
-		WHERE tokens.user_id = ? AND tokens.type NOT IN ('oauth_state', 'oauth_code')
+		WHERE tokens.user_id = ? AND tokens.type NOT IN ('oauth_state', 'oauth_code', 'auth')
 			AND NOT (tokens.provider = 'self' AND tokens.type = 'bearer' AND tokens.token IS NULL)
 	`
 	const params = [userId]
@@ -260,10 +292,108 @@ function listByUserId (userId, opts = {}) {
 	return rows.map(formatToken)
 }
 
+function listAuthByUserId (userId) {
+	if (!userId) return []
+	const rows = sqlite.prepare(`
+		SELECT tokens.*, users.account, users.name AS user_name, ${UPSTREAM_SELECT}
+		FROM tokens
+		JOIN users ON tokens.user_id = users.id
+		${UPSTREAM_JOIN}
+		WHERE tokens.user_id = ? AND tokens.type = 'auth'
+		ORDER BY tokens.created ASC
+	`).all(userId)
+	return rows.map(formatToken)
+}
+
+function hasAuthTokens (userId) {
+	if (!userId) return false
+	return Boolean(sqlite.prepare("SELECT 1 FROM tokens WHERE user_id = ? AND type = 'auth'").get(userId))
+}
+
+function findUserByAccount (account, provider = null) {
+	if (!account) return null
+	const cleanAccount = String(account).trim().toLowerCase()
+	if (!cleanAccount) return null
+	if (provider) {
+		const cleanProvider = String(provider).trim().toLowerCase()
+		const authKey = `${cleanProvider}:${cleanAccount}`
+		const authRow = sqlite.prepare("SELECT user_id FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
+		if (authRow) return users.get(authRow.user_id)
+		return users.getByAccount(authKey) || users.getByAccount(cleanAccount)
+	}
+	const authRow = sqlite.prepare("SELECT user_id FROM tokens WHERE type = 'auth' AND (token = ? OR name = ?)").get(cleanAccount, cleanAccount)
+	if (authRow) {
+		return users.get(authRow.user_id)
+	}
+	return users.getByAccount(cleanAccount)
+}
+
+function claimStubUser (stubUserId, targetUserId) {
+	if (!stubUserId || !targetUserId || stubUserId === targetUserId) return
+	sqlite.prepare(`
+		DELETE FROM tokens
+		WHERE user_id = ? AND type = 'share'
+			AND (
+				json_extract(credentials, '$.appId') IN (
+					SELECT json_extract(credentials, '$.appId') FROM tokens WHERE user_id = ? AND type = 'share'
+				)
+				OR json_extract(credentials, '$.appId') IN (
+					SELECT id FROM tokens WHERE user_id = ?
+				)
+			)
+	`).run(stubUserId, targetUserId, targetUserId)
+	sqlite.prepare('UPDATE tokens SET user_id = ? WHERE user_id = ?').run(targetUserId, stubUserId)
+	sqlite.prepare('DELETE FROM users WHERE id = ?').run(stubUserId)
+}
+
+function upsertAuth ({ userId, provider, account }) {
+	const cleanProvider = String(provider).trim().toLowerCase()
+	const cleanAccount = String(account).trim().toLowerCase()
+	const authKey = `${cleanProvider}:${cleanAccount}`
+	const existing = sqlite.prepare("SELECT * FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
+	if (existing) {
+		if (existing.user_id !== userId) {
+			const err = new Error(`Account ${cleanAccount} is already bound to another user`)
+			err.status = 409
+			throw err
+		}
+		return get(existing.id)
+	}
+	return create({
+		userId,
+		provider: cleanProvider,
+		type: 'auth',
+		name: cleanAccount,
+		token: authKey,
+		credentials: { account: cleanAccount }
+	})
+}
+
+function resolveUserByAuth (provider, account, { createIfMissing = true } = {}) {
+	if (!provider || !account) return null
+	const cleanProvider = String(provider).trim().toLowerCase()
+	const cleanAccount = String(account).trim().toLowerCase()
+	const authKey = `${cleanProvider}:${cleanAccount}`
+	const row = sqlite.prepare("SELECT user_id FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
+	if (row) {
+		return users.get(row.user_id)
+	}
+	if (!createIfMissing) return null
+	const existing = users.getByAccount(cleanAccount)
+	if (existing && !hasAuthTokens(existing.id)) {
+		upsertAuth({ userId: existing.id, provider: cleanProvider, account: cleanAccount })
+		return existing
+	}
+	const targetAccount = existing ? `${cleanProvider}:${cleanAccount}` : cleanAccount
+	const user = users.upsert({ account: targetAccount })
+	upsertAuth({ userId: user.id, provider: cleanProvider, account: cleanAccount })
+	return user
+}
+
 function listSharesByOwnerId (ownerUserId) {
 	if (!ownerUserId) return []
 	const rows = sqlite.prepare(`
-		SELECT tokens.*, users.email, users.name AS user_name
+		SELECT tokens.*, users.account, users.name AS user_name
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
@@ -371,6 +501,7 @@ function formatState (row) {
 	return {
 		state: tok.id,
 		userId: tok.userId,
+		mode: meta.mode || null,
 		clientId: meta.clientId || null,
 		clientRedirectUri: meta.clientRedirectUri || null,
 		clientState: meta.clientState || null,
@@ -379,9 +510,7 @@ function formatState (row) {
 		sessionName: tok.name,
 		admin: tok.admin,
 		reauthAppId: meta.reauthAppId || null,
-		magicCode: tok.token,
-		magicExpiresAt: tok.expiresAt,
-		email: meta.email || null,
+		account: meta.account || null,
 		sessionId: meta.sessionId || null,
 		provider: tok.provider === 'self' ? null : tok.provider,
 		ip: tok.ip,
@@ -392,6 +521,7 @@ function formatState (row) {
 function createState (opts = {}) {
 	const {
 		userId = null,
+		mode = null,
 		clientId = null,
 		clientRedirectUri = null,
 		clientState = null,
@@ -400,31 +530,29 @@ function createState (opts = {}) {
 		sessionName = null,
 		admin = 0,
 		reauthAppId = null,
-		magicCode = null,
-		magicExpiresAt = null,
-		email = null,
+		account = null,
 		sessionId = null,
 		provider = null,
 		ip = null
 	} = opts
 	pruneExpired()
 	const state = randomBytes(24).toString('base64url')
-	const expiresAt = magicExpiresAt || (Date.now() + 15 * 60 * 1000)
+	const expiresAt = Date.now() + 15 * 60 * 1000
 	create({
 		id: state,
 		userId,
 		provider: provider || 'self',
 		type: 'oauth_state',
 		name: sessionName,
-		token: magicCode,
 		credentials: {
+			mode,
 			clientId,
 			clientRedirectUri,
 			clientState,
 			codeChallenge,
 			codeChallengeMethod,
 			reauthAppId,
-			email,
+			account: account || null,
 			sessionId
 		},
 		expiresAt,
@@ -447,22 +575,6 @@ function consumeState (state) {
 	const row = sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_state'").get(state)
 	if (!row) return null
 	sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(state)
-	return formatState(row)
-}
-
-function findStateByMagicCode (magicCode) {
-	if (!magicCode) return null
-	pruneExpired()
-	const row = sqlite.prepare("SELECT * FROM tokens WHERE token = ? AND type = 'oauth_state'").get(magicCode)
-	return formatState(row)
-}
-
-function consumeMagicCode (magicCode) {
-	if (!magicCode) return null
-	pruneExpired()
-	const row = sqlite.prepare("SELECT * FROM tokens WHERE token = ? AND type = 'oauth_state'").get(magicCode)
-	if (!row) return null
-	sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(row.id)
 	return formatState(row)
 }
 

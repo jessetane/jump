@@ -57,7 +57,7 @@ function create (opts = {}) {
 function get (sessionId, appId) {
 	if (!sessionId || !appId) return null
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.email, users.name AS user_name, ${UPSTREAM_SELECT},
+		SELECT tokens.*, users.account, users.name AS user_name, ${UPSTREAM_SELECT},
 			links.session_id, links.app_id, links.policy,
 			links.created AS link_created, links.updated AS link_updated
 		FROM links
@@ -72,7 +72,7 @@ function get (sessionId, appId) {
 function listBySessionId (sessionId) {
 	if (!sessionId) return []
 	const rows = sqlite.prepare(`
-		SELECT tokens.*, users.email, users.name AS user_name, ${UPSTREAM_SELECT},
+		SELECT tokens.*, users.account, users.name AS user_name, ${UPSTREAM_SELECT},
 			links.session_id, links.app_id, links.policy,
 			links.created AS link_created, links.updated AS link_updated
 		FROM links
@@ -92,7 +92,7 @@ function listByAppId (appId) {
 			tokens.id AS target_session_id, tokens.user_id, tokens.provider, tokens.type,
 			tokens.name, tokens.token, tokens.admin, tokens.ip, tokens.ua,
 			tokens.created AS session_created, tokens.updated AS session_updated,
-			users.email, users.name AS user_name
+			users.account, users.name AS user_name
 		FROM links
 		JOIN tokens ON links.session_id = tokens.id
 		JOIN users ON tokens.user_id = users.id
@@ -116,7 +116,7 @@ function listByAppId (appId) {
 			ua: r.ua,
 			created: r.session_created,
 			updated: r.session_updated,
-			email: r.email,
+			account: r.account,
 			userName: r.user_name
 		}
 	}))

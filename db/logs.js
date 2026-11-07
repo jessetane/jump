@@ -39,6 +39,7 @@ function format (row) {
 	return {
 		id: row.id,
 		userId: row.user_id,
+		...(row.account ? { account: row.account } : {}),
 		sessionId: row.session_id,
 		appId: row.resolved_app_id !== undefined ? row.resolved_app_id : row.app_id,
 		provider: row.provider,
@@ -112,8 +113,9 @@ function listByUserId (userId, opts = {}) {
 	pruneIfNeeded()
 	const { sessionId, appId, provider, allowed, limit = 100 } = opts
 	let query = `
-		SELECT logs.*, COALESCE(owned.id, share.id) AS resolved_app_id
+		SELECT logs.*, users.account, COALESCE(owned.id, share.id) AS resolved_app_id
 		FROM logs
+		JOIN users ON logs.user_id = users.id
 		LEFT JOIN tokens AS owned ON owned.id = logs.app_id AND owned.user_id = ? AND owned.type != 'share'
 		LEFT JOIN tokens AS share ON share.user_id = ? AND share.type = 'share' AND json_extract(share.credentials, '$.appId') = logs.app_id
 		WHERE (logs.user_id = ? OR owned.id IS NOT NULL)
