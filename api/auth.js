@@ -1,6 +1,6 @@
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
-import { parsePolicy } from '../policy.js'
+import { parsePolicy, validatePolicy } from '../policy.js'
 import { validateBaseUrl } from '../util.js'
 
 export {
@@ -14,6 +14,8 @@ export {
 	connectApp,
 	disconnectApp,
 	updateApp,
+	shareApp,
+	unshareApp,
 	linkApp,
 	unlinkApp,
 	updateEmail,
@@ -43,6 +45,7 @@ function formatSession (s, currentSessionId) {
 			account: l.app?.credentials?.account || null,
 			scopes: l.app?.scopes,
 			expiresAt: l.app?.expiresAt,
+			...(l.app?.sharedBy ? { sharedBy: l.app.sharedBy } : {}),
 			policy: parsePolicy(l.policy)
 		}))
 	}
@@ -80,13 +83,60 @@ function requireSession (token, opts = {}) {
 	return { session, appUrl }
 }
 
-async function list (token, opts = {}) {
-	const { session } = requireSession(token, opts)
+function requireAdmin (token, opts = {}, message = 'Access denied: app administration requires admin privileges') {
+	const { session, appUrl } = requireSession(token, opts)
 	if (!session.admin) {
-		const error = new Error('Access denied: session administration requires admin privileges')
+		const error = new Error(message)
 		error.status = 403
 		throw error
 	}
+	return { session, appUrl }
+}
+
+function requireApp (userId, appId, { allowShare = true, requireId = false } = {}) {
+	if (requireId && !appId) {
+		const error = new Error('appId is required')
+		error.status = 400
+		throw error
+	}
+	const targetApp = db.tokens.get(appId)
+	if (!targetApp || targetApp.userId !== userId || targetApp.provider === 'self' || (!allowShare && targetApp.type === 'share')) {
+		const error = new Error(`App not found: ${appId}`)
+		error.status = 404
+		throw error
+	}
+	return targetApp
+}
+
+function requireTargetSession (userId, sessionId) {
+	const targetSession = db.tokens.get(sessionId)
+	if (!targetSession || targetSession.userId !== userId || targetSession.provider !== 'self' || !targetSession.token) {
+		const error = new Error(`Session not found: ${sessionId}`)
+		error.status = 404
+		throw error
+	}
+	return targetSession
+}
+
+function requireShareTarget (token, opts = {}) {
+	const { appId, email } = opts
+	const { session } = requireAdmin(token, opts)
+	if (!appId) {
+		const error = new Error('appId is required')
+		error.status = 400
+		throw error
+	}
+	if (!email || typeof email !== 'string' || !email.includes('@')) {
+		const error = new Error('Valid recipient email address is required')
+		error.status = 400
+		throw error
+	}
+	const targetApp = requireApp(session.userId, appId, { allowShare: false })
+	return { session, targetApp, normalizedEmail: email.trim().toLowerCase() }
+}
+
+async function list (token, opts = {}) {
+	const { session } = requireAdmin(token, opts, 'Access denied: session administration requires admin privileges')
 	const rawSessions = db.tokens.listByUserId(session.userId, { provider: 'self' })
 	return { sessions: rawSessions.map(s => formatSession(s, session.id)) }
 }
@@ -98,21 +148,17 @@ async function get (token, sessionId, opts = {}) {
 		error.status = 403
 		throw error
 	}
-	const targetSession = db.tokens.get(sessionId)
-	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self' || !targetSession.token) {
-		const error = new Error(`Session not found: ${sessionId}`)
-		error.status = 404
-		throw error
-	}
+	const targetSession = requireTargetSession(session.userId, sessionId)
 	return { session: formatSession(targetSession, session.id) }
 }
 
 async function createSession (token, opts = {}) {
 	const { name = 'New Session', admin = false, linkAppIds = [], policy = null } = opts
-	const { session } = requireSession(token, opts)
-	if (!session.admin) {
-		const error = new Error('Access denied: session administration requires admin privileges')
-		error.status = 403
+	const { session } = requireAdmin(token, opts, 'Access denied: session administration requires admin privileges')
+	const policyCheck = validatePolicy(policy)
+	if (!policyCheck.valid) {
+		const error = new Error(policyCheck.error)
+		error.status = 400
 		throw error
 	}
 	const newSession = db.tokens.create({
@@ -124,11 +170,11 @@ async function createSession (token, opts = {}) {
 	})
 	for (const appId of (Array.isArray(linkAppIds) ? linkAppIds : [])) {
 		const app = db.tokens.get(appId)
-		if (app && app.userId === session.userId) {
+		if (app && app.userId === session.userId && app.provider !== 'self') {
 			db.links.create({
 				sessionId: newSession.id,
 				appId: app.id,
-				policy
+				policy: policyCheck.policy
 			})
 		}
 	}
@@ -201,39 +247,52 @@ async function revoke (token, { sessionId, allOthers } = {}) {
 }
 
 async function listApps (token, opts = {}) {
-	const { session } = requireSession(token, opts)
-	if (!session.admin) {
-		const error = new Error('Access denied: app administration requires admin privileges')
-		error.status = 403
-		throw error
-	}
+	const { session } = requireAdmin(token, opts)
 	const allTokens = db.tokens.listByUserId(session.userId)
-	const apps = allTokens.filter(t => t.provider !== 'self').map(a => ({
-		id: a.id,
-		provider: a.provider,
-		type: a.type,
-		name: a.name,
-		account: a.credentials?.account || null,
-		scopes: a.scopes,
-		expiresAt: a.expiresAt,
-		created: a.created,
-		updated: a.updated
-	}))
+	const ownedShares = db.tokens.listSharesByOwnerId(session.userId)
+	const sharesByAppId = new Map()
+	for (const s of ownedShares) {
+		const targetAppId = s.credentials?.appId
+		if (!targetAppId) continue
+		if (!sharesByAppId.has(targetAppId)) sharesByAppId.set(targetAppId, [])
+		sharesByAppId.get(targetAppId).push({
+			userId: s.userId,
+			email: s.email,
+			policy: parsePolicy(s.credentials?.policy)
+		})
+	}
+	const apps = allTokens.filter(t => t.provider !== 'self').map(a => {
+		const item = {
+			id: a.id,
+			provider: a.provider,
+			type: a.type,
+			name: a.name,
+			account: a.credentials?.account || null,
+			...(a.credentials?.baseUrl ? { baseUrl: a.credentials.baseUrl } : {}),
+			scopes: a.scopes,
+			expiresAt: a.expiresAt,
+			created: a.created,
+			updated: a.updated
+		}
+		if (a.type === 'share') {
+			item.sharedBy = a.sharedBy || null
+			item.policy = parsePolicy(a.credentials?.policy)
+		} else {
+			const shares = sharesByAppId.get(a.id)
+			if (shares) item.shares = shares
+		}
+		return item
+	})
 	return { apps }
 }
 
 async function connectApp (token, opts = {}) {
 	let { provider, name, apiKey, account, baseUrl, credentials, appId } = opts
 	apiKey = typeof apiKey === 'string' ? apiKey.trim() : apiKey
-	const { session, appUrl } = requireSession(token, opts)
-	if (!session.admin) {
-		const error = new Error('Access denied: app administration requires admin privileges')
-		error.status = 403
-		throw error
-	}
-	if (appId && !provider) {
-		const existing = db.tokens.get(appId)
-		if (existing) provider = existing.provider
+	const { session, appUrl } = requireAdmin(token, opts)
+	if (appId) {
+		const existing = requireApp(session.userId, appId, { allowShare: false })
+		if (!provider) provider = existing.provider
 	}
 	provider = (provider || 'google').toLowerCase()
 	const providerDef = getProvider(provider)
@@ -289,18 +348,8 @@ async function connectApp (token, opts = {}) {
 
 async function disconnectApp (token, opts = {}) {
 	const { appId, revoke = true } = opts
-	const { session } = requireSession(token, opts)
-	if (!session.admin) {
-		const error = new Error('Access denied: app administration requires admin privileges')
-		error.status = 403
-		throw error
-	}
-	const targetApp = db.tokens.get(appId)
-	if (!targetApp || targetApp.userId !== session.userId || targetApp.provider === 'self') {
-		const error = new Error(`App not found: ${appId}`)
-		error.status = 404
-		throw error
-	}
+	const { session } = requireAdmin(token, opts)
+	const targetApp = requireApp(session.userId, appId)
 	const shouldRevoke = revoke !== false && revoke !== 'false' && revoke !== 0
 	if (shouldRevoke) {
 		const providerDef = getProvider(targetApp.provider)
@@ -317,28 +366,19 @@ async function disconnectApp (token, opts = {}) {
 
 async function linkApp (token, opts = {}) {
 	const { sessionId, appId, policy = null } = opts
-	const { session } = requireSession(token, opts)
-	if (!session.admin) {
-		const error = new Error('Access denied: link administration requires admin privileges')
-		error.status = 403
+	const { session } = requireAdmin(token, opts, 'Access denied: link administration requires admin privileges')
+	const policyCheck = validatePolicy(policy)
+	if (!policyCheck.valid) {
+		const error = new Error(policyCheck.error)
+		error.status = 400
 		throw error
 	}
-	const targetSession = db.tokens.get(sessionId)
-	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self' || !targetSession.token) {
-		const error = new Error(`Session not found: ${sessionId}`)
-		error.status = 404
-		throw error
-	}
-	const targetApp = db.tokens.get(appId)
-	if (!targetApp || targetApp.userId !== session.userId || targetApp.provider === 'self') {
-		const error = new Error(`App not found: ${appId}`)
-		error.status = 404
-		throw error
-	}
+	const targetSession = requireTargetSession(session.userId, sessionId)
+	const targetApp = requireApp(session.userId, appId)
 	const link = db.links.create({
 		sessionId: targetSession.id,
 		appId: targetApp.id,
-		policy
+		policy: policyCheck.policy
 	})
 	return {
 		linked: true,
@@ -350,24 +390,9 @@ async function linkApp (token, opts = {}) {
 
 async function unlinkApp (token, opts = {}) {
 	const { sessionId, appId } = opts
-	const { session } = requireSession(token, opts)
-	if (!session.admin) {
-		const error = new Error('Access denied: link administration requires admin privileges')
-		error.status = 403
-		throw error
-	}
-	const targetSession = db.tokens.get(sessionId)
-	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self' || !targetSession.token) {
-		const error = new Error(`Session not found: ${sessionId}`)
-		error.status = 404
-		throw error
-	}
-	const targetApp = db.tokens.get(appId)
-	if (!targetApp || targetApp.userId !== session.userId || targetApp.provider === 'self') {
-		const error = new Error(`App not found: ${appId}`)
-		error.status = 404
-		throw error
-	}
+	const { session } = requireAdmin(token, opts, 'Access denied: link administration requires admin privileges')
+	const targetSession = requireTargetSession(session.userId, sessionId)
+	const targetApp = requireApp(session.userId, appId)
 	const removed = db.links.remove(targetSession.id, targetApp.id)
 	return {
 		unlinked: removed,
@@ -378,12 +403,7 @@ async function unlinkApp (token, opts = {}) {
 
 async function updateEmail (token, opts = {}) {
 	const newEmail = opts.email || opts.newEmail
-	const { session } = requireSession(token, opts)
-	if (!session.admin) {
-		const error = new Error('Access denied: updating account email requires admin privileges')
-		error.status = 403
-		throw error
-	}
+	const { session } = requireAdmin(token, opts, 'Access denied: updating account email requires admin privileges')
 	if (!newEmail || typeof newEmail !== 'string' || !newEmail.includes('@')) {
 		const error = new Error('Valid new email address is required')
 		error.status = 400
@@ -408,12 +428,7 @@ async function updateEmail (token, opts = {}) {
 }
 
 async function updateUser (token, opts = {}) {
-	const { session } = requireSession(token, opts)
-	if (!session.admin) {
-		const error = new Error('Access denied: updating user profile requires admin privileges')
-		error.status = 403
-		throw error
-	}
+	const { session } = requireAdmin(token, opts, 'Access denied: updating user profile requires admin privileges')
 	const { id, email, appUrl, ...updates } = opts
 	const user = db.users.updateUser(session.userId, updates)
 	return {
@@ -428,23 +443,8 @@ async function updateUser (token, opts = {}) {
 
 async function updateApp (token, opts = {}) {
 	const { appId, name, account, baseUrl, apiKey } = opts
-	const { session } = requireSession(token, opts)
-	if (!session.admin) {
-		const error = new Error('Access denied: app administration requires admin privileges')
-		error.status = 403
-		throw error
-	}
-	if (!appId) {
-		const error = new Error('appId is required')
-		error.status = 400
-		throw error
-	}
-	const targetApp = db.tokens.get(appId)
-	if (!targetApp || targetApp.userId !== session.userId || targetApp.provider === 'self') {
-		const error = new Error(`App not found: ${appId}`)
-		error.status = 404
-		throw error
-	}
+	const { session } = requireAdmin(token, opts)
+	const targetApp = requireApp(session.userId, appId, { allowShare: false, requireId: true })
 	let normalizedBaseUrl
 	if (baseUrl !== undefined) {
 		normalizedBaseUrl = validateBaseUrl(baseUrl)
@@ -484,6 +484,48 @@ async function updateApp (token, opts = {}) {
 	}
 }
 
+async function shareApp (token, opts = {}) {
+	const { policy = null } = opts
+	const { session, targetApp, normalizedEmail } = requireShareTarget(token, opts)
+	if (normalizedEmail === (session.email || '').toLowerCase()) {
+		const error = new Error('Cannot share an app with yourself')
+		error.status = 400
+		throw error
+	}
+	const policyCheck = validatePolicy(policy)
+	if (!policyCheck.valid) {
+		const error = new Error(policyCheck.error)
+		error.status = 400
+		throw error
+	}
+	const recipient = db.users.upsert({ email: normalizedEmail })
+	const share = db.tokens.upsertShare({
+		userId: recipient.id,
+		appId: targetApp.id,
+		provider: targetApp.provider,
+		policy: policyCheck.policy
+	})
+	return {
+		shared: true,
+		shareId: share.id,
+		appId: targetApp.id,
+		userId: recipient.id,
+		email: recipient.email,
+		policy: policyCheck.policy
+	}
+}
+
+async function unshareApp (token, opts = {}) {
+	const { targetApp, normalizedEmail } = requireShareTarget(token, opts)
+	const recipient = db.users.getByEmail(normalizedEmail)
+	const removed = recipient ? db.tokens.removeShare(recipient.id, targetApp.id) : false
+	return {
+		unshared: removed,
+		appId: targetApp.id,
+		email: normalizedEmail
+	}
+}
+
 async function updateSession (token, opts = {}) {
 	const { sessionId, name, admin, rotateToken } = opts
 	const { session } = requireSession(token, opts)
@@ -498,12 +540,7 @@ async function updateSession (token, opts = {}) {
 		error.status = 403
 		throw error
 	}
-	const targetSession = db.tokens.get(targetId)
-	if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self' || !targetSession.token) {
-		const error = new Error(`Session not found: ${targetId}`)
-		error.status = 404
-		throw error
-	}
+	requireTargetSession(session.userId, targetId)
 	if (name !== undefined) {
 		db.tokens.updateName(targetId, name)
 	}

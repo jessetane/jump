@@ -629,7 +629,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	if (reauthAppId) {
 		const session = sessionId ? db.tokens.get(sessionId) : null
 		const existingApp = db.tokens.get(reauthAppId)
-		if (!session || session.provider !== 'self' || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id) {
+		if (!session || session.provider !== 'self' || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type === 'share') {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: unauthorized re-authentication request.')
@@ -708,7 +708,7 @@ async function handleCallback (req, res, query) {
 	if (oauthState.reauthAppId) {
 		const session = oauthState.sessionId ? db.tokens.get(oauthState.sessionId) : null
 		const existingApp = db.tokens.get(oauthState.reauthAppId)
-		if (!session || session.provider !== 'self' || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id) {
+		if (!session || session.provider !== 'self' || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type === 'share') {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: unauthorized re-authentication request.')

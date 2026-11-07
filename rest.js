@@ -141,6 +141,21 @@ const routes = {
 			sendJson(res, result)
 		}
 	},
+	'/api/shares': {
+		async POST (req, res, { token, appUrl }) {
+			const body = await parseJsonBody(req)
+			const result = await api.auth.shareApp(token, { ...body, appUrl })
+			sendJson(res, result, 201)
+		},
+		async DELETE (req, res, { token, query, appUrl }) {
+			const result = await api.auth.unshareApp(token, {
+				appId: query.appId,
+				email: query.email,
+				appUrl
+			})
+			sendJson(res, result)
+		}
+	},
 	'/api/logs': {
 		async GET (req, res, { token, query, appUrl }) {
 			const result = await api.auth.listLogs(token, {

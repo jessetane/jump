@@ -175,7 +175,7 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 	const start = Date.now()
 	const normalizedMethod = (method || 'GET').toUpperCase()
 	const provider = getProvider(providerName)
-	let targetAppId = appId ? String(appId) : null
+	let targetAppId = null
 	let resolvedUrl = String(url)
 	let allowed = false
 	const recordLog = (status, error = null) => {
@@ -227,23 +227,47 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 			targetLink = found
 		}
 		targetAppId = targetLink.app?.id || null
-		resolvedUrl = provider.normalizeTargetUrl(url, targetLink.app)
-		const urlCheck = provider.isAllowedUrl(resolvedUrl, targetLink.app)
+		let upstreamApp = targetLink.app
+		if (upstreamApp?.type === 'share') {
+			targetAppId = upstreamApp.credentials?.appId || null
+			upstreamApp = db.tokens.get(targetAppId)
+			if (!upstreamApp || upstreamApp.provider === 'self' || upstreamApp.type === 'share') {
+				const err = new Error(`Shared upstream app not found: ${targetLink.app.id}`)
+				err.status = 404
+				throw err
+			}
+		}
+		resolvedUrl = provider.normalizeTargetUrl(url, upstreamApp)
+		const urlCheck = provider.isAllowedUrl(resolvedUrl, upstreamApp)
 		if (!urlCheck.allowed) {
 			const err = new Error(urlCheck.reason)
 			err.status = 403
 			throw err
 		}
-		if (targetLink.policy) {
-			let contentType
-			if (headers && typeof headers === 'object') {
-				for (const [k, v] of Object.entries(headers)) {
-					if (k.toLowerCase() === 'content-type' && v !== undefined && v !== null) {
-						contentType = String(v)
-						break
-					}
+		let contentType
+		if (headers && typeof headers === 'object') {
+			for (const [k, v] of Object.entries(headers)) {
+				if (k.toLowerCase() === 'content-type' && v !== undefined && v !== null) {
+					contentType = String(v)
+					break
 				}
 			}
+		}
+		const sharePolicy = targetLink.app?.type === 'share' ? targetLink.app.credentials?.policy : null
+		if (sharePolicy) {
+			const check = evaluatePolicy(sharePolicy, {
+				url: resolvedUrl,
+				method: normalizedMethod,
+				body,
+				contentType
+			})
+			if (!check.allowed) {
+				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by shared app policy'}`)
+				err.status = 403
+				throw err
+			}
+		}
+		if (targetLink.policy) {
 			const check = evaluatePolicy(targetLink.policy, {
 				url: resolvedUrl,
 				method: normalizedMethod,
@@ -259,9 +283,14 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 		allowed = true
 		let freshInfo = null
 		try {
-			freshInfo = await provider.getFreshToken(targetLink.app)
+			freshInfo = await provider.getFreshToken(upstreamApp)
 		} catch (err) {
-			const reauthUrl = `${appUrl}/providers/${provider.id}/connect?session_id=${encodeURIComponent(session.id)}&reauth_app_id=${encodeURIComponent(targetLink.app.id)}`
+			if (targetLink.app?.type === 'share') {
+				const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. Ask the app owner (${targetLink.app.sharedBy || 'admin'}) to re-authenticate.`)
+				error.status = 401
+				throw error
+			}
+			const reauthUrl = `${appUrl}/providers/${provider.id}/connect?session_id=${encodeURIComponent(session.id)}&reauth_app_id=${encodeURIComponent(upstreamApp.id)}`
 			const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. Re-authenticate: ${reauthUrl}`)
 			error.status = 401
 			throw error

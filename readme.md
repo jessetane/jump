@@ -95,7 +95,7 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 ### Tools
 
 * `<provider>_api({ url, method?, body?, headers?, account?, appId? })` - Proxies an HTTP request to the linked upstream provider.
-* `admin({ action, ... })` - Manages sessions, apps, links, and usage logs (`whoami`, `list`, `get`, `create_session`, `update_session`, `revoke`, `list_apps`, `connect_app`, `disconnect_app`, `update_app`, `link_app`, `unlink_app`, `update_email`, `update_user`, `list_logs`). Exposed only to admin sessions.
+* `admin({ action, ... })` - Manages sessions, apps, shares, links, and usage logs (`whoami`, `list`, `get`, `create_session`, `update_session`, `revoke`, `list_apps`, `connect_app`, `disconnect_app`, `update_app`, `share_app`, `unshare_app`, `link_app`, `unlink_app`, `update_email`, `update_user`, `list_logs`). Exposed only to admin sessions.
 
 ## HTTP
 ```
@@ -124,6 +124,8 @@ GET    /api/apps                                # list connected apps (admin)
 POST   /api/apps                                # connect app (admin)
 PATCH  /api/apps/:id                            # update app (admin)
 DELETE /api/apps/:id                            # disconnect app (admin)
+POST   /api/shares                              # share app with user (admin)
+DELETE /api/shares                              # unshare app from user (admin)
 POST   /api/links                               # link app to session (admin)
 DELETE /api/links                               # unlink app from session (admin)
 GET    /api/logs                                # list usage logs
