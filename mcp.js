@@ -43,7 +43,12 @@ const adminTool = {
 			},
 			sessionId: { type: 'string', description: 'Target session token ID.' },
 			appId: { type: 'string', description: 'Target upstream app token ID (used for connect_app, update_app, disconnect_app, share_app, unshare_app, link_app, unlink_app).' },
-			loginId: { type: 'string', description: 'Target login key token ID (optional for unlink_login).' },
+			linkAppIds: {
+				type: 'array',
+				items: { type: 'string' },
+				description: 'Optional list of upstream or shared app IDs to link immediately when action is create_session.'
+			},
+			loginId: { type: 'string', description: 'Target login key ID (optional for unlink_login).' },
 			name: { type: 'string', description: 'Human-readable label for a session or upstream app.' },
 			account: { type: 'string', description: 'Upstream account, login key account, or recipient user account identifier (e.g. email, username, or "provider:account").' },
 			baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or API-key providers (e.g. "https://api.stripe.com").' },

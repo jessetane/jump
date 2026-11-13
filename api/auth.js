@@ -24,11 +24,11 @@ export {
 	validateBaseUrl
 }
 
-function formatLogin (authToken) {
+function formatLogin (login) {
 	return {
-		id: authToken.id,
-		provider: authToken.provider,
-		account: authToken.name
+		id: login.id,
+		provider: login.provider,
+		account: login.account
 	}
 }
 
@@ -69,13 +69,13 @@ async function whoami (token, opts = {}) {
 			message: 'Missing or expired Bearer token.'
 		}
 	}
-	const authTokens = db.tokens.listAuthByUserId(session.userId)
+	const logins = db.logins.listByUserId(session.userId)
 	return {
 		authenticated: true,
 		user: {
 			id: session.userId,
 			account: session.account,
-			logins: authTokens.map(formatLogin)
+			logins: logins.map(formatLogin)
 		},
 		session: formatSession(session)
 	}
@@ -109,7 +109,7 @@ function requireApp (userId, appId, { allowShare = true, requireId = false } = {
 		throw error
 	}
 	const targetApp = db.tokens.get(appId)
-	if (!targetApp || targetApp.userId !== userId || targetApp.provider === 'self' || targetApp.type === 'auth' || (!allowShare && targetApp.type === 'share')) {
+	if (!targetApp || targetApp.userId !== userId || !db.tokens.isUpstreamApp(targetApp, { allowShare })) {
 		const error = new Error(`App not found: ${appId}`)
 		error.status = 404
 		throw error
@@ -171,6 +171,10 @@ async function createSession (token, opts = {}) {
 		error.status = 400
 		throw error
 	}
+	const appsToLink = []
+	for (const appId of (Array.isArray(linkAppIds) ? linkAppIds : [])) {
+		appsToLink.push(requireApp(session.userId, appId))
+	}
 	const newSession = db.tokens.create({
 		userId: session.userId,
 		provider: 'self',
@@ -178,15 +182,12 @@ async function createSession (token, opts = {}) {
 		name,
 		admin: admin ? 1 : 0
 	})
-	for (const appId of (Array.isArray(linkAppIds) ? linkAppIds : [])) {
-		const app = db.tokens.get(appId)
-		if (app && app.userId === session.userId && app.provider !== 'self' && app.type !== 'auth') {
-			db.links.create({
-				sessionId: newSession.id,
-				appId: app.id,
-				policy: policyCheck.policy
-			})
-		}
+	for (const app of appsToLink) {
+		db.links.create({
+			sessionId: newSession.id,
+			appId: app.id,
+			policy: policyCheck.policy
+		})
 	}
 	return {
 		created: true,
@@ -441,12 +442,12 @@ async function unlinkLogin (token, opts = {}) {
 		error.status = 400
 		throw error
 	}
-	const removed = db.tokens.removeAuth(session.userId, {
+	const removed = db.logins.remove(session.userId, {
 		loginId,
 		provider: cleanProvider,
 		account: cleanAccount
 	})
-	const remaining = db.tokens.listAuthByUserId(session.userId)
+	const remaining = db.logins.listByUserId(session.userId)
 	return {
 		unlinked: true,
 		login: formatLogin(removed),
@@ -500,11 +501,11 @@ async function updateApp (token, opts = {}) {
 async function shareApp (token, opts = {}) {
 	const { policy = null } = opts
 	const { session, targetApp, cleanAccount, cleanProvider } = requireShareTarget(token, opts)
-	const selfAuths = db.tokens.listAuthByUserId(session.userId)
-	const isSelf = selfAuths.some(a => {
-		const acc = (a.name || '').toLowerCase()
-		return cleanProvider ? (a.provider === cleanProvider && acc === cleanAccount) : acc === cleanAccount
-	}) || (!selfAuths.length && !cleanProvider && cleanAccount === (session.account || '').toLowerCase())
+	const selfLogins = db.logins.listByUserId(session.userId)
+	const isSelf = selfLogins.some(l => {
+		const acc = (l.account || '').toLowerCase()
+		return cleanProvider ? (l.provider === cleanProvider && acc === cleanAccount) : acc === cleanAccount
+	}) || (!selfLogins.length && !cleanProvider && cleanAccount === (session.account || '').toLowerCase())
 	if (isSelf) {
 		const error = new Error('Cannot share an app with yourself')
 		error.status = 400
@@ -516,17 +517,17 @@ async function shareApp (token, opts = {}) {
 		error.status = 400
 		throw error
 	}
-	const sharerSsoAuth = selfAuths.find(a => getProvider(a.provider)?.ssoOnly)
-	if (sharerSsoAuth && cleanProvider && cleanProvider !== sharerSsoAuth.provider) {
-		const error = new Error(`Access denied: SSO-only provider restriction requires sharing within "${sharerSsoAuth.provider}"`)
+	const sharerSsoLogin = selfLogins.find(l => getProvider(l.provider)?.ssoOnly)
+	if (sharerSsoLogin && cleanProvider && cleanProvider !== sharerSsoLogin.provider) {
+		const error = new Error(`Access denied: SSO-only provider restriction requires sharing within "${sharerSsoLogin.provider}"`)
 		error.status = 403
 		throw error
 	}
-	const effectiveProvider = cleanProvider || sharerSsoAuth?.provider || null
+	const effectiveProvider = cleanProvider || sharerSsoLogin?.provider || null
 	if (effectiveProvider) {
 		requireAuthProvider(effectiveProvider)
 	}
-	const recipient = db.tokens.findUserByAccount(cleanAccount, effectiveProvider)
+	const recipient = db.logins.findUserByAccount(cleanAccount, effectiveProvider)
 	if (recipient) {
 		if (recipient.id === session.userId) {
 			const error = new Error('Cannot share an app with yourself')

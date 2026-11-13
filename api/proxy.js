@@ -231,7 +231,7 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 		if (upstreamApp?.type === 'share') {
 			targetAppId = upstreamApp.credentials?.appId || null
 			upstreamApp = db.tokens.get(targetAppId)
-			if (!upstreamApp || upstreamApp.provider === 'self' || upstreamApp.type === 'share') {
+			if (!db.tokens.isUpstreamApp(upstreamApp)) {
 				const err = new Error(`Shared upstream app not found: ${targetLink.app.id}`)
 				err.status = 404
 				throw err
