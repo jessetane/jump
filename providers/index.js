@@ -22,6 +22,8 @@ const providers = {
 	github
 }
 
+const inflightRefreshes = new Map()
+
 function summarizeScopes (scopesStr, services) {
 	if (!scopesStr || typeof scopesStr !== 'string' || !services) return ''
 	const granted = new Set(scopesStr.split(/[\s,]+/).filter(Boolean))
@@ -127,7 +129,7 @@ function createProvider (config) {
 		}
 	}
 	const envPrefix = id.toUpperCase()
-	const ssoOnly = Boolean(rawConfig.ssoOnly || oauth?.ssoOnly)
+	const ssoOnly = Boolean(rawConfig.ssoOnly || oauth?.ssoOnly || process.env[`${envPrefix}_SSO_ONLY`] === 'true')
 	return {
 		id,
 		name: label,
@@ -262,43 +264,54 @@ function createProvider (config) {
 				}
 			}
 			if (oauth && creds.refreshToken && (!appToken.expiresAt || Date.now() > appToken.expiresAt - 60000)) {
-				const clientId = process.env[`${envPrefix}_CLIENT_ID`]
-				const clientSecret = process.env[`${envPrefix}_CLIENT_SECRET`]
-				if (!clientId || !clientSecret) {
-					const err = new Error(`${envPrefix}_CLIENT_ID or ${envPrefix}_CLIENT_SECRET environment variable is missing`)
-					err.status = 500
-					throw err
+				if (inflightRefreshes.has(appToken.id)) {
+					return inflightRefreshes.get(appToken.id)
 				}
-				const params = new URLSearchParams({
-					client_id: clientId,
-					client_secret: clientSecret,
-					refresh_token: creds.refreshToken,
-					grant_type: 'refresh_token'
-				})
-				const res = await fetch(oauth.tokenUrl, {
-					method: 'POST',
-					headers: {
-						accept: 'application/json',
-						'content-type': 'application/x-www-form-urlencoded',
-						'user-agent': 'jump'
-					},
-					body: params.toString()
-				})
-				const data = await parseTokenResponse(res, `Failed to refresh ${label} token`)
-				const expiresAt = data.expires_in ? Date.now() + (data.expires_in * 1000) : null
-				const updatedCreds = {
-					...creds,
-					accessToken: data.access_token,
-					refreshToken: data.refresh_token || creds.refreshToken
-				}
-				const updated = db.tokens.updateCredentials(appToken.id, {
-					credentials: updatedCreds,
-					expiresAt,
-					scopes: data.scope || appToken.scopes
-				})
-				return {
-					token: data.access_token,
-					app: updated
+				const refreshPromise = (async () => {
+					const clientId = process.env[`${envPrefix}_CLIENT_ID`]
+					const clientSecret = process.env[`${envPrefix}_CLIENT_SECRET`]
+					if (!clientId || !clientSecret) {
+						const err = new Error(`${envPrefix}_CLIENT_ID or ${envPrefix}_CLIENT_SECRET environment variable is missing`)
+						err.status = 500
+						throw err
+					}
+					const params = new URLSearchParams({
+						client_id: clientId,
+						client_secret: clientSecret,
+						refresh_token: creds.refreshToken,
+						grant_type: 'refresh_token'
+					})
+					const res = await fetch(oauth.tokenUrl, {
+						method: 'POST',
+						headers: {
+							accept: 'application/json',
+							'content-type': 'application/x-www-form-urlencoded',
+							'user-agent': 'jump'
+						},
+						body: params.toString()
+					})
+					const data = await parseTokenResponse(res, `Failed to refresh ${label} token`)
+					const expiresAt = data.expires_in ? Date.now() + (data.expires_in * 1000) : null
+					const updatedCreds = {
+						...creds,
+						accessToken: data.access_token,
+						refreshToken: data.refresh_token || creds.refreshToken
+					}
+					const updated = db.tokens.updateCredentials(appToken.id, {
+						credentials: updatedCreds,
+						expiresAt,
+						scopes: data.scope || appToken.scopes
+					})
+					return {
+						token: data.access_token,
+						app: updated
+					}
+				})()
+				inflightRefreshes.set(appToken.id, refreshPromise)
+				try {
+					return await refreshPromise
+				} finally {
+					inflightRefreshes.delete(appToken.id)
 				}
 			}
 			return {
@@ -399,7 +412,7 @@ function requireAuthProvider (rawName) {
 }
 
 function hasSsoLock (userId, targetProvider) {
-	const existingAuths = db.tokens.listAuthByUserId(userId)
-	const otherProviderAuths = existingAuths.filter(a => a.provider !== targetProvider.id)
-	return otherProviderAuths.some(a => getProvider(a.provider)?.ssoOnly) || (Boolean(targetProvider.ssoOnly) && otherProviderAuths.length > 0)
+	const existingLogins = db.logins.listByUserId(userId)
+	const otherProviderLogins = existingLogins.filter(l => l.provider !== targetProvider.id)
+	return otherProviderLogins.some(l => getProvider(l.provider)?.ssoOnly) || (Boolean(targetProvider.ssoOnly) && otherProviderLogins.length > 0)
 }

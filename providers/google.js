@@ -14,6 +14,7 @@ export default {
 			prompt: 'consent'
 		},
 		extractAccount (user) {
+			if (user.verified_email === false) return null
 			return (user.email || '').toLowerCase() || null
 		},
 		async revoke ({ token }) {
