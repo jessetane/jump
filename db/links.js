@@ -1,5 +1,5 @@
 import { sqlite } from './index.js'
-import { formatToken, UPSTREAM_SELECT, UPSTREAM_JOIN } from './tokens.js'
+import { formatToken, USER_ACCOUNT_SQL, UPSTREAM_SELECT, UPSTREAM_JOIN } from './tokens.js'
 
 export {
 	init,
@@ -57,7 +57,7 @@ function create (opts = {}) {
 function get (sessionId, appId) {
 	if (!sessionId || !appId) return null
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.account, users.name AS user_name, ${UPSTREAM_SELECT},
+		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account, ${UPSTREAM_SELECT},
 			links.session_id, links.app_id, links.policy,
 			links.created AS link_created, links.updated AS link_updated
 		FROM links
@@ -72,7 +72,7 @@ function get (sessionId, appId) {
 function listBySessionId (sessionId) {
 	if (!sessionId) return []
 	const rows = sqlite.prepare(`
-		SELECT tokens.*, users.account, users.name AS user_name, ${UPSTREAM_SELECT},
+		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account, ${UPSTREAM_SELECT},
 			links.session_id, links.app_id, links.policy,
 			links.created AS link_created, links.updated AS link_updated
 		FROM links
@@ -92,7 +92,7 @@ function listByAppId (appId) {
 			tokens.id AS target_session_id, tokens.user_id, tokens.provider, tokens.type,
 			tokens.name, tokens.token, tokens.admin, tokens.ip, tokens.ua,
 			tokens.created AS session_created, tokens.updated AS session_updated,
-			users.account, users.name AS user_name
+			${USER_ACCOUNT_SQL} AS account
 		FROM links
 		JOIN tokens ON links.session_id = tokens.id
 		JOIN users ON tokens.user_id = users.id
@@ -116,8 +116,7 @@ function listByAppId (appId) {
 			ua: r.ua,
 			created: r.session_created,
 			updated: r.session_updated,
-			account: r.account,
-			userName: r.user_name
+			account: r.account
 		}
 	}))
 }

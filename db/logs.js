@@ -1,4 +1,5 @@
 import { sqlite } from './index.js'
+import { userAccountSql } from './tokens.js'
 import { randomUUID } from 'node:crypto'
 
 export {
@@ -113,14 +114,26 @@ function listByUserId (userId, opts = {}) {
 	pruneIfNeeded()
 	const { sessionId, appId, provider, allowed, limit = 100 } = opts
 	let query = `
-		SELECT logs.*, users.account, COALESCE(owned.id, share.id) AS resolved_app_id
+		SELECT logs.*,
+			CASE
+				WHEN logs.user_id = ? THEN ${userAccountSql('logs.user_id')}
+				ELSE (
+					SELECT rs.name
+					FROM tokens AS rs
+					WHERE rs.user_id = logs.user_id
+						AND rs.type = 'share'
+						AND json_extract(rs.credentials, '$.appId') = logs.app_id
+					LIMIT 1
+				)
+			END AS account,
+			COALESCE(owned.id, share.id) AS resolved_app_id
 		FROM logs
 		JOIN users ON logs.user_id = users.id
 		LEFT JOIN tokens AS owned ON owned.id = logs.app_id AND owned.user_id = ? AND owned.type != 'share'
 		LEFT JOIN tokens AS share ON share.user_id = ? AND share.type = 'share' AND json_extract(share.credentials, '$.appId') = logs.app_id
 		WHERE (logs.user_id = ? OR owned.id IS NOT NULL)
 	`
-	const params = [userId, userId, userId]
+	const params = [userId, userId, userId, userId]
 	if (sessionId) {
 		query += ' AND logs.session_id = ?'
 		params.push(sessionId)

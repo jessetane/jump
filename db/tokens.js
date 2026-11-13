@@ -1,5 +1,6 @@
 import { sqlite } from './index.js'
 import * as users from './users.js'
+import { parseAccountSpec } from '../util.js'
 import { randomUUID, randomBytes } from 'node:crypto'
 
 export {
@@ -13,11 +14,12 @@ export {
 	refreshOauthSession,
 	listByUserId,
 	listAuthByUserId,
-	hasAuthTokens,
+	getAccountByUserId,
 	findUserByAccount,
-	claimStubUser,
 	upsertAuth,
+	removeAuth,
 	resolveUserByAuth,
+	claimPendingShares,
 	listSharesByOwnerId,
 	upsertShare,
 	removeShare,
@@ -35,9 +37,17 @@ export {
 	createAuthCode,
 	consumeAuthCode,
 	formatToken,
+	userAccountSql,
+	USER_ACCOUNT_SQL,
 	UPSTREAM_SELECT,
 	UPSTREAM_JOIN
 }
+
+function userAccountSql (userIdExpr) {
+	return `COALESCE((SELECT a.name FROM tokens AS a WHERE a.user_id = ${userIdExpr} AND a.type = 'auth' ORDER BY a.created ASC, a.rowid ASC LIMIT 1), 'localhost')`
+}
+
+const USER_ACCOUNT_SQL = userAccountSql('tokens.user_id')
 
 const UPSTREAM_SELECT = `
 	upstream.name AS upstream_name,
@@ -45,12 +55,11 @@ const UPSTREAM_SELECT = `
 	upstream.expires_at AS upstream_expires_at,
 	json_extract(upstream.credentials, '$.account') AS upstream_account,
 	json_extract(upstream.credentials, '$.baseUrl') AS upstream_base_url,
-	owner.account AS shared_by_account
+	CASE WHEN upstream.user_id IS NOT NULL THEN ${userAccountSql('upstream.user_id')} ELSE NULL END AS shared_by_account
 `
 
 const UPSTREAM_JOIN = `
 	LEFT JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
-	LEFT JOIN users AS owner ON upstream.user_id = owner.id
 `
 
 function init () {
@@ -77,24 +86,6 @@ function init () {
 		CREATE INDEX IF NOT EXISTS idx_tokens_updated ON tokens(updated);
 		CREATE INDEX IF NOT EXISTS idx_tokens_share_app ON tokens(json_extract(credentials, '$.appId')) WHERE type = 'share';
 	`)
-	if (users.consumeLegacyEmailMigration()) {
-		const missingAuthUsers = sqlite.prepare(`
-			SELECT users.* FROM users
-			WHERE NOT EXISTS (
-				SELECT 1 FROM tokens WHERE tokens.user_id = users.id AND tokens.type = 'auth'
-			)
-		`).all()
-		for (const u of missingAuthUsers) {
-			if (!u.account || !u.account.includes('@')) continue
-			const cleanAccount = u.account.trim().toLowerCase()
-			const authKey = `google:${cleanAccount}`
-			const now = new Date().toISOString()
-			sqlite.prepare(`
-				INSERT OR IGNORE INTO tokens (id, user_id, provider, type, name, token, credentials, created, updated)
-				VALUES (?, ?, 'google', 'auth', ?, ?, ?, ?, ?)
-			`).run(randomUUID(), u.id, cleanAccount, authKey, JSON.stringify({ account: cleanAccount }), now, now)
-		}
-	}
 }
 
 function formatToken (row) {
@@ -108,6 +99,7 @@ function formatToken (row) {
 		}
 	}
 	const isShare = row.type === 'share'
+	const resolvedAccount = row.user_id ? (row.account || null) : (isShare ? row.name : null)
 	return {
 		id: row.id,
 		userId: row.user_id,
@@ -127,8 +119,7 @@ function formatToken (row) {
 		ua: row.ua,
 		created: row.created,
 		updated: row.updated,
-		account: row.account,
-		userName: row.user_name,
+		account: resolvedAccount,
 		...(row.shared_by_account ? { sharedBy: row.shared_by_account } : {})
 	}
 }
@@ -161,9 +152,10 @@ function create (opts = {}) {
 function get (id) {
 	if (!id) return null
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.account, users.name AS user_name, ${UPSTREAM_SELECT}
+		SELECT tokens.*,
+			CASE WHEN tokens.user_id IS NOT NULL THEN ${USER_ACCOUNT_SQL} ELSE NULL END AS account,
+			${UPSTREAM_SELECT}
 		FROM tokens
-		LEFT JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
 		WHERE tokens.id = ?
 	`).get(id)
@@ -182,7 +174,7 @@ function getByToken (token) {
 	if (!token) return null
 	const now = Date.now()
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.account, users.name AS user_name
+		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.token = ? AND tokens.provider = 'self' AND tokens.type = 'bearer'
@@ -199,7 +191,7 @@ function findRevocable (token) {
 	if (!token || typeof token !== 'string') return null
 	pruneDormant()
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.account, users.name AS user_name
+		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.provider = 'self' AND tokens.type = 'bearer'
@@ -242,7 +234,7 @@ function refreshOauthSession (refreshToken) {
 	if (!refreshToken) return null
 	pruneDormant()
 	const row = sqlite.prepare(`
-		SELECT tokens.*, users.account, users.name AS user_name
+		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.provider = 'self' AND tokens.type = 'bearer'
@@ -275,7 +267,7 @@ function listByUserId (userId, opts = {}) {
 	if (!userId) return []
 	pruneDormant()
 	let query = `
-		SELECT tokens.*, users.account, users.name AS user_name, ${UPSTREAM_SELECT}
+		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account, ${UPSTREAM_SELECT}
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
@@ -295,78 +287,166 @@ function listByUserId (userId, opts = {}) {
 function listAuthByUserId (userId) {
 	if (!userId) return []
 	const rows = sqlite.prepare(`
-		SELECT tokens.*, users.account, users.name AS user_name, ${UPSTREAM_SELECT}
+		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
-		${UPSTREAM_JOIN}
 		WHERE tokens.user_id = ? AND tokens.type = 'auth'
-		ORDER BY tokens.created ASC
+		ORDER BY tokens.created ASC, tokens.rowid ASC
 	`).all(userId)
 	return rows.map(formatToken)
 }
 
-function hasAuthTokens (userId) {
-	if (!userId) return false
-	return Boolean(sqlite.prepare("SELECT 1 FROM tokens WHERE user_id = ? AND type = 'auth'").get(userId))
+function getAccountByUserId (userId) {
+	if (!userId) return null
+	const row = sqlite.prepare(`
+		SELECT name
+		FROM tokens
+		WHERE user_id = ? AND type = 'auth'
+		ORDER BY created ASC, rowid ASC
+		LIMIT 1
+	`).get(userId)
+	return row?.name || 'localhost'
 }
 
 function findUserByAccount (account, provider = null) {
-	if (!account) return null
-	const cleanAccount = String(account).trim().toLowerCase()
+	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
 	if (!cleanAccount) return null
-	if (provider) {
-		const cleanProvider = String(provider).trim().toLowerCase()
+	if (cleanProvider) {
 		const authKey = `${cleanProvider}:${cleanAccount}`
 		const authRow = sqlite.prepare("SELECT user_id FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
-		if (authRow) return users.get(authRow.user_id)
-		return users.getByAccount(authKey) || users.getByAccount(cleanAccount)
+		return authRow ? users.get(authRow.user_id) : null
 	}
-	const authRow = sqlite.prepare("SELECT user_id FROM tokens WHERE type = 'auth' AND (token = ? OR name = ?)").get(cleanAccount, cleanAccount)
-	if (authRow) {
-		return users.get(authRow.user_id)
+	const rows = sqlite.prepare("SELECT DISTINCT user_id FROM tokens WHERE type = 'auth' AND name = ?").all(cleanAccount)
+	if (rows.length > 1) {
+		const err = new Error(`Ambiguous account "${cleanAccount}" matches multiple users across providers; specify provider`)
+		err.status = 400
+		throw err
 	}
-	return users.getByAccount(cleanAccount)
+	return rows.length === 1 ? users.get(rows[0].user_id) : null
 }
 
-function claimStubUser (stubUserId, targetUserId) {
-	if (!stubUserId || !targetUserId || stubUserId === targetUserId) return
-	sqlite.prepare(`
-		DELETE FROM tokens
-		WHERE user_id = ? AND type = 'share'
-			AND (
-				json_extract(credentials, '$.appId') IN (
-					SELECT json_extract(credentials, '$.appId') FROM tokens WHERE user_id = ? AND type = 'share'
-				)
-				OR json_extract(credentials, '$.appId') IN (
-					SELECT id FROM tokens WHERE user_id = ?
-				)
-			)
-	`).run(stubUserId, targetUserId, targetUserId)
-	sqlite.prepare('UPDATE tokens SET user_id = ? WHERE user_id = ?').run(targetUserId, stubUserId)
-	sqlite.prepare('DELETE FROM users WHERE id = ?').run(stubUserId)
+function claimPendingShares ({ userId, provider, account }) {
+	const cleanProvider = String(provider).trim().toLowerCase()
+	const cleanAccount = String(account).trim().toLowerCase()
+	const pendingRows = sqlite.prepare(`
+		SELECT id, credentials, updated FROM tokens
+		WHERE user_id IS NULL AND type = 'share' AND name = ?
+			AND (json_extract(credentials, '$.authProvider') IS NULL OR json_extract(credentials, '$.authProvider') = ?)
+		ORDER BY
+			CASE WHEN json_extract(credentials, '$.authProvider') = ? THEN 0 ELSE 1 END ASC,
+			updated DESC,
+			rowid DESC
+	`).all(cleanAccount, cleanProvider, cleanProvider)
+	for (const row of pendingRows) {
+		const creds = row.credentials ? JSON.parse(row.credentials) : {}
+		const appId = creds.appId
+		if (!appId) continue
+		const ownsApp = sqlite.prepare('SELECT 1 FROM tokens WHERE id = ? AND user_id = ?').get(appId, userId)
+		if (ownsApp) {
+			sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(row.id)
+			continue
+		}
+		const resolvedCreds = {
+			...creds,
+			authProvider: creds.authProvider || cleanProvider
+		}
+		const existingShare = sqlite.prepare(`
+			SELECT id, name, updated FROM tokens
+			WHERE user_id = ? AND type = 'share' AND json_extract(credentials, '$.appId') = ?
+		`).get(userId, appId)
+		if (existingShare) {
+			if (creds.authProvider === cleanProvider && existingShare.name === cleanAccount && row.updated >= existingShare.updated) {
+				sqlite.prepare(`
+					UPDATE tokens
+					SET name = ?, credentials = ?, updated = ?
+					WHERE id = ?
+				`).run(cleanAccount, JSON.stringify(resolvedCreds), row.updated, existingShare.id)
+			}
+			sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(row.id)
+			continue
+		}
+		sqlite.prepare(`
+			UPDATE tokens
+			SET user_id = ?, name = ?, credentials = ?
+			WHERE id = ?
+		`).run(userId, cleanAccount, JSON.stringify(resolvedCreds), row.id)
+	}
+}
+
+function runInTransaction (fn) {
+	if (!sqlite.isTransaction) {
+		sqlite.exec('BEGIN;')
+		try {
+			const result = fn()
+			sqlite.exec('COMMIT;')
+			return result
+		} catch (err) {
+			sqlite.exec('ROLLBACK;')
+			throw err
+		}
+	}
+	return fn()
 }
 
 function upsertAuth ({ userId, provider, account }) {
 	const cleanProvider = String(provider).trim().toLowerCase()
 	const cleanAccount = String(account).trim().toLowerCase()
 	const authKey = `${cleanProvider}:${cleanAccount}`
-	const existing = sqlite.prepare("SELECT * FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
-	if (existing) {
-		if (existing.user_id !== userId) {
-			const err = new Error(`Account ${cleanAccount} is already bound to another user`)
-			err.status = 409
-			throw err
+	return runInTransaction(() => {
+		const existing = sqlite.prepare("SELECT * FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
+		if (existing) {
+			if (existing.user_id !== userId) {
+				const err = new Error(`Account ${cleanAccount} is already registered to another user`)
+				err.status = 409
+				throw err
+			}
+			claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount })
+			return get(existing.id)
 		}
-		return get(existing.id)
-	}
-	return create({
-		userId,
-		provider: cleanProvider,
-		type: 'auth',
-		name: cleanAccount,
-		token: authKey,
-		credentials: { account: cleanAccount }
+		const created = create({
+			userId,
+			provider: cleanProvider,
+			type: 'auth',
+			name: cleanAccount,
+			token: authKey
+		})
+		claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount })
+		return created
 	})
+}
+
+function removeAuth (userId, { loginId = null, provider = null, account = null } = {}) {
+	if (!userId) return null
+	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
+	const allAuths = listAuthByUserId(userId)
+	let matches = allAuths
+	if (loginId) {
+		matches = matches.filter(a => a.id === loginId)
+	}
+	if (cleanProvider) {
+		matches = matches.filter(a => a.provider === cleanProvider)
+	}
+	if (cleanAccount) {
+		matches = matches.filter(a => a.name === cleanAccount)
+	}
+	if (matches.length === 0) {
+		const err = new Error('Login key not found')
+		err.status = 404
+		throw err
+	}
+	if (matches.length > 1) {
+		const err = new Error('Multiple login keys match; specify account')
+		err.status = 400
+		throw err
+	}
+	if (allAuths.length <= 1) {
+		const err = new Error('Cannot unlink your only login key')
+		err.status = 400
+		throw err
+	}
+	const target = matches[0]
+	sqlite.prepare('DELETE FROM tokens WHERE id = ? AND user_id = ?').run(target.id, userId)
+	return target
 }
 
 function resolveUserByAuth (provider, account, { createIfMissing = true } = {}) {
@@ -374,60 +454,149 @@ function resolveUserByAuth (provider, account, { createIfMissing = true } = {}) 
 	const cleanProvider = String(provider).trim().toLowerCase()
 	const cleanAccount = String(account).trim().toLowerCase()
 	const authKey = `${cleanProvider}:${cleanAccount}`
-	const row = sqlite.prepare("SELECT user_id FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
-	if (row) {
-		return users.get(row.user_id)
-	}
-	if (!createIfMissing) return null
-	const existing = users.getByAccount(cleanAccount)
-	if (existing && !hasAuthTokens(existing.id)) {
-		upsertAuth({ userId: existing.id, provider: cleanProvider, account: cleanAccount })
-		return existing
-	}
-	const targetAccount = existing ? `${cleanProvider}:${cleanAccount}` : cleanAccount
-	const user = users.upsert({ account: targetAccount })
-	upsertAuth({ userId: user.id, provider: cleanProvider, account: cleanAccount })
-	return user
+	return runInTransaction(() => {
+		const row = sqlite.prepare("SELECT user_id FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
+		if (row) {
+			claimPendingShares({ userId: row.user_id, provider: cleanProvider, account: cleanAccount })
+			return users.get(row.user_id)
+		}
+		if (!createIfMissing) return null
+		const user = users.create()
+		upsertAuth({ userId: user.id, provider: cleanProvider, account: cleanAccount })
+		return user
+	})
 }
 
 function listSharesByOwnerId (ownerUserId) {
 	if (!ownerUserId) return []
 	const rows = sqlite.prepare(`
-		SELECT tokens.*, users.account, users.name AS user_name
+		SELECT tokens.*,
+			CASE WHEN tokens.user_id IS NOT NULL THEN COALESCE(tokens.name, ${USER_ACCOUNT_SQL}) ELSE tokens.name END AS account
 		FROM tokens
-		JOIN users ON tokens.user_id = users.id
 		JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
 		WHERE upstream.user_id = ?
-		ORDER BY tokens.created ASC
+		ORDER BY tokens.created ASC, tokens.rowid ASC
 	`).all(ownerUserId)
 	return rows.map(formatToken)
 }
 
-function upsertShare ({ userId, appId, provider, policy = null }) {
-	const existing = sqlite.prepare(`
-		SELECT id FROM tokens
-		WHERE user_id = ? AND type = 'share' AND json_extract(credentials, '$.appId') = ?
-	`).get(userId, appId)
-	if (existing) {
-		return updateCredentials(existing.id, {
-			credentials: { appId, policy }
+function upsertShare ({ userId = null, account = null, authProvider = null, appId, provider, policy = null }) {
+	const cleanAccount = account ? String(account).trim().toLowerCase() : null
+	const cleanAuthProvider = authProvider ? String(authProvider).trim().toLowerCase() : null
+	if (userId) {
+		const existing = sqlite.prepare(`
+			SELECT id, name, credentials FROM tokens
+			WHERE user_id = ? AND type = 'share' AND json_extract(credentials, '$.appId') = ?
+		`).get(userId, appId)
+		const existingCreds = existing?.credentials ? JSON.parse(existing.credentials) : null
+		let resolvedAuthProvider = cleanAuthProvider
+		if (!resolvedAuthProvider) {
+			if (existingCreds?.authProvider && (!cleanAccount || existing.name === cleanAccount)) {
+				resolvedAuthProvider = existingCreds.authProvider
+			} else if (cleanAccount) {
+				const matchedAuth = sqlite.prepare(`
+					SELECT provider FROM tokens
+					WHERE user_id = ? AND type = 'auth' AND name = ?
+					ORDER BY created ASC, rowid ASC
+					LIMIT 1
+				`).get(userId, cleanAccount)
+				resolvedAuthProvider = matchedAuth?.provider || existingCreds?.authProvider || null
+			}
+		}
+		const claimedCreds = {
+			appId,
+			policy,
+			...(resolvedAuthProvider ? { authProvider: resolvedAuthProvider } : {})
+		}
+		if (existing) {
+			return updateCredentials(existing.id, { credentials: claimedCreds, ...(cleanAccount ? { name: cleanAccount } : {}) })
+		}
+		return create({
+			userId,
+			provider,
+			type: 'share',
+			name: cleanAccount,
+			credentials: claimedCreds
 		})
 	}
+	const creds = {
+		appId,
+		policy,
+		...(cleanAuthProvider ? { authProvider: cleanAuthProvider } : {})
+	}
+	const existingPending = cleanAuthProvider
+		? sqlite.prepare(`
+			SELECT id FROM tokens
+			WHERE user_id IS NULL AND type = 'share' AND name = ?
+				AND json_extract(credentials, '$.appId') = ?
+				AND json_extract(credentials, '$.authProvider') = ?
+		`).get(cleanAccount, appId, cleanAuthProvider)
+		: sqlite.prepare(`
+			SELECT id FROM tokens
+			WHERE user_id IS NULL AND type = 'share' AND name = ?
+				AND json_extract(credentials, '$.appId') = ?
+				AND json_extract(credentials, '$.authProvider') IS NULL
+		`).get(cleanAccount, appId)
+	if (existingPending) {
+		return updateCredentials(existingPending.id, { credentials: creds })
+	}
 	return create({
-		userId,
+		userId: null,
 		provider,
 		type: 'share',
-		credentials: { appId, policy }
+		name: cleanAccount,
+		credentials: creds
 	})
 }
 
-function removeShare (userId, appId) {
-	if (!userId || !appId) return false
-	const res = sqlite.prepare(`
-		DELETE FROM tokens
-		WHERE user_id = ? AND type = 'share' AND json_extract(credentials, '$.appId') = ?
-	`).run(userId, appId)
-	return res.changes > 0
+function removeShare ({ account = null, provider = null, appId }) {
+	if (!appId) return false
+	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
+	if (!cleanAccount) return false
+	if (cleanProvider) {
+		let matchingShares = sqlite.prepare(`
+			SELECT id FROM tokens
+			WHERE type = 'share' AND name = ?
+				AND json_extract(credentials, '$.appId') = ?
+				AND json_extract(credentials, '$.authProvider') = ?
+		`).all(cleanAccount, appId, cleanProvider)
+		if (matchingShares.length === 0) {
+			const hasScopedForAccount = sqlite.prepare(`
+				SELECT 1 FROM tokens
+				WHERE type = 'share' AND name = ?
+					AND json_extract(credentials, '$.appId') = ?
+					AND json_extract(credentials, '$.authProvider') IS NOT NULL
+				LIMIT 1
+			`).get(cleanAccount, appId)
+			if (!hasScopedForAccount) {
+				matchingShares = sqlite.prepare(`
+					SELECT id FROM tokens
+					WHERE user_id IS NULL AND type = 'share' AND name = ?
+						AND json_extract(credentials, '$.appId') = ?
+						AND json_extract(credentials, '$.authProvider') IS NULL
+				`).all(cleanAccount, appId)
+			}
+		}
+		if (matchingShares.length === 0) return false
+		const stmt = sqlite.prepare('DELETE FROM tokens WHERE id = ?')
+		for (const s of matchingShares) {
+			stmt.run(s.id)
+		}
+		return true
+	}
+	const matchingShares = sqlite.prepare(`
+		SELECT id FROM tokens
+		WHERE type = 'share' AND name = ?
+			AND json_extract(credentials, '$.appId') = ?
+	`).all(cleanAccount, appId)
+	if (matchingShares.length === 0) return false
+	if (matchingShares.length > 1) {
+		const err = new Error(`Ambiguous account "${cleanAccount}" matches multiple shared recipients on this app; specify provider`)
+		err.status = 400
+		throw err
+	}
+	sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(matchingShares[0].id)
+	return true
 }
 
 function updateCredentials (id, opts = {}) {
@@ -510,7 +679,6 @@ function formatState (row) {
 		sessionName: tok.name,
 		admin: tok.admin,
 		reauthAppId: meta.reauthAppId || null,
-		account: meta.account || null,
 		sessionId: meta.sessionId || null,
 		provider: tok.provider === 'self' ? null : tok.provider,
 		ip: tok.ip,
@@ -530,7 +698,6 @@ function createState (opts = {}) {
 		sessionName = null,
 		admin = 0,
 		reauthAppId = null,
-		account = null,
 		sessionId = null,
 		provider = null,
 		ip = null
@@ -552,7 +719,6 @@ function createState (opts = {}) {
 			codeChallenge,
 			codeChallengeMethod,
 			reauthAppId,
-			account: account || null,
 			sessionId
 		},
 		expiresAt,

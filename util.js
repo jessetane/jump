@@ -2,7 +2,45 @@ export {
 	getBody,
 	sendJson,
 	isAllowedUpstreamHost,
-	validateBaseUrl
+	validateBaseUrl,
+	parseAccountSpec
+}
+
+function parseAccountSpec (rawAccount, rawProvider = null) {
+	const hasAccount = rawAccount !== undefined && rawAccount !== null && String(rawAccount).trim() !== ''
+	const hasProvider = rawProvider !== undefined && rawProvider !== null && String(rawProvider).trim() !== ''
+	let cleanProvider = hasProvider ? String(rawProvider).trim().toLowerCase() : null
+	if (cleanProvider && cleanProvider.includes(':')) {
+		const err = new Error(`Invalid provider identifier: ${rawProvider}`)
+		err.status = 400
+		throw err
+	}
+	if (!hasAccount) {
+		return { account: null, provider: cleanProvider }
+	}
+	if (typeof rawAccount !== 'string') {
+		const err = new Error('Account identifier must be a string')
+		err.status = 400
+		throw err
+	}
+	const trimmed = rawAccount.trim().toLowerCase()
+	if (!trimmed.includes(':')) {
+		return { account: trimmed, provider: cleanProvider }
+	}
+	const parts = trimmed.split(':')
+	if (parts.length !== 2 || !parts[0].trim() || !parts[1].trim() || /\s/.test(parts[0]) || /\s/.test(parts[1])) {
+		const err = new Error(`Malformed account identifier "${rawAccount}"; expected "provider:account"`)
+		err.status = 400
+		throw err
+	}
+	const prefixProvider = parts[0]
+	const cleanAccount = parts[1]
+	if (cleanProvider && cleanProvider !== prefixProvider) {
+		const err = new Error(`Conflicting provider "${cleanProvider}" and account prefix "${prefixProvider}:${cleanAccount}"`)
+		err.status = 400
+		throw err
+	}
+	return { account: cleanAccount, provider: prefixProvider }
 }
 
 function sendJson (res, data, status = 200, headers = null) {
