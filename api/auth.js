@@ -1,7 +1,7 @@
 import * as db from '../db/index.js'
-import { getProvider, listAuthProviders } from '../providers/index.js'
+import { getProvider, requireAuthProvider, hasSsoLock } from '../providers/index.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
-import { validateBaseUrl } from '../util.js'
+import { validateBaseUrl, parseAccountSpec } from '../util.js'
 
 export {
 	whoami,
@@ -18,9 +18,18 @@ export {
 	unshareApp,
 	linkApp,
 	unlinkApp,
-	updateUser,
+	linkLogin,
+	unlinkLogin,
 	listLogs,
 	validateBaseUrl
+}
+
+function formatLogin (authToken) {
+	return {
+		id: authToken.id,
+		provider: authToken.provider,
+		account: authToken.name
+	}
 }
 
 function formatSession (s, currentSessionId) {
@@ -66,11 +75,7 @@ async function whoami (token, opts = {}) {
 		user: {
 			id: session.userId,
 			account: session.account,
-			name: session.userName,
-			logins: authTokens.map(a => ({
-				provider: a.provider,
-				account: a.credentials?.account || a.name
-			}))
+			logins: authTokens.map(formatLogin)
 		},
 		session: formatSession(session)
 	}
@@ -123,20 +128,21 @@ function requireTargetSession (userId, sessionId) {
 }
 
 function requireShareTarget (token, opts = {}) {
-	const { appId, account } = opts
+	const { appId, account, provider = null } = opts
 	const { session } = requireAdmin(token, opts)
 	if (!appId) {
 		const error = new Error('appId is required')
 		error.status = 400
 		throw error
 	}
-	if (!account || typeof account !== 'string' || !account.trim()) {
+	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
+	if (!cleanAccount) {
 		const error = new Error('Valid recipient account identifier is required')
 		error.status = 400
 		throw error
 	}
 	const targetApp = requireApp(session.userId, appId, { allowShare: false })
-	return { session, targetApp, normalizedAccount: account.trim().toLowerCase() }
+	return { session, targetApp, cleanAccount, cleanProvider }
 }
 
 async function list (token, opts = {}) {
@@ -262,6 +268,7 @@ async function listApps (token, opts = {}) {
 		sharesByAppId.get(targetAppId).push({
 			userId: s.userId,
 			account: s.account,
+			...(s.credentials?.authProvider ? { provider: s.credentials.authProvider } : {}),
 			policy: parsePolicy(s.credentials?.policy)
 		})
 	}
@@ -405,36 +412,45 @@ async function unlinkApp (token, opts = {}) {
 	}
 }
 
-async function updateUser (token, opts = {}) {
-	const { session, appUrl } = requireAdmin(token, opts, 'Access denied: updating user profile requires admin privileges')
-	const { id, account, provider, appUrl: _appUrl, ...updates } = opts
-	let providerDef = null
-	if (provider !== undefined && provider !== null) {
-		providerDef = getProvider(provider)
-		const configured = listAuthProviders().some(p => p.id === providerDef?.id)
-		if (!providerDef || providerDef.type !== 'oauth' || !configured) {
-			const error = new Error(`Invalid or unsupported OAuth provider: ${provider}`)
-			error.status = 400
-			throw error
-		}
+async function linkLogin (token, opts = {}) {
+	const { session, appUrl } = requireAdmin(token, opts, 'Access denied: login administration requires admin privileges')
+	const { provider } = opts
+	if (!provider || typeof provider !== 'string' || !provider.trim()) {
+		const error = new Error('OAuth provider is required')
+		error.status = 400
+		throw error
 	}
-	if ('name' in updates) {
-		db.users.updateUser(session.userId, { name: updates.name })
+	const providerDef = requireAuthProvider(provider)
+	if (hasSsoLock(session.userId, providerDef)) {
+		const error = new Error('Access denied: SSO-only provider restriction prevents linking multiple sign-in providers')
+		error.status = 403
+		throw error
 	}
-	if (providerDef) {
-		return {
-			actionRequired: 'oauth_flow',
-			connectUrl: `${appUrl}/oauth/authorize?session_id=${encodeURIComponent(session.id)}&provider=${encodeURIComponent(providerDef.id)}`
-		}
-	}
-	const user = db.users.get(session.userId)
 	return {
-		updated: true,
-		user: {
-			id: user.id,
-			account: user.account,
-			name: user.name
-		}
+		actionRequired: 'oauth_flow',
+		connectUrl: `${appUrl}/oauth/authorize?session_id=${encodeURIComponent(session.id)}&provider=${encodeURIComponent(providerDef.id)}`
+	}
+}
+
+async function unlinkLogin (token, opts = {}) {
+	const { session } = requireAdmin(token, opts, 'Access denied: login administration requires admin privileges')
+	const { loginId = null, provider = null, account = null } = opts
+	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
+	if (!loginId && !cleanProvider && !cleanAccount) {
+		const error = new Error('loginId, provider, or account is required to unlink a login key')
+		error.status = 400
+		throw error
+	}
+	const removed = db.tokens.removeAuth(session.userId, {
+		loginId,
+		provider: cleanProvider,
+		account: cleanAccount
+	})
+	const remaining = db.tokens.listAuthByUserId(session.userId)
+	return {
+		unlinked: true,
+		login: formatLogin(removed),
+		logins: remaining.map(formatLogin)
 	}
 }
 
@@ -482,11 +498,13 @@ async function updateApp (token, opts = {}) {
 }
 
 async function shareApp (token, opts = {}) {
-	const { policy = null, provider = null } = opts
-	const { session, targetApp, normalizedAccount } = requireShareTarget(token, opts)
+	const { policy = null } = opts
+	const { session, targetApp, cleanAccount, cleanProvider } = requireShareTarget(token, opts)
 	const selfAuths = db.tokens.listAuthByUserId(session.userId)
-	const isSelf = normalizedAccount === (session.account || '').toLowerCase() ||
-		selfAuths.some(a => (a.credentials?.account || a.name || '').toLowerCase() === normalizedAccount || (a.token || '').toLowerCase() === normalizedAccount)
+	const isSelf = selfAuths.some(a => {
+		const acc = (a.name || '').toLowerCase()
+		return cleanProvider ? (a.provider === cleanProvider && acc === cleanAccount) : acc === cleanAccount
+	}) || (!selfAuths.length && !cleanProvider && cleanAccount === (session.account || '').toLowerCase())
 	if (isSelf) {
 		const error = new Error('Cannot share an app with yourself')
 		error.status = 400
@@ -498,9 +516,51 @@ async function shareApp (token, opts = {}) {
 		error.status = 400
 		throw error
 	}
-	const recipient = db.tokens.findUserByAccount(normalizedAccount, provider) || db.users.upsert({ account: normalizedAccount })
+	const sharerSsoAuth = selfAuths.find(a => getProvider(a.provider)?.ssoOnly)
+	if (sharerSsoAuth && cleanProvider && cleanProvider !== sharerSsoAuth.provider) {
+		const error = new Error(`Access denied: SSO-only provider restriction requires sharing within "${sharerSsoAuth.provider}"`)
+		error.status = 403
+		throw error
+	}
+	const effectiveProvider = cleanProvider || sharerSsoAuth?.provider || null
+	if (effectiveProvider) {
+		requireAuthProvider(effectiveProvider)
+	}
+	const recipient = db.tokens.findUserByAccount(cleanAccount, effectiveProvider)
+	if (recipient) {
+		if (recipient.id === session.userId) {
+			const error = new Error('Cannot share an app with yourself')
+			error.status = 400
+			throw error
+		}
+		const share = db.tokens.upsertShare({
+			userId: recipient.id,
+			account: cleanAccount,
+			authProvider: effectiveProvider,
+			appId: targetApp.id,
+			provider: targetApp.provider,
+			policy: policyCheck.policy
+		})
+		const resolvedProvider = share.credentials?.authProvider || effectiveProvider
+		return {
+			shared: true,
+			shareId: share.id,
+			appId: targetApp.id,
+			userId: recipient.id,
+			account: cleanAccount,
+			...(resolvedProvider ? { provider: resolvedProvider } : {}),
+			policy: policyCheck.policy
+		}
+	}
+	if (!effectiveProvider && !cleanAccount.includes('@')) {
+		const error = new Error(`Provider is required when sharing with bare account handle "${cleanAccount}" (e.g. provider: "github" or "github:${cleanAccount}")`)
+		error.status = 400
+		throw error
+	}
 	const share = db.tokens.upsertShare({
-		userId: recipient.id,
+		userId: null,
+		account: cleanAccount,
+		authProvider: effectiveProvider,
 		appId: targetApp.id,
 		provider: targetApp.provider,
 		policy: policyCheck.policy
@@ -509,21 +569,24 @@ async function shareApp (token, opts = {}) {
 		shared: true,
 		shareId: share.id,
 		appId: targetApp.id,
-		userId: recipient.id,
-		account: recipient.account,
+		userId: null,
+		account: cleanAccount,
+		...(effectiveProvider ? { provider: effectiveProvider } : {}),
 		policy: policyCheck.policy
 	}
 }
 
 async function unshareApp (token, opts = {}) {
-	const { provider = null } = opts
-	const { targetApp, normalizedAccount } = requireShareTarget(token, opts)
-	const recipient = db.tokens.findUserByAccount(normalizedAccount, provider)
-	const removed = recipient ? db.tokens.removeShare(recipient.id, targetApp.id) : false
-	return {
-		unshared: removed,
+	const { targetApp, cleanAccount, cleanProvider } = requireShareTarget(token, opts)
+	const unshared = db.tokens.removeShare({
 		appId: targetApp.id,
-		account: normalizedAccount
+		account: cleanAccount,
+		provider: cleanProvider
+	})
+	return {
+		unshared,
+		appId: targetApp.id,
+		account: cleanAccount
 	}
 }
 

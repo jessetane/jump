@@ -93,7 +93,7 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 ### Tools
 
 * `<provider>_api({ url, method?, body?, headers?, account?, appId? })` - Proxies an HTTP request to the linked upstream provider.
-* `admin({ action, ... })` - Manages sessions, apps, shares, links, and usage logs (`whoami`, `list`, `get`, `create_session`, `update_session`, `revoke`, `list_apps`, `connect_app`, `disconnect_app`, `update_app`, `share_app`, `unshare_app`, `link_app`, `unlink_app`, `update_user`, `list_logs`). Exposed only to admin sessions.
+* `admin({ action, ... })` - Manages sessions, apps, shares, links, login keys, and usage logs (`whoami`, `list`, `get`, `create_session`, `update_session`, `revoke`, `list_apps`, `connect_app`, `disconnect_app`, `update_app`, `share_app`, `unshare_app`, `link_app`, `unlink_app`, `link_login`, `unlink_login`, `list_logs`). Exposed only to admin sessions.
 
 ## HTTP
 ```
@@ -112,7 +112,9 @@ GET    /.well-known/oauth-protected-resource    # rfc 9728 discovery
 GET    /.well-known/oauth-authorization-server  # rfc 8414 discovery
 GET    /api/health                              # health check
 GET    /api/whoami                              # session & linked apps info
-PATCH  /api/user                                # update user profile or link login provider (admin)
+POST   /api/logins                              # link sign-in provider (admin)
+DELETE /api/logins                              # unlink sign-in provider (admin)
+DELETE /api/logins/:id                          # unlink sign-in provider by id (admin)
 GET    /api/sessions                            # list sessions (admin)
 POST   /api/sessions                            # create session (admin)
 DELETE /api/sessions                            # revoke session

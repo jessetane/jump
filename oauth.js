@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as db from './db/index.js'
-import { getProvider, listAuthProviders, summarizeScopes } from './providers/index.js'
+import { getProvider, listAuthProviders, requireAuthProvider, hasSsoLock, summarizeScopes } from './providers/index.js'
 import { getBody, sendJson } from './util.js'
 
 export {
@@ -445,7 +445,6 @@ async function handleAuthorizeConsent (req, res) {
 		}
 		const verifyCode = db.tokens.createState({
 			userId: adminSession.userId,
-			account: adminSession.account,
 			clientId,
 			clientRedirectUri,
 			clientState,
@@ -464,9 +463,11 @@ async function handleAuthorizeConsent (req, res) {
 		sendJson(res, { error: 'invalid_request', error_description: 'OAuth provider or admin token is required' }, 400)
 		return
 	}
-	const provider = getProvider(providerName)
-	if (!provider || provider.type !== 'oauth' || !provider.buildAuthUrl) {
-		sendJson(res, { error: 'invalid_request', error_description: `Unsupported OAuth provider: ${providerName}` }, 400)
+	let provider
+	try {
+		provider = requireAuthProvider(providerName)
+	} catch (err) {
+		sendJson(res, { error: 'invalid_request', error_description: err.message }, err.status || 400)
 		return
 	}
 	if (sessionId) {
@@ -475,6 +476,12 @@ async function handleAuthorizeConsent (req, res) {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: admin session required.')
+			return
+		}
+		if (hasSsoLock(session.userId, provider)) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: SSO-only provider restriction prevents linking multiple sign-in providers.')
 			return
 		}
 	}
@@ -542,7 +549,7 @@ async function handleVerify (req, res, query) {
 			appsHtml = `<div class="app-list"><div class="app-list-title">Link connected apps</div>${items}</div>`
 		}
 		const autoSubmitScript = userApps.length === 0 ? '<script>document.forms[0].submit()</script>' : ''
-		const displayAccount = state.account || existingUser.account
+		const displayAccount = db.tokens.getAccountByUserId(existingUser.id)
 		res.statusCode = 200
 		res.setHeader('content-type', 'text/html; charset=utf-8')
 		res.end(renderCardPage(
@@ -615,7 +622,7 @@ async function handleVerify (req, res, query) {
 	}
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/plain; charset=utf-8')
-	res.end(`user: ${user.account}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
+	res.end(`user: ${db.tokens.getAccountByUserId(user.id)}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
 }
 
 async function handleProviderConnect (req, res, query, providerName = 'google') {
@@ -760,43 +767,33 @@ async function handleCallback (req, res, query) {
 			res.end('Access denied: admin session required.')
 			return
 		}
-		const existingAuths = db.tokens.listAuthByUserId(session.userId)
-		const otherProviderAuths = existingAuths.filter(a => a.provider !== provider.id)
-		const hasSsoLock = otherProviderAuths.some(a => getProvider(a.provider)?.ssoOnly) || (provider.ssoOnly && otherProviderAuths.length > 0)
-		if (hasSsoLock) {
+		if (hasSsoLock(session.userId, provider)) {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: SSO-only provider restriction prevents linking multiple sign-in providers.')
 			return
 		}
 		const cleanAccount = String(account).trim().toLowerCase()
-		const existingAuthUser = db.tokens.resolveUserByAuth(provider.id, cleanAccount, { createIfMissing: false })
-		if (existingAuthUser && existingAuthUser.id !== session.userId) {
-			res.statusCode = 409
-			res.setHeader('content-type', 'text/plain')
-			res.end(`Account ${cleanAccount} is already registered to another user.`)
-			return
-		}
-		const existingAccountUser = db.users.getByAccount(cleanAccount)
-		let targetUserAccount = cleanAccount
-		if (existingAccountUser && existingAccountUser.id !== session.userId) {
-			if (!db.tokens.hasAuthTokens(existingAccountUser.id)) {
-				db.tokens.claimStubUser(existingAccountUser.id, session.userId)
-			} else {
-				targetUserAccount = `${provider.id}:${cleanAccount}`
+		try {
+			db.tokens.upsertAuth({
+				userId: session.userId,
+				provider: provider.id,
+				account: cleanAccount
+			})
+		} catch (err) {
+			if (err.status === 409) {
+				res.statusCode = 409
+				res.setHeader('content-type', 'text/plain')
+				res.end(`${err.message}.`)
+				return
 			}
+			throw err
 		}
-		db.tokens.upsertAuth({
-			userId: session.userId,
-			provider: provider.id,
-			account: cleanAccount
-		})
-		db.users.updateAccount(session.userId, targetUserAccount)
 		res.statusCode = 200
 		res.setHeader('content-type', 'text/html; charset=utf-8')
 		res.end(renderCardPage(
-			'Account Updated',
-			`Signed in as <strong>${escapeHtml(cleanAccount)}</strong>`,
+			'Login Linked',
+			`Linked <strong>${escapeHtml(cleanAccount)}</strong>`,
 			`<p class="subtitle">You can close this window and return to your agent.</p>`
 		))
 		return
@@ -806,7 +803,6 @@ async function handleCallback (req, res, query) {
 		const user = db.tokens.resolveUserByAuth(provider.id, cleanAccount)
 		const verifyCode = db.tokens.createState({
 			userId: user.id,
-			account: cleanAccount,
 			provider: provider.id,
 			clientId: oauthState.clientId,
 			clientRedirectUri: oauthState.clientRedirectUri,

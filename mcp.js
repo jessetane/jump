@@ -14,7 +14,7 @@ export {
 
 const adminTool = {
 	name: 'admin',
-	description: 'Administer MCP sessions, connected upstream apps, routing policies, and user account settings.',
+	description: 'Administer MCP sessions, connected upstream apps, routing policies, and user login keys.',
 	inputSchema: {
 		type: 'object',
 		properties: {
@@ -33,17 +33,19 @@ const adminTool = {
 					'unshare_app',
 					'link_app',
 					'unlink_app',
+					'link_login',
+					'unlink_login',
 					'update_app',
 					'update_session',
-					'update_user',
 					'list_logs'
 				],
 				description: 'Administrative action to perform.'
 			},
 			sessionId: { type: 'string', description: 'Target session token ID.' },
 			appId: { type: 'string', description: 'Target upstream app token ID (used for connect_app, update_app, disconnect_app, share_app, unshare_app, link_app, unlink_app).' },
-			name: { type: 'string', description: 'Human-readable label or user display name.' },
-			account: { type: 'string', description: 'Upstream account or recipient user account identifier (e.g. email, username, account ID).' },
+			loginId: { type: 'string', description: 'Target login key token ID (optional for unlink_login).' },
+			name: { type: 'string', description: 'Human-readable label for a session or upstream app.' },
+			account: { type: 'string', description: 'Upstream account, login key account, or recipient user account identifier (e.g. email, username, or "provider:account").' },
 			baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or API-key providers (e.g. "https://api.stripe.com").' },
 			apiKey: { type: 'string', description: 'Upstream API credential when connecting an API-key provider: Bearer token, HTTP Basic "user:pass", or query string "?key=val".' },
 			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe", "github").' },
@@ -156,7 +158,8 @@ const adminActions = {
 	unshare_app: (args, token, appUrl) => api.auth.unshareApp(token, { ...args, appUrl }),
 	link_app: (args, token, appUrl) => api.auth.linkApp(token, { ...args, appUrl }),
 	unlink_app: (args, token, appUrl) => api.auth.unlinkApp(token, { ...args, appUrl }),
-	update_user: (args, token, appUrl) => api.auth.updateUser(token, { ...args, appUrl }),
+	link_login: (args, token, appUrl) => api.auth.linkLogin(token, { ...args, appUrl }),
+	unlink_login: (args, token, appUrl) => api.auth.unlinkLogin(token, { ...args, appUrl }),
 	list_logs: (args, token, appUrl) => api.auth.listLogs(token, { ...args, appUrl })
 }
 

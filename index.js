@@ -96,7 +96,7 @@ function bootstrapLocalAdmin () {
 	if (listAuthProviders().length > 0) return null
 	const existing = db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE provider = 'self' AND type = 'bearer' AND token IS NOT NULL").get()
 	if (existing?.count > 0) return null
-	const user = db.users.upsert({ account: 'localhost' })
+	const user = db.users.create()
 	const session = db.tokens.create({
 		userId: user.id,
 		provider: 'self',

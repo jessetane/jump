@@ -7,6 +7,8 @@ export {
 	createProvider,
 	getProvider,
 	listAuthProviders,
+	requireAuthProvider,
+	hasSsoLock,
 	summarizeScopes,
 	google,
 	github
@@ -383,4 +385,21 @@ function getProvider (name) {
 
 function listAuthProviders () {
 	return Object.values(providers).filter(p => p.type === 'oauth' && Boolean(process.env[`${p.id.toUpperCase()}_CLIENT_ID`]))
+}
+
+function requireAuthProvider (rawName) {
+	const name = typeof rawName === 'string' ? rawName.trim().toLowerCase() : ''
+	const provider = name ? providers[name] : null
+	if (!provider || !listAuthProviders().some(p => p.id === provider.id)) {
+		const err = new Error(`Invalid or unsupported OAuth provider: ${rawName}`)
+		err.status = 400
+		throw err
+	}
+	return provider
+}
+
+function hasSsoLock (userId, targetProvider) {
+	const existingAuths = db.tokens.listAuthByUserId(userId)
+	const otherProviderAuths = existingAuths.filter(a => a.provider !== targetProvider.id)
+	return otherProviderAuths.some(a => getProvider(a.provider)?.ssoOnly) || (Boolean(targetProvider.ssoOnly) && otherProviderAuths.length > 0)
 }
