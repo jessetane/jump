@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual, randomUUID } from 'node:crypto'
+import { createHash, timingSafeEqual, randomBytes, randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -317,9 +317,9 @@ async function handleRegister (req, res) {
 		? body.grant_types
 		: ['authorization_code', 'refresh_token']
 	const clientPrefix = grantTypes.includes('refresh_token') ? 'client_' : 'client_bearer_'
-	const clientId = body.client_id || `${clientPrefix}${randomUUID()}`
+	const clientId = `${clientPrefix}${randomUUID()}`
 	const needsSecret = authMethod === 'client_secret_basic' || authMethod === 'client_secret_post'
-	const clientSecret = body.client_secret || (needsSecret ? `cs_${randomBytes(24).toString('hex')}` : null)
+	const clientSecret = needsSecret ? `cs_${randomBytes(24).toString('hex')}` : null
 	const response = {
 		client_id: clientId,
 		client_id_issued_at: Math.floor(Date.now() / 1000),
@@ -391,6 +391,73 @@ async function handleAuthorize (req, res, query) {
 	res.end(html)
 }
 
+function completeLogin (req, res, { user, clientId, clientRedirectUri, clientState, codeChallenge, codeChallengeMethod, sessionName, admin, ip, appIds = [] }) {
+	const ua = req.headers['user-agent'] || null
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		type: 'bearer',
+		name: sessionName || (admin ? 'Admin Session' : 'Default Session'),
+		token: clientRedirectUri ? null : undefined,
+		expiresAt: clientRedirectUri ? Date.now() + 10 * 60 * 1000 : null,
+		admin: admin ? 1 : 0,
+		ip: ip || getClientIp(req),
+		ua
+	})
+	for (const appId of appIds) {
+		const app = db.tokens.get(appId)
+		if (app && app.userId === user.id && db.tokens.isUpstreamApp(app, { allowShare: true })) {
+			db.links.create({
+				sessionId: session.id,
+				appId: app.id
+			})
+		}
+	}
+	if (clientRedirectUri) {
+		const authCode = db.tokens.createAuthCode({
+			sessionId: session.id,
+			clientId,
+			clientRedirectUri,
+			codeChallenge,
+			codeChallengeMethod
+		})
+		const target = new URL(clientRedirectUri)
+		target.searchParams.set('code', authCode)
+		if (clientState) target.searchParams.set('state', clientState)
+		res.statusCode = 302
+		res.setHeader('location', target.toString())
+		res.end()
+		return
+	}
+	res.statusCode = 200
+	res.setHeader('content-type', 'text/plain; charset=utf-8')
+	res.end(`user: ${db.logins.getAccountByUserId(user.id)}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
+}
+
+function redirectToVerifyOrComplete (req, res, base, opts) {
+	const userApps = db.tokens.listByUserId(opts.user.id).filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
+	if (userApps.length === 0) {
+		completeLogin(req, res, opts)
+		return
+	}
+	const verifyCode = db.tokens.createState({
+		mode: 'verify',
+		userId: opts.user.id,
+		provider: opts.provider || null,
+		clientId: opts.clientId,
+		clientRedirectUri: opts.clientRedirectUri,
+		clientState: opts.clientState,
+		codeChallenge: opts.codeChallenge,
+		codeChallengeMethod: opts.codeChallengeMethod,
+		sessionName: opts.sessionName,
+		admin: opts.admin,
+		ip: opts.ip
+	})
+	res.statusCode = 302
+	res.setHeader('location', `${base}/oauth/verify?code=${verifyCode}`)
+	res.end()
+}
+
 async function handleAuthorizeConsent (req, res) {
 	if (req.method !== 'POST') {
 		res.statusCode = 405
@@ -437,14 +504,15 @@ async function handleAuthorizeConsent (req, res) {
 	const base = getBaseUrl(req)
 	if (localToken && !providerName) {
 		const adminSession = db.tokens.getByToken(localToken)
-		if (!adminSession || !adminSession.admin) {
+		const user = adminSession?.admin ? db.users.get(adminSession.userId) : null
+		if (!user) {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: valid admin bearer token required.')
 			return
 		}
-		const verifyCode = db.tokens.createState({
-			userId: adminSession.userId,
+		redirectToVerifyOrComplete(req, res, base, {
+			user,
 			clientId,
 			clientRedirectUri,
 			clientState,
@@ -454,9 +522,6 @@ async function handleAuthorizeConsent (req, res) {
 			admin,
 			ip
 		})
-		res.statusCode = 302
-		res.setHeader('location', `${base}/oauth/verify?code=${verifyCode}`)
-		res.end()
 		return
 	}
 	if (!providerName) {
@@ -527,14 +592,14 @@ async function handleVerify (req, res, query) {
 			return
 		}
 		const state = db.tokens.getState(code)
-		const existingUser = state?.userId ? db.users.get(state.userId) : null
-		if (!state || !existingUser) {
+		const existingUser = state?.mode === 'verify' && state.userId ? db.users.get(state.userId) : null
+		if (!existingUser) {
 			res.statusCode = 400
 			res.setHeader('content-type', 'text/plain')
 			res.end('Invalid or expired verification code')
 			return
 		}
-		const userApps = db.tokens.listByUserId(existingUser.id).filter(t => t.provider !== 'self')
+		const userApps = db.tokens.listByUserId(existingUser.id).filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
 		let appsHtml = ''
 		if (userApps.length > 0) {
 			const checkedAttr = state.admin ? ' checked' : ''
@@ -548,14 +613,13 @@ async function handleVerify (req, res, query) {
 			}).join('')
 			appsHtml = `<div class="app-list"><div class="app-list-title">Link connected apps</div>${items}</div>`
 		}
-		const autoSubmitScript = userApps.length === 0 ? '<script>document.forms[0].submit()</script>' : ''
-		const displayAccount = db.tokens.getAccountByUserId(existingUser.id)
+		const displayAccount = db.logins.getAccountByUserId(existingUser.id)
 		res.statusCode = 200
 		res.setHeader('content-type', 'text/html; charset=utf-8')
 		res.end(renderCardPage(
 			'jump verify',
 			`Activate session for <strong>${escapeHtml(displayAccount)}</strong>`,
-			`<form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${escapeHtml(code)}">${appsHtml}<button type="submit">Continue</button></form>${autoSubmitScript}`
+			`<form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${escapeHtml(code)}">${appsHtml}<button type="submit">Continue</button></form>`
 		))
 		return
 	}
@@ -574,55 +638,25 @@ async function handleVerify (req, res, query) {
 		return
 	}
 	const state = db.tokens.consumeState(code)
-	const user = state?.userId ? db.users.get(state.userId) : null
-	if (!state || !user) {
+	const user = state?.mode === 'verify' && state.userId ? db.users.get(state.userId) : null
+	if (!user) {
 		res.statusCode = 400
 		res.setHeader('content-type', 'text/plain')
 		res.end('Invalid or expired verification code')
 		return
 	}
-	const ip = getClientIp(req)
-	const ua = req.headers['user-agent'] || null
-	const session = db.tokens.create({
-		userId: user.id,
-		provider: 'self',
-		type: 'bearer',
-		name: state.sessionName || (state.admin ? 'Admin Session' : 'Default Session'),
-		token: state.clientRedirectUri ? null : undefined,
-		expiresAt: state.clientRedirectUri ? Date.now() + 10 * 60 * 1000 : null,
-		admin: state.admin ? 1 : 0,
-		ip: state.ip || ip,
-		ua
+	completeLogin(req, res, {
+		user,
+		clientId: state.clientId,
+		clientRedirectUri: state.clientRedirectUri,
+		clientState: state.clientState,
+		codeChallenge: state.codeChallenge,
+		codeChallengeMethod: state.codeChallengeMethod,
+		sessionName: state.sessionName,
+		admin: state.admin,
+		ip: state.ip,
+		appIds: params.getAll('app_id')
 	})
-	const selectedAppIds = params.getAll('app_id')
-	for (const appId of selectedAppIds) {
-		const app = db.tokens.get(appId)
-		if (app && app.userId === user.id && app.provider !== 'self' && app.type !== 'auth') {
-			db.links.create({
-				sessionId: session.id,
-				appId: app.id
-			})
-		}
-	}
-	if (state.clientRedirectUri) {
-		const authCode = db.tokens.createAuthCode({
-			sessionId: session.id,
-			clientId: state.clientId,
-			clientRedirectUri: state.clientRedirectUri,
-			codeChallenge: state.codeChallenge,
-			codeChallengeMethod: state.codeChallengeMethod
-		})
-		const target = new URL(state.clientRedirectUri)
-		target.searchParams.set('code', authCode)
-		if (state.clientState) target.searchParams.set('state', state.clientState)
-		res.statusCode = 302
-		res.setHeader('location', target.toString())
-		res.end()
-		return
-	}
-	res.statusCode = 200
-	res.setHeader('content-type', 'text/plain; charset=utf-8')
-	res.end(`user: ${db.tokens.getAccountByUserId(user.id)}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
 }
 
 async function handleProviderConnect (req, res, query, providerName = 'google') {
@@ -684,7 +718,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	const session = sessionId ? db.tokens.getActiveSession(sessionId) : null
 	if (reauthAppId) {
 		const existingApp = db.tokens.get(reauthAppId)
-		if (!session || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type === 'share') {
+		if (!session || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type !== 'oauth') {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: unauthorized re-authentication request.')
@@ -775,7 +809,7 @@ async function handleCallback (req, res, query) {
 		}
 		const cleanAccount = String(account).trim().toLowerCase()
 		try {
-			db.tokens.upsertAuth({
+			db.logins.upsert({
 				userId: session.userId,
 				provider: provider.id,
 				account: cleanAccount
@@ -800,9 +834,9 @@ async function handleCallback (req, res, query) {
 	}
 	if (oauthState.mode === 'login') {
 		const cleanAccount = String(account).trim().toLowerCase()
-		const user = db.tokens.resolveUserByAuth(provider.id, cleanAccount)
-		const verifyCode = db.tokens.createState({
-			userId: user.id,
+		const user = db.logins.resolveUser(provider.id, cleanAccount)
+		redirectToVerifyOrComplete(req, res, base, {
+			user,
 			provider: provider.id,
 			clientId: oauthState.clientId,
 			clientRedirectUri: oauthState.clientRedirectUri,
@@ -813,15 +847,12 @@ async function handleCallback (req, res, query) {
 			admin: oauthState.admin,
 			ip: oauthState.ip
 		})
-		res.statusCode = 302
-		res.setHeader('location', `${base}/oauth/verify?code=${verifyCode}`)
-		res.end()
 		return
 	}
 	if (oauthState.reauthAppId) {
 		const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
 		const existingApp = db.tokens.get(oauthState.reauthAppId)
-		if (!session || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type === 'share') {
+		if (!session || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type !== 'oauth') {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: unauthorized re-authentication request.')
