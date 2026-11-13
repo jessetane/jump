@@ -1,5 +1,5 @@
 import { sqlite } from './index.js'
-import { userAccountSql } from './tokens.js'
+import { userAccountSql } from './logins.js'
 import { randomUUID } from 'node:crypto'
 
 export {

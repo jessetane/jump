@@ -1,5 +1,5 @@
 import { sqlite } from './index.js'
-import * as users from './users.js'
+import { userAccountSql } from './logins.js'
 import { parseAccountSpec } from '../util.js'
 import { randomUUID, randomBytes } from 'node:crypto'
 
@@ -13,12 +13,6 @@ export {
 	issueOauthTokens,
 	refreshOauthSession,
 	listByUserId,
-	listAuthByUserId,
-	getAccountByUserId,
-	findUserByAccount,
-	upsertAuth,
-	removeAuth,
-	resolveUserByAuth,
 	claimPendingShares,
 	listSharesByOwnerId,
 	upsertShare,
@@ -37,15 +31,36 @@ export {
 	createAuthCode,
 	consumeAuthCode,
 	formatToken,
-	userAccountSql,
+	isUpstreamApp,
 	USER_ACCOUNT_SQL,
 	UPSTREAM_SELECT,
-	UPSTREAM_JOIN
+	UPSTREAM_JOIN,
+	CREATE_TOKENS_SQL
 }
 
-function userAccountSql (userIdExpr) {
-	return `COALESCE((SELECT a.name FROM tokens AS a WHERE a.user_id = ${userIdExpr} AND a.type = 'auth' ORDER BY a.created ASC, a.rowid ASC LIMIT 1), 'localhost')`
-}
+const CREATE_TOKENS_SQL = `
+	CREATE TABLE IF NOT EXISTS tokens (
+		id TEXT PRIMARY KEY,
+		user_id TEXT,
+		provider TEXT NOT NULL,
+		type TEXT NOT NULL,
+		name TEXT,
+		token TEXT UNIQUE,
+		credentials TEXT,
+		expires_at INTEGER,
+		scopes TEXT,
+		admin INTEGER DEFAULT 0,
+		ip TEXT,
+		ua TEXT,
+		created TEXT NOT NULL,
+		updated TEXT NOT NULL,
+		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);
+	CREATE INDEX IF NOT EXISTS idx_tokens_user_provider ON tokens(user_id, provider);
+	CREATE INDEX IF NOT EXISTS idx_tokens_updated ON tokens(updated);
+	CREATE INDEX IF NOT EXISTS idx_tokens_share_app ON tokens(json_extract(credentials, '$.appId')) WHERE type = 'share';
+`
 
 const USER_ACCOUNT_SQL = userAccountSql('tokens.user_id')
 
@@ -63,29 +78,13 @@ const UPSTREAM_JOIN = `
 `
 
 function init () {
-	sqlite.exec(`
-		CREATE TABLE IF NOT EXISTS tokens (
-			id TEXT PRIMARY KEY,
-			user_id TEXT,
-			provider TEXT NOT NULL,
-			type TEXT NOT NULL,
-			name TEXT,
-			token TEXT UNIQUE,
-			credentials TEXT,
-			expires_at INTEGER,
-			scopes TEXT,
-			admin INTEGER DEFAULT 0,
-			ip TEXT,
-			ua TEXT,
-			created TEXT NOT NULL,
-			updated TEXT NOT NULL,
-			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-		);
-		CREATE INDEX IF NOT EXISTS idx_tokens_token ON tokens(token);
-		CREATE INDEX IF NOT EXISTS idx_tokens_user_provider ON tokens(user_id, provider);
-		CREATE INDEX IF NOT EXISTS idx_tokens_updated ON tokens(updated);
-		CREATE INDEX IF NOT EXISTS idx_tokens_share_app ON tokens(json_extract(credentials, '$.appId')) WHERE type = 'share';
-	`)
+	sqlite.exec(CREATE_TOKENS_SQL)
+}
+
+function isUpstreamApp (tok, { allowShare = false } = {}) {
+	if (!tok || tok.provider === 'self') return false
+	if (tok.type === 'oauth' || tok.type === 'api_key') return true
+	return Boolean(allowShare && tok.type === 'share')
 }
 
 function formatToken (row) {
@@ -271,7 +270,7 @@ function listByUserId (userId, opts = {}) {
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
-		WHERE tokens.user_id = ? AND tokens.type NOT IN ('oauth_state', 'oauth_code', 'auth')
+		WHERE tokens.user_id = ? AND tokens.type IN ('bearer', 'oauth', 'api_key', 'share')
 			AND NOT (tokens.provider = 'self' AND tokens.type = 'bearer' AND tokens.token IS NULL)
 	`
 	const params = [userId]
@@ -282,47 +281,6 @@ function listByUserId (userId, opts = {}) {
 	query += ' ORDER BY tokens.created DESC'
 	const rows = sqlite.prepare(query).all(...params)
 	return rows.map(formatToken)
-}
-
-function listAuthByUserId (userId) {
-	if (!userId) return []
-	const rows = sqlite.prepare(`
-		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account
-		FROM tokens
-		JOIN users ON tokens.user_id = users.id
-		WHERE tokens.user_id = ? AND tokens.type = 'auth'
-		ORDER BY tokens.created ASC, tokens.rowid ASC
-	`).all(userId)
-	return rows.map(formatToken)
-}
-
-function getAccountByUserId (userId) {
-	if (!userId) return null
-	const row = sqlite.prepare(`
-		SELECT name
-		FROM tokens
-		WHERE user_id = ? AND type = 'auth'
-		ORDER BY created ASC, rowid ASC
-		LIMIT 1
-	`).get(userId)
-	return row?.name || 'localhost'
-}
-
-function findUserByAccount (account, provider = null) {
-	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
-	if (!cleanAccount) return null
-	if (cleanProvider) {
-		const authKey = `${cleanProvider}:${cleanAccount}`
-		const authRow = sqlite.prepare("SELECT user_id FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
-		return authRow ? users.get(authRow.user_id) : null
-	}
-	const rows = sqlite.prepare("SELECT DISTINCT user_id FROM tokens WHERE type = 'auth' AND name = ?").all(cleanAccount)
-	if (rows.length > 1) {
-		const err = new Error(`Ambiguous account "${cleanAccount}" matches multiple users across providers; specify provider`)
-		err.status = 400
-		throw err
-	}
-	return rows.length === 1 ? users.get(rows[0].user_id) : null
 }
 
 function claimPendingShares ({ userId, provider, account }) {
@@ -373,100 +331,6 @@ function claimPendingShares ({ userId, provider, account }) {
 	}
 }
 
-function runInTransaction (fn) {
-	if (!sqlite.isTransaction) {
-		sqlite.exec('BEGIN;')
-		try {
-			const result = fn()
-			sqlite.exec('COMMIT;')
-			return result
-		} catch (err) {
-			sqlite.exec('ROLLBACK;')
-			throw err
-		}
-	}
-	return fn()
-}
-
-function upsertAuth ({ userId, provider, account }) {
-	const cleanProvider = String(provider).trim().toLowerCase()
-	const cleanAccount = String(account).trim().toLowerCase()
-	const authKey = `${cleanProvider}:${cleanAccount}`
-	return runInTransaction(() => {
-		const existing = sqlite.prepare("SELECT * FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
-		if (existing) {
-			if (existing.user_id !== userId) {
-				const err = new Error(`Account ${cleanAccount} is already registered to another user`)
-				err.status = 409
-				throw err
-			}
-			claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount })
-			return get(existing.id)
-		}
-		const created = create({
-			userId,
-			provider: cleanProvider,
-			type: 'auth',
-			name: cleanAccount,
-			token: authKey
-		})
-		claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount })
-		return created
-	})
-}
-
-function removeAuth (userId, { loginId = null, provider = null, account = null } = {}) {
-	if (!userId) return null
-	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
-	const allAuths = listAuthByUserId(userId)
-	let matches = allAuths
-	if (loginId) {
-		matches = matches.filter(a => a.id === loginId)
-	}
-	if (cleanProvider) {
-		matches = matches.filter(a => a.provider === cleanProvider)
-	}
-	if (cleanAccount) {
-		matches = matches.filter(a => a.name === cleanAccount)
-	}
-	if (matches.length === 0) {
-		const err = new Error('Login key not found')
-		err.status = 404
-		throw err
-	}
-	if (matches.length > 1) {
-		const err = new Error('Multiple login keys match; specify account')
-		err.status = 400
-		throw err
-	}
-	if (allAuths.length <= 1) {
-		const err = new Error('Cannot unlink your only login key')
-		err.status = 400
-		throw err
-	}
-	const target = matches[0]
-	sqlite.prepare('DELETE FROM tokens WHERE id = ? AND user_id = ?').run(target.id, userId)
-	return target
-}
-
-function resolveUserByAuth (provider, account, { createIfMissing = true } = {}) {
-	if (!provider || !account) return null
-	const cleanProvider = String(provider).trim().toLowerCase()
-	const cleanAccount = String(account).trim().toLowerCase()
-	const authKey = `${cleanProvider}:${cleanAccount}`
-	return runInTransaction(() => {
-		const row = sqlite.prepare("SELECT user_id FROM tokens WHERE type = 'auth' AND token = ?").get(authKey)
-		if (row) {
-			claimPendingShares({ userId: row.user_id, provider: cleanProvider, account: cleanAccount })
-			return users.get(row.user_id)
-		}
-		if (!createIfMissing) return null
-		const user = users.create()
-		upsertAuth({ userId: user.id, provider: cleanProvider, account: cleanAccount })
-		return user
-	})
-}
-
 function listSharesByOwnerId (ownerUserId) {
 	if (!ownerUserId) return []
 	const rows = sqlite.prepare(`
@@ -494,13 +358,13 @@ function upsertShare ({ userId = null, account = null, authProvider = null, appI
 			if (existingCreds?.authProvider && (!cleanAccount || existing.name === cleanAccount)) {
 				resolvedAuthProvider = existingCreds.authProvider
 			} else if (cleanAccount) {
-				const matchedAuth = sqlite.prepare(`
-					SELECT provider FROM tokens
-					WHERE user_id = ? AND type = 'auth' AND name = ?
+				const matchedLogin = sqlite.prepare(`
+					SELECT provider FROM logins
+					WHERE user_id = ? AND account = ?
 					ORDER BY created ASC, rowid ASC
 					LIMIT 1
 				`).get(userId, cleanAccount)
-				resolvedAuthProvider = matchedAuth?.provider || existingCreds?.authProvider || null
+				resolvedAuthProvider = matchedLogin?.provider || existingCreds?.authProvider || null
 			}
 		}
 		const claimedCreds = {
