@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as db from './db/index.js'
-import { getProvider, listAuthProviders, requireAuthProvider, hasSsoLock, summarizeScopes } from './providers/index.js'
+import { getProvider, listAuthProviders, requireAuthProvider, hasSsoLock, parseGrantedServices, summarizeScopes } from './providers/index.js'
 import { getBody, sendJson } from './util.js'
 
 export {
@@ -666,8 +666,21 @@ async function handleProviderConnect (req, res, query, providerName = 'google') 
 		err.status = 404
 		throw err
 	}
+	const resolvedParams = { ...query }
+	if (query.reauth_app_id && query.services === undefined && query.write === undefined && provider.services) {
+		const session = query.session_id ? db.tokens.getActiveSession(query.session_id) : null
+		const existingApp = session?.admin ? db.tokens.get(query.reauth_app_id) : null
+		if (existingApp && existingApp.userId === session.userId && existingApp.provider === provider.id && existingApp.type === 'oauth' && existingApp.scopes) {
+			const granted = parseGrantedServices(existingApp.scopes, provider.services)
+			if (granted.length > 0) {
+				resolvedParams.services = granted.map(g => g.id).join(',')
+				const rwIds = granted.filter(g => g.mode === 'rw').map(g => g.id)
+				if (rwIds.length > 0) resolvedParams.write = rwIds.join(',')
+			}
+		}
+	}
 	const initData = {
-		params: query,
+		params: resolvedParams,
 		provider: { id: provider.id, name: provider.name },
 		...(provider.services && {
 			services: Object.values(provider.services).map(s => ({
@@ -716,19 +729,19 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	const sessionId = params.get('session_id') || null
 	const reauthAppId = params.get('reauth_app_id') || null
 	const session = sessionId ? db.tokens.getActiveSession(sessionId) : null
+	if (!session || !session.admin) {
+		res.statusCode = 403
+		res.setHeader('content-type', 'text/plain')
+		res.end('Access denied: admin session required.')
+		return
+	}
+	let existingApp = null
 	if (reauthAppId) {
-		const existingApp = db.tokens.get(reauthAppId)
-		if (!session || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type !== 'oauth') {
+		existingApp = db.tokens.get(reauthAppId)
+		if (!existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type !== 'oauth') {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: unauthorized re-authentication request.')
-			return
-		}
-	} else {
-		if (!session || !session.admin) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: admin session required.')
 			return
 		}
 	}
@@ -750,7 +763,8 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 			state: stateToken,
 			callbackUrl,
 			services: servicesList,
-			write: writeList
+			write: writeList,
+			loginHint: existingApp?.credentials?.account || null
 		})
 	} catch (err) {
 		res.statusCode = err.status || 500
@@ -849,13 +863,26 @@ async function handleCallback (req, res, query) {
 		})
 		return
 	}
+	const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
+	if (!session || !session.admin) {
+		res.statusCode = 403
+		res.setHeader('content-type', 'text/plain')
+		res.end('Access denied: admin session required.')
+		return
+	}
 	if (oauthState.reauthAppId) {
-		const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
 		const existingApp = db.tokens.get(oauthState.reauthAppId)
-		if (!session || !existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type !== 'oauth') {
+		if (!existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type !== 'oauth') {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: unauthorized re-authentication request.')
+			return
+		}
+		const expectedAccount = existingApp.credentials?.account
+		if (expectedAccount && String(account).trim().toLowerCase() !== String(expectedAccount).trim().toLowerCase()) {
+			res.statusCode = 409
+			res.setHeader('content-type', 'text/plain')
+			res.end(`Re-authentication failed: expected account "${expectedAccount}", got "${account}".`)
 			return
 		}
 		const updatedCreds = {
@@ -876,13 +903,6 @@ async function handleCallback (req, res, query) {
 			`${escapeHtml(provider.name)} credentials updated`,
 			`<p class="subtitle">Linked sessions will resume automatically.</p>`
 		))
-		return
-	}
-	const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
-	if (!session || !session.admin) {
-		res.statusCode = 403
-		res.setHeader('content-type', 'text/plain')
-		res.end('Access denied: admin session required.')
 		return
 	}
 	const appName = oauthState.sessionName || provider.name

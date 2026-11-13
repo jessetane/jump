@@ -9,6 +9,7 @@ export {
 	listAuthProviders,
 	requireAuthProvider,
 	hasSsoLock,
+	parseGrantedServices,
 	summarizeScopes,
 	google,
 	github
@@ -24,13 +25,11 @@ const providers = {
 
 const inflightRefreshes = new Map()
 
-function summarizeScopes (scopesStr, services) {
-	if (!scopesStr || typeof scopesStr !== 'string' || !services) return ''
+function parseGrantedServices (scopesStr, services) {
+	if (!scopesStr || typeof scopesStr !== 'string' || !services) return []
 	const granted = new Set(scopesStr.split(/[\s,]+/).filter(Boolean))
-	const allServices = Object.values(services)
-	if (allServices.length === 0) return ''
 	const matched = []
-	for (const svc of allServices) {
+	for (const svc of Object.values(services)) {
 		const ro = svc.ro || []
 		const rw = svc.rw || []
 		const rwDiff = rw.filter(s => !ro.includes(s))
@@ -40,6 +39,14 @@ function summarizeScopes (scopesStr, services) {
 			matched.push({ id: svc.id, mode: isRw ? 'rw' : 'ro' })
 		}
 	}
+	return matched
+}
+
+function summarizeScopes (scopesStr, services) {
+	if (!scopesStr || typeof scopesStr !== 'string' || !services) return ''
+	const allServices = Object.values(services)
+	if (allServices.length === 0) return ''
+	const matched = parseGrantedServices(scopesStr, services)
 	if (matched.length === 0) return ''
 	const allRw = matched.every(m => m.mode === 'rw')
 	const allRo = matched.every(m => m.mode === 'ro')
@@ -152,7 +159,7 @@ function createProvider (config) {
 				: 'Target HTTPS URL (or relative path if baseUrl is configured on the app).'
 		},
 		...(oauth && {
-			buildAuthUrl ({ state, callbackUrl, services: selectedServices = [], write = [], login = false }) {
+			buildAuthUrl ({ state, callbackUrl, services: selectedServices = [], write = [], login = false, loginHint = null }) {
 				const clientId = process.env[`${envPrefix}_CLIENT_ID`]
 				if (!clientId) {
 					const err = new Error(`${envPrefix}_CLIENT_ID environment variable is missing`)
@@ -171,6 +178,9 @@ function createProvider (config) {
 					for (const [k, v] of Object.entries(oauth.authParams)) {
 						u.searchParams.set(k, v)
 					}
+				}
+				if (loginHint && oauth.loginHintParam) {
+					u.searchParams.set(oauth.loginHintParam, loginHint)
 				}
 				u.searchParams.set('state', state)
 				return u.toString()

@@ -2313,34 +2313,44 @@ test('multi-account disambiguation in google_api tool', async () => {
 	assert.doesNotMatch(resWithAppId.content[0].text, /Policy violation/)
 })
 
-test('in-place upstream re-auth flow enforces ownership and updates app credentials without changing session token', async () => {
+test('in-place upstream re-auth flow enforces admin, ownership, and account continuity without changing session token', async () => {
 	const addr = server.address()
 	const user = db.logins.resolveUser('google', 'reauth@example.com')
 	const otherUser = db.logins.resolveUser('google', 'attacker@example.com')
 	const session = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
-		name: 'Persistent Agent Session'
+		name: 'Persistent Agent Session',
+		admin: 0
 	})
-	const attackerSession = db.tokens.create({
+	const adminSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		name: 'Owner Admin Session',
+		admin: 1
+	})
+	const attackerAdmin = db.tokens.create({
 		userId: otherUser.id,
 		provider: 'self',
-		name: 'Attacker Session'
+		name: 'Attacker Admin Session',
+		admin: 1
 	})
 	const app = db.tokens.create({
 		userId: user.id,
 		provider: 'google',
 		type: 'oauth',
 		name: 'Expiring App',
-		credentials: { accessToken: 'ya29.old', refreshToken: '1//old-refresh' },
+		credentials: { accessToken: 'ya29.old', refreshToken: '1//old-refresh', account: 'reauth@example.com' },
+		scopes: 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/calendar',
 		expiresAt: Date.now() - 1000
 	})
 	db.links.create({ sessionId: session.id, appId: app.id })
+	db.links.create({ sessionId: adminSession.id, appId: app.id })
 	const crossUserConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
-			session_id: attackerSession.id,
+			session_id: attackerAdmin.id,
 			reauth_app_id: app.id
 		}).toString(),
 		redirect: 'manual'
@@ -2355,7 +2365,7 @@ test('in-place upstream re-auth flow enforces ownership and updates app credenti
 		redirect: 'manual'
 	})
 	assert.equal(noSessionConsentRes.status, 403)
-	const validConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+	const nonAdminConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
@@ -2364,8 +2374,26 @@ test('in-place upstream re-auth flow enforces ownership and updates app credenti
 		}).toString(),
 		redirect: 'manual'
 	})
+	assert.equal(nonAdminConsentRes.status, 403, 'Non-admin session must not initiate reauth_app_id consent')
+	const connectHtmlRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?session_id=${adminSession.id}&reauth_app_id=${app.id}`)
+	assert.equal(connectHtmlRes.status, 200)
+	const connectHtml = await connectHtmlRes.text()
+	assert.match(connectHtml, /"services":"drive,calendar"/, 'GET /providers/:provider/connect pre-populates granted services for reauth_app_id')
+	assert.match(connectHtml, /"write":"calendar"/, 'GET /providers/:provider/connect pre-populates write services for reauth_app_id')
+	const validConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			session_id: adminSession.id,
+			reauth_app_id: app.id,
+			services: 'drive,calendar',
+			write: 'calendar'
+		}).toString(),
+		redirect: 'manual'
+	})
 	assert.equal(validConsentRes.status, 302)
-	const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
+	const redirectUrl = new URL(validConsentRes.headers.get('location'))
+	assert.equal(redirectUrl.searchParams.get('login_hint'), 'reauth@example.com', 'Re-auth consent passes upstream account as login_hint')
 	const apiKeyApp = db.tokens.create({
 		userId: user.id,
 		provider: 'google',
@@ -2383,14 +2411,50 @@ test('in-place upstream re-auth flow enforces ownership and updates app credenti
 		redirect: 'manual'
 	})
 	assert.equal(apiKeyReauthConsent.status, 403, 'reauth_app_id must reject non-oauth apps (e.g. api_key)')
+	let mockReturnedEmail = 'wrong-personal@gmail.com'
+	const origFetch = globalThis.fetch
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://oauth2.googleapis.com/token') {
+			const bodyStr = init?.body ? String(init.body) : ''
+			if (bodyStr.includes('grant_type=refresh_token')) {
+				return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Token expired' }), { status: 400, headers: { 'content-type': 'application/json' } })
+			}
+			return new Response(JSON.stringify({ access_token: 'ya29.new-fresh-token', refresh_token: '1//new-refresh', expires_in: 3600, scope: app.scopes }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+			return new Response(JSON.stringify({ email: mockReturnedEmail, verified_email: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		return origFetch(input, init)
+	}
+	try {
+		const nonAdminProxyErr = await executeTool('google_api', { url: 'https://www.googleapis.com/drive/v3/files' }, session.token, `http://127.0.0.1:${addr.port}`)
+		assert.equal(nonAdminProxyErr.isError, true)
+		assert.match(nonAdminProxyErr.content[0].text, /Ask an admin to re-authenticate/)
+		assert.doesNotMatch(nonAdminProxyErr.content[0].text, /reauth_app_id/, 'Non-admin proxy refresh failure must not leak reauth URL')
+		const adminProxyErr = await executeTool('google_api', { url: 'https://www.googleapis.com/drive/v3/files' }, adminSession.token, `http://127.0.0.1:${addr.port}`)
+		assert.equal(adminProxyErr.isError, true)
+		assert.match(adminProxyErr.content[0].text, new RegExp(`reauth_app_id=${app.id}`), 'Admin proxy refresh failure includes clickable reauth URL')
+		const nonAdminCbState = db.tokens.createState({ sessionId: session.id, reauthAppId: app.id, provider: 'google' })
+		const nonAdminCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${nonAdminCbState}`)
+		assert.equal(nonAdminCbRes.status, 403, 'Callback rejects non-admin session on reauth_app_id')
+		const mismatchState = redirectUrl.searchParams.get('state')
+		const mismatchCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${mismatchState}`)
+		assert.equal(mismatchCbRes.status, 409, 'Callback rejects upstream account mismatch on reauth_app_id with 409')
+		assert.match(await mismatchCbRes.text(), /expected account "reauth@example\.com", got "wrong-personal@gmail\.com"/)
+		assert.equal(db.tokens.get(app.id).credentials.account, 'reauth@example.com', 'Mismatched reauth never overwrites app account')
+		assert.equal(db.tokens.get(app.id).credentials.accessToken, 'ya29.old', 'Mismatched reauth never overwrites app token')
+		mockReturnedEmail = 'reauth@example.com'
+		const matchingState = db.tokens.createState({ sessionId: adminSession.id, reauthAppId: app.id, provider: 'google' })
+		const matchingCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${matchingState}`)
+		assert.equal(matchingCbRes.status, 200)
+	} finally {
+		globalThis.fetch = origFetch
+	}
 	const initialSessionToken = session.token
-	const updatedCreds = { accessToken: 'ya29.new-fresh-token', refreshToken: '1//new-refresh' }
-	db.tokens.updateCredentials(app.id, {
-		credentials: updatedCreds,
-		expiresAt: Date.now() + 3600000
-	})
 	const reloadedApp = db.tokens.get(app.id)
 	assert.equal(reloadedApp.credentials.accessToken, 'ya29.new-fresh-token')
+	assert.equal(reloadedApp.credentials.account, 'reauth@example.com')
 	const reloadedSession = db.tokens.get(session.id)
 	assert.equal(reloadedSession.token, initialSessionToken, 'Session token remains unchanged across upstream re-auth')
 })

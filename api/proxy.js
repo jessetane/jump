@@ -290,6 +290,11 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 				error.status = 401
 				throw error
 			}
+			if (!session.admin) {
+				const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. Ask an admin to re-authenticate.`)
+				error.status = 401
+				throw error
+			}
 			const reauthUrl = `${appUrl}/providers/${provider.id}/connect?session_id=${encodeURIComponent(session.id)}&reauth_app_id=${encodeURIComponent(upstreamApp.id)}`
 			const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. Re-authenticate: ${reauthUrl}`)
 			error.status = 401
