@@ -41,7 +41,7 @@ function createTestSession (opts = {}) {
 		ip = '127.0.0.1',
 		ua = 'TestClient/1.0'
 	} = opts
-	const user = db.tokens.resolveUserByAuth(provider, account)
+	const user = db.logins.resolveUser(provider, account)
 	const session = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -119,7 +119,7 @@ test('mcp initialize & tools/list and RFC 9728 401 WWW-Authenticate when unauthe
 	})
 	assert.equal(getUnauthRes.status, 401)
 	assert.match(getUnauthRes.headers.get('www-authenticate') || '', /\/\.well-known\/oauth-protected-resource/)
-	const user = db.tokens.resolveUserByAuth('google', 'mcp-init@example.com')
+	const user = db.logins.resolveUser('google', 'mcp-init@example.com')
 	const bareSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
 	const authHeaders = {
 		'content-type': 'application/json',
@@ -578,23 +578,18 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 		}
 		return origFetch(input, init)
 	}
-	let verifyLoc
+	let redirectLoc
 	try {
 		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=google-code&state=${bearerStateToken}`, { redirect: 'manual' })
 		assert.equal(cbRes.status, 302)
-		verifyLoc = cbRes.headers.get('location')
+		redirectLoc = cbRes.headers.get('location')
 	} finally {
 		globalThis.fetch = origFetch
 	}
-	const verifyMagicCode = new URL(verifyLoc).searchParams.get('code')
-	const bearerVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ code: verifyMagicCode }).toString(),
-		redirect: 'manual'
-	})
-	assert.equal(bearerVerifyRes.status, 302)
-	const bearerCode = new URL(bearerVerifyRes.headers.get('location')).searchParams.get('code')
+	const cbUrl = new URL(redirectLoc)
+	assert.equal(cbUrl.origin, 'http://localhost:8080')
+	assert.equal(cbUrl.pathname, '/cb')
+	const bearerCode = cbUrl.searchParams.get('code')
 	assert.ok(bearerCode)
 	const bearerTokenRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
 		method: 'POST',
@@ -858,16 +853,65 @@ test('oauth consent html page, post consent, callback login, and scanner-safe tw
 		}
 		return origFetch(input, init)
 	}
-	let verifyLocation
+	let directLocation
 	try {
 		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=google-auth-code&state=${loginStateToken}`, { redirect: 'manual' })
+		assert.equal(cbRes.status, 302)
+		directLocation = cbRes.headers.get('location')
+	} finally {
+		globalThis.fetch = origFetch
+	}
+	const directUrl = new URL(directLocation)
+	assert.equal(directUrl.hostname, 'chatgpt.com', 'User with 0 apps skips /oauth/verify and redirects directly to clientRedirectUri')
+	assert.equal(directUrl.searchParams.get('state'), 'client-state-123')
+	const code = directUrl.searchParams.get('code')
+	assert.ok(code)
+	const agentUser = db.logins.findUserByAccount('agent@example.com')
+	const unexchangedSessions = db.tokens.listByUserId(agentUser.id, { provider: 'self' })
+	assert.deepEqual(unexchangedSessions, [], 'listByUserId must filter out unexchanged pending self sessions')
+	const codeRow = db.sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_code'").get(code)
+	const codeMeta = JSON.parse(codeRow.credentials)
+	const pendingSession = db.tokens.get(codeMeta.sessionId)
+	assert.ok(pendingSession)
+	assert.equal(pendingSession.token, null, 'Unexchanged OAuth session must have token: null until /oauth/token is called')
+	assert.ok(pendingSession.expiresAt > Date.now(), 'Unexchanged OAuth session must have temporary 10m expiresAt')
+	const connectedApp = db.tokens.create({
+		userId: agentUser.id,
+		provider: 'stripe',
+		type: 'api_key',
+		name: 'Agent Stripe',
+		credentials: { apiKey: 'sk_agent', baseUrl: 'https://api.stripe.com' }
+	})
+	const secondConsentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: consentBody.toString(),
+		redirect: 'manual'
+	})
+	const secondLoginState = new URL(secondConsentRes.headers.get('location')).searchParams.get('state')
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://oauth2.googleapis.com/token') {
+			return new Response(JSON.stringify({ access_token: 'ya29.login2', token_type: 'Bearer' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+			return new Response(JSON.stringify({ email: 'agent@example.com' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		return origFetch(input, init)
+	}
+	let verifyLocation
+	try {
+		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=google-auth-code&state=${secondLoginState}`, { redirect: 'manual' })
 		assert.equal(cbRes.status, 302)
 		verifyLocation = cbRes.headers.get('location')
 	} finally {
 		globalThis.fetch = origFetch
 	}
-	const verifyCode = new URL(verifyLocation).searchParams.get('code')
+	const verifyUrl = new URL(verifyLocation)
+	assert.equal(verifyUrl.pathname, '/oauth/verify', 'User with connected apps redirects to /oauth/verify')
+	const verifyCode = verifyUrl.searchParams.get('code')
 	assert.ok(verifyCode)
+	assert.equal(db.tokens.getState(verifyCode).mode, 'verify')
 	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${verifyCode}`, {
 		redirect: 'manual'
 	})
@@ -879,26 +923,15 @@ test('oauth consent html page, post consent, callback login, and scanner-safe tw
 	const postVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ code: verifyCode }).toString(),
+		body: new URLSearchParams({ code: verifyCode, app_id: connectedApp.id }).toString(),
 		redirect: 'manual'
 	})
 	assert.equal(postVerifyRes.status, 302)
-	const location = postVerifyRes.headers.get('location')
-	const targetUrl = new URL(location)
+	const targetUrl = new URL(postVerifyRes.headers.get('location'))
 	assert.equal(targetUrl.hostname, 'chatgpt.com')
 	assert.equal(targetUrl.searchParams.get('state'), 'client-state-123')
-	const code = targetUrl.searchParams.get('code')
-	assert.ok(code)
+	assert.ok(targetUrl.searchParams.get('code'))
 	assert.equal(db.tokens.getState(verifyCode), null, 'POST /oauth/verify must consume verify state')
-	const agentUser = db.tokens.findUserByAccount('agent@example.com')
-	const unexchangedSessions = db.tokens.listByUserId(agentUser.id, { provider: 'self' })
-	assert.deepEqual(unexchangedSessions, [], 'listByUserId must filter out unexchanged pending self sessions')
-	const codeRow = db.sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_code'").get(code)
-	const codeMeta = JSON.parse(codeRow.credentials)
-	const pendingSession = db.tokens.get(codeMeta.sessionId)
-	assert.ok(pendingSession)
-	assert.equal(pendingSession.token, null, 'Unexchanged OAuth session must have token: null until /oauth/token is called')
-	assert.ok(pendingSession.expiresAt > Date.now(), 'Unexchanged OAuth session must have temporary 10m expiresAt')
 })
 
 test('direct browser authorize without redirect_uri', async () => {
@@ -934,31 +967,20 @@ test('direct browser authorize without redirect_uri', async () => {
 		}
 		return origFetch(input, init)
 	}
-	let verifyLoc
+	let verifyText
 	try {
 		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=browser-code&state=${loginStateToken}`, { redirect: 'manual' })
-		assert.equal(cbRes.status, 302)
-		verifyLoc = cbRes.headers.get('location')
+		assert.equal(cbRes.status, 200, 'Direct browser login with 0 apps returns token directly without /oauth/verify hop')
+		verifyText = await cbRes.text()
 	} finally {
 		globalThis.fetch = origFetch
 	}
-	const magicCode = new URL(verifyLoc).searchParams.get('code')
-	const getVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${magicCode}`)
-	assert.equal(getVerifyRes.status, 200)
-	assert.match(await getVerifyRes.text(), /<form method="POST" action="\/oauth\/verify">/)
-	const postVerifyRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ code: magicCode }).toString()
-	})
-	assert.equal(postVerifyRes.status, 200)
-	const verifyText = await postVerifyRes.text()
 	assert.match(verifyText, /user: browser@example\.com/)
 	assert.match(verifyText, /Authorization: Bearer/)
-	const browserUser = db.tokens.findUserByAccount('browser@example.com')
+	const browserUser = db.logins.findUserByAccount('browser@example.com')
 	const browserSessions = db.tokens.listByUserId(browserUser.id, { provider: 'self' })
 	assert.equal(browserSessions.length, 1)
-	assert.equal(browserSessions[0].expiresAt, null, 'Direct browser verify without redirect_uri must have expiresAt: null')
+	assert.equal(browserSessions[0].expiresAt, null, 'Direct browser login without redirect_uri must have expiresAt: null')
 })
 
 test('google provider connect screen and consent flow', async () => {
@@ -1190,7 +1212,7 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 })
 
 test('mcp auth whoami, list, and revoke', async () => {
-	const user = db.tokens.resolveUserByAuth('google', 'sessions-tool@example.com')
+	const user = db.logins.resolveUser('google', 'sessions-tool@example.com')
 	const session1 = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -1775,7 +1797,7 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	assert.match(unauthData.signInUrl, /\/oauth\/authorize/)
 	const unauthSessions = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`)
 	assert.equal(unauthSessions.status, 401)
-	const user = db.tokens.resolveUserByAuth('google', 'rest-test@example.com')
+	const user = db.logins.resolveUser('google', 'rest-test@example.com')
 	const session1 = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -1876,7 +1898,7 @@ test('transparent rest proxy /api/google/*', async () => {
 
 test('mcp tools/list filtering based on session admin status', async () => {
 	const addr = server.address()
-	const user = db.tokens.resolveUserByAuth('google', 'mcp-tools-filter@example.com')
+	const user = db.logins.resolveUser('google', 'mcp-tools-filter@example.com')
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -1931,7 +1953,7 @@ test('mcp tools/list filtering based on session admin status', async () => {
 })
 
 test('non-admin session auth restrictions and self-management', async () => {
-	const user = db.tokens.resolveUserByAuth('google', 'non-admin-auth@example.com')
+	const user = db.logins.resolveUser('google', 'non-admin-auth@example.com')
 	const session1 = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2015,7 +2037,7 @@ test('oauth consent flow with admin parameter', async () => {
 
 test('admin verification flow (/oauth/verify) with connected app selection and JSON token exchange', async () => {
 	const addr = server.address()
-	const existingUser = db.tokens.resolveUserByAuth('google', 'magic-admin@example.com')
+	const existingUser = db.logins.resolveUser('google', 'magic-admin@example.com')
 	const existingApp = db.tokens.create({
 		userId: existingUser.id,
 		provider: 'google',
@@ -2025,7 +2047,7 @@ test('admin verification flow (/oauth/verify) with connected app selection and J
 		scopes: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.readonly',
 		expiresAt: Date.now() + 3600000
 	})
-	const stateWithoutUser = db.tokens.createState({ sessionName: 'Missing User Session' })
+	const stateWithoutUser = db.tokens.createState({ mode: 'verify', sessionName: 'Missing User Session' })
 	const invalidGetVerify = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${stateWithoutUser}`)
 	assert.equal(invalidGetVerify.status, 400, 'GET /oauth/verify must fail loud with 400 when state has no valid userId')
 	const invalidPostVerify = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
@@ -2034,7 +2056,17 @@ test('admin verification flow (/oauth/verify) with connected app selection and J
 		body: new URLSearchParams({ code: stateWithoutUser }).toString()
 	})
 	assert.equal(invalidPostVerify.status, 400, 'POST /oauth/verify must fail loud with 400 when state has no valid userId')
+	const stateWrongMode = db.tokens.createState({ mode: 'login', userId: existingUser.id })
+	const wrongModeGet = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${stateWrongMode}`)
+	assert.equal(wrongModeGet.status, 400, 'GET /oauth/verify must reject non-verify oauth_state rows')
+	const wrongModePost = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ code: stateWrongMode }).toString()
+	})
+	assert.equal(wrongModePost.status, 400, 'POST /oauth/verify must reject non-verify oauth_state rows')
 	const verifyCode = db.tokens.createState({
+		mode: 'verify',
 		userId: existingUser.id,
 		sessionName: 'Admin Magic Session',
 		admin: 1,
@@ -2091,7 +2123,7 @@ test('admin verification flow (/oauth/verify) with connected app selection and J
 })
 
 test('30-day dormancy pruning scopes only expiring self sessions and exempts static bearer sessions', () => {
-	const user = db.tokens.resolveUserByAuth('google', 'dormancy@example.com')
+	const user = db.logins.resolveUser('google', 'dormancy@example.com')
 	const oldDate = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000).toISOString()
 	const activeSession = db.tokens.create({
 		userId: user.id,
@@ -2125,7 +2157,7 @@ test('30-day dormancy pruning scopes only expiring self sessions and exempts sta
 })
 
 test('admin tool administrative actions: create_session, list_apps, connect_app, link_app, unlink_app', async () => {
-	const user = db.tokens.resolveUserByAuth('google', 'admin-actions@example.com')
+	const user = db.logins.resolveUser('google', 'admin-actions@example.com')
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2183,6 +2215,15 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(appsRes.isError, undefined)
 	const appsData = JSON.parse(appsRes.content[0].text)
 	assert.equal(appsData.apps.length, 2)
+	const sessionsBeforeBadCreate = db.tokens.listByUserId(user.id, { provider: 'self' }).length
+	const badLinkCreateRes = await executeTool('admin', {
+		action: 'create_session',
+		name: 'Should Not Exist',
+		linkAppIds: ['nonexistent-app-id']
+	}, adminSession.token)
+	assert.equal(badLinkCreateRes.isError, true, 'create_session with invalid linkAppIds must fail loud')
+	assert.match(badLinkCreateRes.content[0].text, /App not found/)
+	assert.equal(db.tokens.listByUserId(user.id, { provider: 'self' }).length, sessionsBeforeBadCreate, 'Failed create_session must not leave orphan session')
 	const newSessRes = await executeTool('admin', {
 		action: 'create_session',
 		name: 'Chef Agent',
@@ -2211,7 +2252,7 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(unlinkRes.isError, undefined)
 	const unlinkData = JSON.parse(unlinkRes.content[0].text)
 	assert.equal(unlinkData.unlinked, true)
-	const otherTenant = db.tokens.resolveUserByAuth('google', 'other-tenant@example.com')
+	const otherTenant = db.logins.resolveUser('google', 'other-tenant@example.com')
 	const otherAdmin = db.tokens.create({ userId: otherTenant.id, provider: 'self', admin: 1 })
 	const crossTenantUnlinkSessionRes = await executeTool('admin', {
 		action: 'unlink_app',
@@ -2241,7 +2282,7 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 })
 
 test('multi-account disambiguation in google_api tool', async () => {
-	const user = db.tokens.resolveUserByAuth('google', 'multi-account@example.com')
+	const user = db.logins.resolveUser('google', 'multi-account@example.com')
 	const session = db.tokens.create({
 		userId: user.id,
 		provider: 'self'
@@ -2274,8 +2315,8 @@ test('multi-account disambiguation in google_api tool', async () => {
 
 test('in-place upstream re-auth flow enforces ownership and updates app credentials without changing session token', async () => {
 	const addr = server.address()
-	const user = db.tokens.resolveUserByAuth('google', 'reauth@example.com')
-	const otherUser = db.tokens.resolveUserByAuth('google', 'attacker@example.com')
+	const user = db.logins.resolveUser('google', 'reauth@example.com')
+	const otherUser = db.logins.resolveUser('google', 'attacker@example.com')
 	const session = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2324,6 +2365,24 @@ test('in-place upstream re-auth flow enforces ownership and updates app credenti
 		redirect: 'manual'
 	})
 	assert.equal(validConsentRes.status, 302)
+	const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
+	const apiKeyApp = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'api_key',
+		name: 'API Key App',
+		credentials: { apiKey: 'key_123', baseUrl: 'https://www.googleapis.com' }
+	})
+	const apiKeyReauthConsent = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			session_id: adminSession.id,
+			reauth_app_id: apiKeyApp.id
+		}).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(apiKeyReauthConsent.status, 403, 'reauth_app_id must reject non-oauth apps (e.g. api_key)')
 	const initialSessionToken = session.token
 	const updatedCreds = { accessToken: 'ya29.new-fresh-token', refreshToken: '1//new-refresh' }
 	db.tokens.updateCredentials(app.id, {
@@ -2338,7 +2397,7 @@ test('in-place upstream re-auth flow enforces ownership and updates app credenti
 
 test('rest api /api/apps and /api/links endpoints', async () => {
 	const addr = server.address()
-	const user = db.tokens.resolveUserByAuth('google', 'rest-apps@example.com')
+	const user = db.logins.resolveUser('google', 'rest-apps@example.com')
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2401,7 +2460,7 @@ test('rest api /api/apps and /api/links endpoints', async () => {
 
 test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configured-provider consent, and pending shares without stub users', async () => {
 	const addr = server.address()
-	const user = db.tokens.resolveUserByAuth('google', 'user-props@example.com')
+	const user = db.logins.resolveUser('google', 'user-props@example.com')
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -2521,7 +2580,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		})
 		assert.equal(expProvConsent.status, 403, 'Inactive/expired session_id must be rejected on /providers/:provider/consent')
 	}
-	const shay = db.tokens.resolveUserByAuth('google', 'shay@example.com')
+	const shay = db.logins.resolveUser('google', 'shay@example.com')
 	const shayAdmin = db.tokens.create({ userId: shay.id, provider: 'self', admin: 1 })
 	const shayApp = db.tokens.create({
 		userId: shay.id,
@@ -2606,7 +2665,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		policy: [{ action: 'allow', methods: ['POST'], path: '/v1/scoped' }]
 	})
-	const precUser = db.tokens.resolveUserByAuth('github', 'prec@acme.com')
+	const precUser = db.logins.resolveUser('github', 'prec@acme.com')
 	const precShares = db.tokens.listByUserId(precUser.id).filter(t => t.type === 'share')
 	assert.equal(precShares.length, 1, 'Overlapping unscoped and provider-scoped pending shares deduplicate to 1')
 	assert.deepEqual(precShares[0].credentials.policy, [{ action: 'allow', methods: ['POST'], path: '/v1/scoped' }], 'Provider-scoped pending share wins precedence over unscoped pending share')
@@ -2633,7 +2692,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		policy: [{ action: 'allow', methods: ['POST'], path: '/v1/scoped-seq' }]
 	})
-	const seqUser = db.tokens.resolveUserByAuth('google', 'seq@acme.com')
+	const seqUser = db.logins.resolveUser('google', 'seq@acme.com')
 	const seqSession = db.tokens.create({ userId: seqUser.id, provider: 'self', admin: 1 })
 	const seqSharesAfterGoogle = db.tokens.listByUserId(seqUser.id).filter(t => t.type === 'share')
 	assert.equal(seqSharesAfterGoogle.length, 1)
@@ -2641,7 +2700,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	assert.equal(seqSharesAfterGoogle[0].credentials.authProvider, 'google', 'Claiming unscoped pending share stamps claiming provider onto authProvider')
 	assert.deepEqual(seqSharesAfterGoogle[0].credentials.policy, [{ action: 'allow', methods: ['GET'], path: '/v1/unscoped-seq' }])
 	db.links.create({ sessionId: seqSession.id, appId: seqSharesAfterGoogle[0].id })
-	db.tokens.upsertAuth({ userId: seqUser.id, provider: 'github', account: 'seq@acme.com' })
+	db.logins.upsert({ userId: seqUser.id, provider: 'github', account: 'seq@acme.com' })
 	const seqSharesAfterGithub = db.tokens.listByUserId(seqUser.id).filter(t => t.type === 'share')
 	assert.equal(seqSharesAfterGithub.length, 1)
 	assert.equal(seqSharesAfterGithub[0].id, seqSharesAfterGoogle[0].id, 'Sequential provider-scoped claim updates existing share row in place')
@@ -2656,7 +2715,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		policy: [{ action: 'allow', methods: ['DELETE'], path: '/v1/cross-handle-clobber' }]
 	})
-	db.tokens.upsertAuth({ userId: seqUser.id, provider: 'github', account: 'seq-other-handle' })
+	db.logins.upsert({ userId: seqUser.id, provider: 'github', account: 'seq-other-handle' })
 	const seqSharesAfterCrossHandle = db.tokens.listByUserId(seqUser.id).filter(t => t.type === 'share')
 	assert.deepEqual(seqSharesAfterCrossHandle[0].credentials.policy, [{ action: 'allow', methods: ['POST'], path: '/v1/scoped-seq' }], 'Pending share on a second handle never clobbers an existing claimed share on primary handle')
 	const staleSeqApp = db.tokens.create({
@@ -2683,7 +2742,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		policy: [{ action: 'allow', methods: ['GET'], path: '/v1/initial' }]
 	})
-	const staleUser = db.tokens.resolveUserByAuth('google', 'stale@acme.com')
+	const staleUser = db.logins.resolveUser('google', 'stale@acme.com')
 	db.tokens.upsertShare({
 		userId: staleUser.id,
 		account: 'stale@acme.com',
@@ -2691,7 +2750,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		policy: [{ action: 'allow', methods: ['GET'], path: '/v1/newer-strict' }]
 	})
-	db.tokens.upsertAuth({ userId: staleUser.id, provider: 'github', account: 'stale@acme.com' })
+	db.logins.upsert({ userId: staleUser.id, provider: 'github', account: 'stale@acme.com' })
 	const staleSharesAfterGh = db.tokens.listByUserId(staleUser.id).filter(t => t.type === 'share')
 	assert.deepEqual(staleSharesAfterGh[0].credentials.policy, [{ action: 'allow', methods: ['GET'], path: '/v1/newer-strict' }], 'Stale pending share with older updated timestamp never clobbers newer claimed share policy')
 	db.tokens.upsertShare({
@@ -2702,11 +2761,11 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		policy: [{ action: 'allow', methods: ['GET'], path: '/v1/should-not-clobber' }]
 	})
-	db.tokens.upsertAuth({ userId: seqUser.id, provider: 'google', account: 'seq-extra@acme.com' })
+	db.logins.upsert({ userId: seqUser.id, provider: 'google', account: 'seq-extra@acme.com' })
 	const seqSharesAfterUnscoped = db.tokens.listByUserId(seqUser.id).filter(t => t.type === 'share')
 	assert.deepEqual(seqSharesAfterUnscoped[0].credentials.policy, [{ action: 'allow', methods: ['POST'], path: '/v1/scoped-seq' }], 'Unscoped pending share never clobbers an already-claimed provider-scoped share')
 	const usersCountBefore = db.sqlite.prepare('SELECT COUNT(*) AS count FROM users').get().count
-	const authCountBefore = db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE type = 'auth'").get().count
+	const loginsCountBefore = db.sqlite.prepare('SELECT COUNT(*) AS count FROM logins').get().count
 	const preShareRes = await executeTool('admin', {
 		action: 'share_app',
 		appId: shayApp.id,
@@ -2745,7 +2804,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe'
 	})
 	assert.equal(db.sqlite.prepare('SELECT COUNT(*) AS count FROM users').get().count, usersCountBefore, 'Pending share must never create stub users')
-	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE type = 'auth'").get().count, authCountBefore, 'Pending share must never create fake auth tokens')
+	assert.equal(db.sqlite.prepare('SELECT COUNT(*) AS count FROM logins').get().count, loginsCountBefore, 'Pending share must never create fake login rows')
 	const shayAppsBeforeClaim = JSON.parse((await executeTool('admin', { action: 'list_apps' }, shayAdmin.token)).content[0].text).apps
 	const shayAppEntryBefore = shayAppsBeforeClaim.find(a => a.id === shayApp.id)
 	assert.deepEqual(shayAppEntryBefore.shares, [{ userId: null, account: 'jessetane', provider: 'github', policy: null }])
@@ -2851,7 +2910,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		}, shayAdmin.token)
 		assert.equal(unshareViaSecondaryRes.isError, undefined)
 		assert.equal(JSON.parse(unshareViaSecondaryRes.content[0].text).unshared, true, 'Unsharing via secondary linked login handle removes share from multi-key user')
-		const collidingOtherProviderUser = db.tokens.resolveUserByAuth('custom_idp', 'jessetane')
+		const collidingOtherProviderUser = db.logins.resolveUser('custom_idp', 'jessetane')
 		assert.notEqual(collidingOtherProviderUser.id, user.id, 'resolveUserByAuth for a different provider with same handle must create distinct user')
 		const ambiguousShareRes = await executeTool('admin', {
 			action: 'share_app',
@@ -2896,8 +2955,8 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		}, shayAdmin.token)
 		assert.equal(trulyAmbiguousUnshare.isError, true, 'unshare_app fails loud with 400 when multiple distinct recipients on the same app match bare handle')
 		assert.equal(db.tokens.removeShare({ appId: shayApp.id, account: 'custom_idp:jessetane' }), true)
-		const crossProvHolder = db.tokens.resolveUserByAuth('custom_idp', 'sharedhandle')
-		const crossProvLinker = db.tokens.resolveUserByAuth('google', 'linker@example.com')
+		const crossProvHolder = db.logins.resolveUser('custom_idp', 'sharedhandle')
+		const crossProvLinker = db.logins.resolveUser('google', 'linker@example.com')
 		const crossProvSession = db.tokens.create({ userId: crossProvLinker.id, provider: 'self', admin: 1 })
 		const crossProvState = db.tokens.createState({
 			mode: 'auth',
@@ -2907,9 +2966,9 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		ghMockLogin = 'sharedhandle'
 		const crossProvCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${crossProvState}`)
 		assert.equal(crossProvCbRes.status, 200)
-		assert.equal(db.tokens.findUserByAccount('github:sharedhandle').id, crossProvLinker.id)
-		assert.equal(db.tokens.findUserByAccount('sharedhandle', 'github').id, crossProvLinker.id)
-		assert.equal(db.tokens.findUserByAccount('sharedhandle', 'custom_idp').id, crossProvHolder.id)
+		assert.equal(db.logins.findUserByAccount('github:sharedhandle').id, crossProvLinker.id)
+		assert.equal(db.logins.findUserByAccount('sharedhandle', 'github').id, crossProvLinker.id)
+		assert.equal(db.logins.findUserByAccount('sharedhandle', 'custom_idp').id, crossProvHolder.id)
 		ghMockLogin = 'jessetane'
 		const googleLoginState = db.tokens.createState({ mode: 'login', provider: 'google', sessionName: 'Google Key Login' })
 		const googleLoginCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${googleLoginState}`, { redirect: 'manual' })
@@ -2933,7 +2992,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		})
 		assert.equal(ghVerifyPostRes.status, 200)
 		assert.match(await ghVerifyPostRes.text(), /user:\s*user-props@example\.com/, 'POST /oauth/verify resolves same canonical account as GET /oauth/verify')
-		const otherUser = db.tokens.resolveUserByAuth('github', 'taken-gh-user')
+		const otherUser = db.logins.resolveUser('github', 'taken-gh-user')
 		const otherAdmin = db.tokens.create({ userId: otherUser.id, provider: 'self', admin: 1 })
 		const conflictSideEffectApp = db.tokens.create({
 			userId: shay.id,
@@ -2976,15 +3035,15 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 			provider: 'github'
 		}, adminSession.token)
 		assert.equal(unlinkLastGithubRes.isError, true, 'Cannot unlink sole remaining login key')
-		const relinkedGoogle = db.tokens.upsertAuth({ userId: user.id, provider: 'google', account: 'user-props@example.com' })
-		assert.equal(relinkedGoogle.credentials, null, 'type = "auth" stores account solely in tokens.name with credentials: null')
+		const relinkedGoogle = db.logins.upsert({ userId: user.id, provider: 'google', account: 'user-props@example.com' })
+		assert.deepEqual(Object.keys(relinkedGoogle).sort(), ['account', 'created', 'id', 'provider', 'userId'])
 		const unlinkByPathRes = await fetch(`http://127.0.0.1:${addr.port}/api/logins/${encodeURIComponent(relinkedGoogle.id)}`, {
 			method: 'DELETE',
 			headers: { authorization: `Bearer ${adminSession.token}` }
 		})
 		assert.equal(unlinkByPathRes.status, 200, 'DELETE /api/logins/:id unlinks login key by canonical loginId')
 		assert.equal((await unlinkByPathRes.json()).login.id, relinkedGoogle.id)
-		db.tokens.upsertAuth({ userId: user.id, provider: 'google', account: 'user-props@example.com' })
+		db.logins.upsert({ userId: user.id, provider: 'google', account: 'user-props@example.com' })
 		const unlinkGithubPrefixedMcp = await executeTool('admin', {
 			action: 'unlink_login',
 			account: 'github:jessetane'
@@ -2998,7 +3057,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		}, shayAdmin.token)
 		assert.equal(unshareAfterUnlinkScopedRes.isError, undefined)
 		assert.equal(JSON.parse(unshareAfterUnlinkScopedRes.content[0].text).unshared, true, 'Owner can still unshare provider:account even after recipient unlinks that login key')
-		db.tokens.upsertAuth({ userId: user.id, provider: 'github', account: 'jessetane' })
+		db.logins.upsert({ userId: user.id, provider: 'github', account: 'jessetane' })
 		await executeTool('admin', {
 			action: 'share_app',
 			appId: shayApp.id,
@@ -3016,7 +3075,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		}, shayAdmin.token)
 		assert.equal(unshareAfterUnlinkBareRes.isError, undefined)
 		assert.equal(JSON.parse(unshareAfterUnlinkBareRes.content[0].text).unshared, true, 'Owner can also unshare bare handle after recipient unlinks that login key')
-		db.tokens.upsertAuth({ userId: user.id, provider: 'github', account: 'jesse-unique-gh' })
+		db.logins.upsert({ userId: user.id, provider: 'github', account: 'jesse-unique-gh' })
 		const bareToExistingShare = JSON.parse((await executeTool('admin', {
 			action: 'share_app',
 			appId: shayApp.id,
@@ -3077,7 +3136,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		assert.match(ambiguousPendingUnshare.content[0].text, /Ambiguous account "scoped-guard@acme.com"/)
 		assert.equal(db.tokens.removeShare({ appId: shayApp.id, account: 'github:scoped-guard@acme.com' }), true)
 		assert.equal(db.tokens.removeShare({ appId: shayApp.id, account: 'scoped-guard@acme.com' }), true)
-		db.tokens.upsertAuth({ userId: user.id, provider: 'github', account: 'secret-gh-handle' })
+		db.logins.upsert({ userId: user.id, provider: 'github', account: 'secret-gh-handle' })
 		const emailOnlyShare = JSON.parse((await executeTool('admin', {
 			action: 'share_app',
 			appId: shayApp.id,
@@ -3115,9 +3174,9 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		}, adminSession.token)
 		const specialLoginId = 'login:special/id%1'
 		db.sqlite.prepare(`
-			INSERT INTO tokens (id, user_id, provider, type, name, token, credentials, created, updated)
-			VALUES (?, ?, 'github', 'auth', 'encoded-gh', 'github:encoded-gh', NULL, ?, ?)
-		`).run(specialLoginId, user.id, new Date().toISOString(), new Date().toISOString())
+			INSERT INTO logins (id, user_id, provider, account, created)
+			VALUES (?, ?, 'github', 'encoded-gh', ?)
+		`).run(specialLoginId, user.id, new Date().toISOString())
 		const specialSession = db.tokens.create({
 			id: 'sess:special/id%1',
 			userId: user.id,
@@ -3162,7 +3221,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		}
 		google.ssoOnly = true
 		try {
-			const ssoUser = db.tokens.resolveUserByAuth('google', 'sso-locked@example.com')
+			const ssoUser = db.logins.resolveUser('google', 'sso-locked@example.com')
 			const ssoAdmin = db.tokens.create({ userId: ssoUser.id, provider: 'self', admin: 1 })
 			const ssoLinkAttempt = await executeTool('admin', {
 				action: 'link_login',
@@ -3206,9 +3265,9 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 				account: 'newhire@corp.com'
 			}, ssoAdmin.token)).content[0].text)
 			assert.equal(ssoPendingShare.provider, 'google', 'ssoOnly sharer binds pending share to ssoOnly provider')
-			const ghImpersonator = db.tokens.resolveUserByAuth('github', 'newhire@corp.com')
+			const ghImpersonator = db.logins.resolveUser('github', 'newhire@corp.com')
 			assert.equal(db.tokens.listByUserId(ghImpersonator.id).filter(t => t.type === 'share').length, 0, 'Consumer provider must not claim enterprise ssoOnly pending share')
-			const googleCorpUser = db.tokens.resolveUserByAuth('google', 'newhire@corp.com')
+			const googleCorpUser = db.logins.resolveUser('google', 'newhire@corp.com')
 			assert.equal(db.tokens.listByUserId(googleCorpUser.id).filter(t => t.type === 'share').length, 1, 'Matching ssoOnly provider claims pending share')
 			db.tokens.upsertShare({
 				userId: null,
@@ -3243,7 +3302,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 				appId: shayApp.id,
 				provider: 'stripe'
 			})
-			const ssoUnscopedUser = db.tokens.resolveUserByAuth('google', 'unscoped@corp.com')
+			const ssoUnscopedUser = db.logins.resolveUser('google', 'unscoped@corp.com')
 			assert.equal(db.tokens.listByUserId(ssoUnscopedUser.id).filter(t => t.type === 'share').length, 1, 'ssoOnly login verifying email ownership claims unscoped pending email share')
 		} finally {
 			google.ssoOnly = false
@@ -3254,7 +3313,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 })
 
 test('admin update_app action', async () => {
-	const user = db.tokens.resolveUserByAuth('google', 'update-app@example.com')
+	const user = db.logins.resolveUser('google', 'update-app@example.com')
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -3306,7 +3365,7 @@ test('admin update_app action', async () => {
 })
 
 test('admin update_session action', async () => {
-	const user = db.tokens.resolveUserByAuth('google', 'update-session@example.com')
+	const user = db.logins.resolveUser('google', 'update-session@example.com')
 	const adminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
@@ -3380,7 +3439,7 @@ test('admin update_session action', async () => {
 })
 
 test('provider_api fail-loud on unlinked session or missing appId', async () => {
-	const user = db.tokens.resolveUserByAuth('google', 'unlinked-fail@example.com')
+	const user = db.logins.resolveUser('google', 'unlinked-fail@example.com')
 	const sessionNoApps = db.tokens.create({
 		userId: user.id,
 		provider: 'self'
@@ -3453,6 +3512,8 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({
+				client_id: 'attacker_chosen_id',
+				client_secret: 'attacker_chosen_secret',
 				client_name: 'Test MCP Agent',
 				redirect_uris: ['http://localhost:9999/cb']
 			})
@@ -3460,9 +3521,24 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 		assert.equal(regRes.status, 201)
 		const regData = await regRes.json()
 		assert.ok(regData.client_id)
+		assert.notEqual(regData.client_id, 'attacker_chosen_id', 'DCR must ignore caller-supplied client_id')
+		assert.equal(regData.client_secret, undefined)
 		assert.equal(regData.client_name, 'Test MCP Agent')
 		assert.deepEqual(regData.grant_types, ['authorization_code', 'refresh_token'])
-		const user = db.tokens.resolveUserByAuth('google', 'multi-provider@example.com')
+		const confRegRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/register`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				client_name: 'Confidential MCP Agent',
+				redirect_uris: ['http://localhost:9999/cb'],
+				token_endpoint_auth_method: 'client_secret_post'
+			})
+		})
+		assert.equal(confRegRes.status, 201)
+		const confRegData = await confRegRes.json()
+		assert.ok(confRegData.client_secret?.startsWith('cs_'), 'Confidential DCR client receives generated cs_ secret')
+		assert.equal(confRegData.client_secret_expires_at, 0)
+		const user = db.logins.resolveUser('google', 'multi-provider@example.com')
 		const session = db.tokens.create({
 			userId: user.id,
 			provider: 'self',
@@ -3505,6 +3581,8 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 		const toolsData = await toolsRes.json()
 		const toolNames = toolsData.result.tools.map(t => t.name)
 		assert.deepEqual(toolNames, ['admin', 'stripe_api'])
+		const adminSchemaProps = toolsData.result.tools.find(t => t.name === 'admin').inputSchema.properties
+		assert.ok(adminSchemaProps.linkAppIds, 'admin tool schema exposes linkAppIds for create_session')
 		const allowedRes = await executeTool('stripe_api', {
 			url: '/v1/customers/cus_123',
 			account: 'acct_test_1'
@@ -3578,7 +3656,7 @@ test('usage logging: 30-day rolling window, proxy log capture, MCP list_logs, an
 	const baseUrl = `http://127.0.0.1:${upstreamPort}`
 	try {
 		const addr = server.address()
-		const user = db.tokens.resolveUserByAuth('google', 'logs-test@example.com')
+		const user = db.logins.resolveUser('google', 'logs-test@example.com')
 		const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
 		const workerSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
 		const app = db.tokens.create({
@@ -3715,7 +3793,7 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 	const baseUrl = `http://127.0.0.1:${upstreamPort}`
 	try {
 		const addr = server.address()
-		const user = db.tokens.resolveUserByAuth('google', 'conventions@example.com')
+		const user = db.logins.resolveUser('google', 'conventions@example.com')
 		const session = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
 		const mailgunConnect = await executeTool('admin', {
 			action: 'connect_app',
@@ -3887,8 +3965,63 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 	const wildcardNoBaseProv = createProvider({ id: 'wildcard_only', name: 'WildcardOnly', baseUrl: null, allowedHosts: ['*.example.org'] })
 	assert.equal(wildcardNoBaseProv.isAllowedUrl('https://api.example.org/v1/test').allowed, true)
 	assert.equal(wildcardNoBaseProv.isAllowedUrl('https://evil.org/v1/test').allowed, false)
+	process.env.OKTA_TEST_SSO_ONLY = 'true'
+	try {
+		const envSsoProv = createProvider({ id: 'okta_test', name: 'OktaTest', oauth: { authUrl: 'https://okta.test/auth', tokenUrl: 'https://okta.test/token', userInfoUrl: 'https://okta.test/me' } })
+		assert.equal(envSsoProv.ssoOnly, true, '<PROVIDER>_SSO_ONLY=true env variable configures ssoOnly on createProvider')
+	} finally {
+		delete process.env.OKTA_TEST_SSO_ONLY
+	}
 	const addr = server.address()
-	const user = db.tokens.resolveUserByAuth('google', 'github-test@example.com')
+	const origFetchGoogle = globalThis.fetch
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://oauth2.googleapis.com/token') {
+			return new Response(JSON.stringify({ access_token: 'ya29.unverified', refresh_token: '1//new', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+			return new Response(JSON.stringify({ email: 'spoof@corp.com', verified_email: false }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		return origFetchGoogle(input, init)
+	}
+	try {
+		await assert.rejects(() => google.exchangeCode('code', 'http://localhost/cb'), /Could not retrieve account identifier from Google/, 'Google provider must reject unverified_email userinfo responses')
+	} finally {
+		globalThis.fetch = origFetchGoogle
+	}
+	let refreshCalls = 0
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://oauth2.googleapis.com/token') {
+			refreshCalls++
+			await new Promise(resolve => setTimeout(resolve, 15))
+			return new Response(JSON.stringify({ access_token: `ya29.dedup_${refreshCalls}`, expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		return origFetchGoogle(input, init)
+	}
+	try {
+		const refreshOwner = db.logins.resolveUser('google', 'dedup-refresh@example.com')
+		const expiringApp = db.tokens.create({
+			userId: refreshOwner.id,
+			provider: 'google',
+			type: 'oauth',
+			name: 'Expiring Dedup Google',
+			credentials: { accessToken: 'ya29.stale', refreshToken: '1//dedup-refresh' },
+			expiresAt: Date.now() - 1000
+		})
+		const [t1, t2, t3] = await Promise.all([
+			google.getFreshToken(expiringApp),
+			google.getFreshToken(expiringApp),
+			google.getFreshToken(expiringApp)
+		])
+		assert.equal(refreshCalls, 1, 'Concurrent getFreshToken calls must deduplicate in-flight upstream refresh')
+		assert.equal(t1.token, 'ya29.dedup_1')
+		assert.equal(t2.token, 'ya29.dedup_1')
+		assert.equal(t3.token, 'ya29.dedup_1')
+	} finally {
+		globalThis.fetch = origFetchGoogle
+	}
+	const user = db.logins.resolveUser('google', 'github-test@example.com')
 	const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
 	const noParamsConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/consent`, {
 		method: 'POST',
@@ -4103,33 +4236,50 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 			body: new URLSearchParams({ token: localAdminSession.token, session_name: 'Via Local Token', admin: '1' }).toString(),
 			redirect: 'manual'
 		})
-		assert.equal(adminConsent.status, 302)
-		const verifyLoc = new URL(adminConsent.headers.get('location'), `http://127.0.0.1:${addr.port}`)
-		assert.equal(verifyLoc.pathname, '/oauth/verify')
-		const code = verifyLoc.searchParams.get('code')
-		assert.ok(code)
-		const verifyPostRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({ code }).toString()
-		})
-		assert.equal(verifyPostRes.status, 200)
-		const verifyText = await verifyPostRes.text()
-		assert.match(verifyText, /user:\s*localhost/)
-		const tokenMatch = verifyText.match(/token:\s*([a-f0-9-]+)/)
+		assert.equal(adminConsent.status, 200, 'Local token sign-in with 0 apps returns bearer token directly without /oauth/verify hop')
+		const directText = await adminConsent.text()
+		assert.match(directText, /user:\s*localhost/)
+		const tokenMatch = directText.match(/token:\s*([a-f0-9-]+)/)
 		assert.ok(tokenMatch)
 		const newSession = db.tokens.getByToken(tokenMatch[1])
 		assert.equal(newSession.userId, localUser.id)
 		assert.equal(newSession.name, 'Via Local Token')
 		assert.equal(newSession.admin, true)
 		assert.equal(newSession.account, 'localhost')
+		const localApp = db.tokens.create({
+			userId: localUser.id,
+			provider: 'stripe',
+			type: 'api_key',
+			name: 'Local Stripe',
+			credentials: { apiKey: 'sk_local', baseUrl: 'https://api.stripe.com' }
+		})
+		const adminConsentWithApp = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: localAdminSession.token, session_name: 'Via Local Verify', admin: '1' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(adminConsentWithApp.status, 302, 'Local token sign-in with connected apps redirects to /oauth/verify')
+		const verifyLoc = new URL(adminConsentWithApp.headers.get('location'), `http://127.0.0.1:${addr.port}`)
+		assert.equal(verifyLoc.pathname, '/oauth/verify')
+		const code = verifyLoc.searchParams.get('code')
+		assert.ok(code)
+		const verifyPostRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code, app_id: localApp.id }).toString()
+		})
+		assert.equal(verifyPostRes.status, 200)
+		db.tokens.remove(localApp.id)
 		db.sqlite.exec("DELETE FROM tokens WHERE provider = 'self'")
+		db.tokens.create({ userId: localUser.id, provider: 'self', admin: 0, name: 'Non-admin Only' })
+		db.tokens.create({ userId: localUser.id, provider: 'self', admin: 1, expiresAt: Date.now() - 5000, name: 'Expired Admin' })
 		const bootstrapped = bootstrapLocalAdmin()
-		assert.ok(bootstrapped)
+		assert.ok(bootstrapped, 'bootstrapLocalAdmin mints admin session when only non-admin or expired admin sessions exist')
 		assert.equal(bootstrapped.provider, 'self')
 		assert.equal(bootstrapped.admin, true)
 		assert.equal(bootstrapped.account, 'localhost')
-		assert.equal(bootstrapLocalAdmin(), null, 'bootstrapLocalAdmin is a no-op once a session exists')
+		assert.equal(bootstrapLocalAdmin(), null, 'bootstrapLocalAdmin is a no-op once an active admin session exists')
 	} finally {
 		if (origGoogleId !== undefined) process.env.GOOGLE_CLIENT_ID = origGoogleId
 		if (origGithubId !== undefined) process.env.GITHUB_CLIENT_ID = origGithubId
@@ -4143,7 +4293,7 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	const legacyDupShareId = 'legacy-dup-share-1'
 	const legacyDormantLogsId = 'legacy-dormant-logs-1'
 	const legacyDormantEmptyId = 'legacy-dormant-empty-1'
-	const stubOwner = db.tokens.resolveUserByAuth('google', 'stub-owner@acme.com')
+	const stubOwner = db.logins.resolveUser('google', 'stub-owner@acme.com')
 	const stubUpstreamApp = db.tokens.create({
 		userId: stubOwner.id,
 		provider: 'stripe',
@@ -4151,8 +4301,15 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		name: 'Legacy Pre-Shared Stripe',
 		credentials: { apiKey: 'sk_legacy_stub', baseUrl: 'https://api.stripe.com' }
 	})
+	const legacyLinkedSession = db.tokens.create({
+		userId: stubOwner.id,
+		provider: 'self',
+		name: 'Legacy TokenLinks Session',
+		admin: 1
+	})
 	db.sqlite.exec('PRAGMA foreign_keys = OFF;')
 	db.sqlite.exec(`
+		PRAGMA user_version = 0;
 		CREATE TEMP TABLE users_mig_tmp AS SELECT id, created, updated FROM users;
 		DROP TABLE users;
 		CREATE TABLE users (
@@ -4166,6 +4323,39 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		INSERT INTO users (id, email, name, created, updated)
 			SELECT id, id || '@placeholder.local', 'Placeholder', created, updated FROM users_mig_tmp;
 		DROP TABLE users_mig_tmp;
+		CREATE TEMP TABLE tokens_mig_tmp AS SELECT * FROM tokens WHERE user_id IS NOT NULL;
+		DROP TABLE tokens;
+		CREATE TABLE tokens (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			type TEXT NOT NULL,
+			name TEXT,
+			token TEXT UNIQUE,
+			credentials TEXT,
+			expires_at INTEGER,
+			scopes TEXT,
+			admin INTEGER DEFAULT 0,
+			ip TEXT,
+			ua TEXT,
+			created TEXT NOT NULL,
+			updated TEXT NOT NULL,
+			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+		);
+		INSERT INTO tokens SELECT * FROM tokens_mig_tmp;
+		DROP TABLE tokens_mig_tmp;
+		CREATE TABLE token_links (
+			session_token_id TEXT NOT NULL,
+			app_token_id TEXT NOT NULL,
+			policy TEXT,
+			created TEXT NOT NULL,
+			updated TEXT NOT NULL,
+			PRIMARY KEY (session_token_id, app_token_id)
+		);
+		INSERT INTO token_links (session_token_id, app_token_id, policy, created, updated)
+			VALUES ('${legacyLinkedSession.id}', '${stubUpstreamApp.id}', '[{"action":"allow"}]', '${now}', '${now}');
+		CREATE TABLE oauth_states (state TEXT PRIMARY KEY, redirect_uri TEXT);
+		CREATE TABLE oauth_codes (code TEXT PRIMARY KEY, session_token_id TEXT);
 	`)
 	db.sqlite.exec('PRAGMA foreign_keys = ON;')
 	db.sqlite.prepare('INSERT INTO users (id, email, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
@@ -4240,7 +4430,12 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		VALUES (?, ?, 'stripe', 'share', ?, ?, ?)
 	`).run(legacyEmailStubShareId, legacyEmailStubId, JSON.stringify({ appId: stubUpstreamApp.id, policy: null }), now, now)
 	db.init()
+	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 1)
 	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after users.email migration and duplicate share link repointing')
+	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN ('token_links', 'oauth_states', 'oauth_codes')").get().count, 0, 'Legacy token_links, oauth_states, and oauth_codes tables are dropped')
+	const migratedTokenLinks = db.links.listBySessionId(legacyLinkedSession.id)
+	assert.equal(migratedTokenLinks.length, 1, 'Legacy token_links rows are migrated into links')
+	assert.equal(migratedTokenLinks[0].appId, stubUpstreamApp.id)
 	const migratedEmailMaster = db.sqlite.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE tbl_name = 'users' ORDER BY type, name").all()
 	assert.deepEqual(migratedEmailMaster, freshMaster, 'Migrated users.email DB matches fresh pure-anchor DDL with no leftover columns or indexes')
 	const migratedUser = db.users.get(legacyUserId)
@@ -4253,18 +4448,17 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	assert.equal(repointedLinks.length, 1, 'Session link to deduplicated share is preserved rather than orphaned')
 	assert.equal(repointedLinks[0].appId, legacySurvivingShareId, 'Session link app_id is repointed to surviving share row')
 	assert.ok(db.users.get(legacyDormantLogsId), 'Zero-session legacy user with historical logs is preserved as real user')
-	assert.equal(db.tokens.getAccountByUserId(legacyDormantLogsId), 'dormant-logs@gmail.com')
+	assert.equal(db.logins.getAccountByUserId(legacyDormantLogsId), 'dormant-logs@gmail.com')
 	assert.equal(db.logs.listByUserId(legacyDormantLogsId).length, 1, 'Historical logs for zero-session legacy user are preserved')
 	assert.ok(db.users.get(legacyDormantEmptyId), 'Zero-session, zero-share legacy user is preserved and backfilled rather than treated as stub')
-	assert.equal(db.tokens.getAccountByUserId(legacyDormantEmptyId), 'dormant-empty@gmail.com')
-	assert.equal(db.tokens.getAccountByUserId(legacyUserId), 'legacy@gmail.com')
-	const backfilledLogins = db.tokens.listAuthByUserId(legacyUserId)
+	assert.equal(db.logins.getAccountByUserId(legacyDormantEmptyId), 'dormant-empty@gmail.com')
+	assert.equal(db.logins.getAccountByUserId(legacyUserId), 'legacy@gmail.com')
+	const backfilledLogins = db.logins.listByUserId(legacyUserId)
 	assert.equal(backfilledLogins.length, 1)
 	assert.equal(backfilledLogins[0].provider, 'google')
-	assert.equal(backfilledLogins[0].token, 'google:legacy@gmail.com')
-	assert.equal(backfilledLogins[0].name, 'legacy@gmail.com')
-	assert.equal(backfilledLogins[0].credentials, null)
-	const resolvedLegacy = db.tokens.resolveUserByAuth('google', 'LEGACY@gmail.com')
+	assert.equal(backfilledLogins[0].account, 'legacy@gmail.com')
+	assert.equal(backfilledLogins[0].userId, legacyUserId)
+	const resolvedLegacy = db.logins.resolveUser('google', 'LEGACY@gmail.com')
 	assert.equal(resolvedLegacy.id, legacyUserId)
 	assert.equal(db.users.get(legacyEmailStubId), null, 'Zero-session stub user in users.email DB is converted to pending share and never fabricated as google auth')
 	assert.equal(db.tokens.get(legacyEmailStubShareId).userId, null)
@@ -4285,6 +4479,7 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	`).run(legacyMixedAuthUser.id, JSON.stringify({ account: ' MixedCaseHandle ' }), now, now)
 	db.sqlite.exec('PRAGMA foreign_keys = OFF;')
 	db.sqlite.exec(`
+		PRAGMA user_version = 0;
 		CREATE TEMP TABLE users_acc_tmp AS SELECT id, created, updated FROM users;
 		DROP TABLE users;
 		CREATE TABLE users (
@@ -4426,17 +4621,18 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	})
 	assert.doesNotThrow(() => db.tokens.init(), 'tokens.init() is strictly DDL-only and never crashes on case-colliding or malformed auth rows')
 	db.init()
+	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 1)
 	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after single-pass atomic migration')
-	const normalizedMixedAuth = db.tokens.listAuthByUserId(legacyMixedAuthUser.id)
+	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE type = 'auth'").get().count, 0, 'All legacy tokens(type = auth) rows are migrated out of tokens into logins')
+	const normalizedMixedAuth = db.logins.listByUserId(legacyMixedAuthUser.id)
 	assert.equal(normalizedMixedAuth.length, 1)
 	assert.equal(normalizedMixedAuth[0].provider, 'github', 'db.init() normalizes legacy auth provider to lowercase')
-	assert.equal(normalizedMixedAuth[0].name, 'mixedcasehandle', 'db.init() normalizes empty/mixed-case auth name from credentials.account')
-	assert.equal(normalizedMixedAuth[0].token, 'github:mixedcasehandle', 'db.init() normalizes legacy auth lookup token to lowercase provider:account')
-	assert.equal(normalizedMixedAuth[0].credentials, null)
-	assert.equal(db.tokens.resolveUserByAuth('github', 'mixedcasehandle').id, legacyMixedAuthUser.id)
+	assert.equal(normalizedMixedAuth[0].account, 'mixedcasehandle', 'db.init() normalizes empty/mixed-case auth account from credentials.account')
+	assert.equal(normalizedMixedAuth[0].userId, legacyMixedAuthUser.id)
+	assert.equal(db.logins.resolveUser('github', 'mixedcasehandle').id, legacyMixedAuthUser.id)
 	assert.ok(db.users.get(caseCollideSurvivorId), 'Case-colliding auth normalization preserves older user as survivor')
 	assert.equal(db.users.get(caseCollideDupId), null, 'Case-colliding auth normalization merges and drops duplicate user')
-	assert.equal(db.tokens.resolveUserByAuth('github', 'casecollide').id, caseCollideSurvivorId)
+	assert.equal(db.logins.resolveUser('github', 'casecollide').id, caseCollideSurvivorId)
 	assert.equal(db.tokens.get(caseCollideDupSession.id).userId, caseCollideSurvivorId, 'Duplicate user sessions are merged onto survivor')
 	assert.equal(db.tokens.get('malformed-empty-auth-1'), null, 'Malformed auth row with empty account is deleted instead of leaving NULL zombie auth row')
 	assert.equal(db.users.get(stubAliceId), null, 'Pre-shared stub user created before real user is removed on migration')
@@ -4448,7 +4644,7 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	const migratedAccountMaster = db.sqlite.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE tbl_name = 'users' ORDER BY type, name").all()
 	assert.deepEqual(migratedAccountMaster, freshMaster, 'Migrated users.account/users.name DB matches fresh pure-anchor DDL')
 	assert.equal(db.users.get(legacyStubUserId), null, 'Unclaimed stub user from users.account DB is removed on migration rather than bound to google')
-	assert.equal(db.tokens.listAuthByUserId(legacyStubUserId).length, 0)
+	assert.equal(db.logins.listByUserId(legacyStubUserId).length, 0)
 	assert.equal(db.users.get(legacyBareStubId), null, 'Stub user with expired oauth_state is still classified as stub and dropped')
 	assert.equal(db.tokens.get(legacyBareStateId), null, 'Ephemeral oauth_state row on stub user is cleaned up without FK orphans')
 	const migratedBareShare = db.tokens.get(legacyBareShareId)
@@ -4456,24 +4652,24 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	assert.equal(migratedBareShare.account, 'barestubhandle')
 	assert.equal(migratedBareShare.credentials.authProvider, 'github', 'Bare-handle stub share defaults authProvider to github to preserve pending share invariant')
 	assert.ok(db.users.get(legacyBareRealUserId), 'Real legacy bare-handle user is preserved')
-	assert.equal(db.tokens.resolveUserByAuth('github', 'realbareghuser').id, legacyBareRealUserId, 'Real legacy bare-handle user in users.account DB backfills github:account')
+	assert.equal(db.logins.resolveUser('github', 'realbareghuser').id, legacyBareRealUserId, 'Real legacy bare-handle user in users.account DB backfills github:account')
 	assert.ok(db.users.get(legacyLocalBootstrapId), 'Legacy localhost bootstrap user is preserved')
-	assert.equal(db.tokens.listAuthByUserId(legacyLocalBootstrapId).length, 0, 'Legacy localhost bootstrap user never fabricates fake OAuth login key')
-	assert.equal(db.tokens.getAccountByUserId(legacyLocalBootstrapId), 'localhost')
+	assert.equal(db.logins.listByUserId(legacyLocalBootstrapId).length, 0, 'Legacy localhost bootstrap user never fabricates fake OAuth login key')
+	assert.equal(db.logins.getAccountByUserId(legacyLocalBootstrapId), 'localhost')
 	const migratedPendingShare = db.tokens.get(legacyShareId)
 	assert.ok(migratedPendingShare)
 	assert.equal(migratedPendingShare.userId, null, 'Stub user share is migrated to pending share with user_id = NULL')
 	assert.equal(migratedPendingShare.account, 'stub-recipient@acme.com')
-	const claimedRecipient = db.tokens.resolveUserByAuth('github', 'stub-recipient@acme.com')
+	const claimedRecipient = db.logins.resolveUser('github', 'stub-recipient@acme.com')
 	assert.equal(db.tokens.get(legacyShareId).userId, claimedRecipient.id, 'Migrated pending share can be claimed by non-Google provider')
 	const migratedPrefixedShare = db.tokens.get(legacyPrefixedShareId)
 	assert.equal(migratedPrefixedShare.userId, null)
 	assert.equal(migratedPrefixedShare.account, 'prefixedhandle', 'provider:account stub splits cleanAccount into tokens.name')
 	assert.equal(migratedPrefixedShare.credentials.authProvider, 'github', 'provider:account stub binds credentials.authProvider')
-	const wrongProvClaim = db.tokens.resolveUserByAuth('google', 'prefixedhandle')
+	const wrongProvClaim = db.logins.resolveUser('google', 'prefixedhandle')
 	assert.equal(db.tokens.get(legacyPrefixedShareId).userId, null, 'google login must not claim github-scoped migrated pending share')
 	assert.ok(wrongProvClaim)
-	const rightProvClaim = db.tokens.resolveUserByAuth('github', 'prefixedhandle')
+	const rightProvClaim = db.logins.resolveUser('github', 'prefixedhandle')
 	assert.equal(db.tokens.get(legacyPrefixedShareId).userId, rightProvClaim.id, 'github login claims github-scoped migrated pending share')
 })
 
@@ -4495,7 +4691,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 	const baseUrl = `http://127.0.0.1:${upstreamPort}`
 	try {
 		const addr = server.address()
-		const sarah = db.tokens.resolveUserByAuth('google', 'sarah@acme.com')
+		const sarah = db.logins.resolveUser('google', 'sarah@acme.com')
 		const sarahAdmin = db.tokens.create({ userId: sarah.id, provider: 'self', admin: 1 })
 		const sarahWorker = db.tokens.create({ userId: sarah.id, provider: 'self', admin: 0 })
 		const connectRes = await executeTool('admin', {
@@ -4563,7 +4759,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const shareId = shareData.shareId
 		assert.ok(shareId)
 		assert.notEqual(shareId, sarahApp.id)
-		assert.equal(db.tokens.findUserByAccount('dan@acme.com'), null, 'Pre-sharing never creates stub user or fake auth row')
+		assert.equal(db.logins.findUserByAccount('dan@acme.com'), null, 'Pre-sharing never creates stub user or fake auth row')
 		const updatedCeilingPolicy = [
 			{ action: 'allow', methods: ['GET'], path: '/v1/customers/**' },
 			{ action: 'allow', methods: ['GET'], path: '/v1/invoices/**' }
@@ -4586,7 +4782,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		assert.equal(sarahStripe.shares[0].userId, null)
 		assert.equal(sarahStripe.shares[0].account, 'dan@acme.com')
 		assert.deepEqual(sarahStripe.shares[0].policy, updatedCeilingPolicy)
-		const dan = db.tokens.resolveUserByAuth('google', 'dan@acme.com')
+		const dan = db.logins.resolveUser('google', 'dan@acme.com')
 		assert.ok(dan)
 		const sarahAppsAfterClaim = JSON.parse((await executeTool('admin', { action: 'list_apps' }, sarahAdmin.token)).content[0].text).apps
 		assert.equal(sarahAppsAfterClaim.find(a => a.id === sarahApp.id).shares[0].userId, dan.id, 'Pending share transitions cleanly to claimed userId once Dan signs in')
@@ -4706,7 +4902,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		assert.ok(danAllLogs.every(l => l.appId === shareId), 'Unfiltered recipient logs also resolve appId to shareId')
 		const danProbeUpstreamIdLogs = JSON.parse((await executeTool('admin', { action: 'list_logs', appId: sarahApp.id }, danAdmin.token)).content[0].text).logs
 		assert.equal(danProbeUpstreamIdLogs.length, 0, 'Recipient filtering by owner upstreamApp.id returns 0 logs')
-		const eve = db.tokens.resolveUserByAuth('google', 'eve@acme.com')
+		const eve = db.logins.resolveUser('google', 'eve@acme.com')
 		const eveSession = db.tokens.create({ userId: eve.id, provider: 'self', admin: 1 })
 		const eveSpoofRes = await executeTool('stripe_api', {
 			url: '/v1/customers/spoof_attempt',
@@ -4719,7 +4915,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		assert.equal(sarahLogs[0].userId, dan.id)
 		assert.equal(sarahLogs[0].account, 'dan@acme.com')
 		assert.equal(sarahLogs[0].appId, sarahApp.id)
-		db.tokens.upsertAuth({ userId: dan.id, provider: 'github', account: 'dan-public' })
+		db.logins.upsert({ userId: dan.id, provider: 'github', account: 'dan-public' })
 		const sarahPrivacyAppRes = await executeTool('admin', {
 			action: 'connect_app',
 			provider: 'stripe',
@@ -4934,6 +5130,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 			policy: [{ action: 'allow' }]
 		}, sarahAdmin.token)).content[0].text)
 		const verifyCode = db.tokens.createState({
+			mode: 'verify',
 			userId: dan.id,
 			admin: 1
 		})
