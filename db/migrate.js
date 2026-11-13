@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import * as users from './users.js'
 import * as logins from './logins.js'
 import * as tokens from './tokens.js'
+import { getProvider } from '../providers/index.js'
 import { parseAccountSpec } from '../util.js'
 
 export {
@@ -264,7 +265,8 @@ function migrate (sqlite) {
 				ORDER BY l.created ASC, l.rowid ASC
 			`).all()
 			for (const l of matchingLogins) {
-				tokens.claimPendingShares({ userId: l.user_id, provider: l.provider, account: l.account })
+				const allowUnscoped = Boolean(getProvider(l.provider)?.verifiedEmail)
+				tokens.claimPendingShares({ userId: l.user_id, provider: l.provider, account: l.account, allowUnscoped })
 			}
 			sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 			sqlite.exec('COMMIT;')

@@ -10,6 +10,7 @@ export default {
 		tokenUrl: 'https://oauth2.googleapis.com/token',
 		userInfoUrl: 'https://www.googleapis.com/oauth2/v2/userinfo',
 		loginHintParam: 'login_hint',
+		verifiedEmail: true,
 		authParams: {
 			access_type: 'offline',
 			prompt: 'consent'

@@ -137,12 +137,14 @@ function createProvider (config) {
 	}
 	const envPrefix = id.toUpperCase()
 	const ssoOnly = Boolean(rawConfig.ssoOnly || oauth?.ssoOnly || process.env[`${envPrefix}_SSO_ONLY`] === 'true')
+	const verifiedEmail = Boolean(rawConfig.verifiedEmail || oauth?.verifiedEmail)
 	return {
 		id,
 		name: label,
 		type,
 		baseUrl,
 		ssoOnly,
+		verifiedEmail,
 		...(services && { services }),
 		toolDescription (baseHint) {
 			if (typeof rawConfig.toolDescription === 'string') return rawConfig.toolDescription

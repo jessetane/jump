@@ -2724,12 +2724,14 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	db.tokens.upsertShare({
 		userId: null,
 		account: 'prec@acme.com',
-		authProvider: 'github',
+		authProvider: 'google',
 		appId: precApp.id,
 		provider: 'stripe',
 		policy: [{ action: 'allow', methods: ['POST'], path: '/v1/scoped' }]
 	})
-	const precUser = db.logins.resolveUser('github', 'prec@acme.com')
+	const unverifiedPrecUser = db.logins.resolveUser('custom_unverified_idp', 'prec@acme.com')
+	assert.equal(db.tokens.listByUserId(unverifiedPrecUser.id).filter(t => t.type === 'share').length, 0, 'Unverified-email provider must never claim unscoped pending email shares')
+	const precUser = db.logins.resolveUser('google', 'prec@acme.com')
 	const precShares = db.tokens.listByUserId(precUser.id).filter(t => t.type === 'share')
 	assert.equal(precShares.length, 1, 'Overlapping unscoped and provider-scoped pending shares deduplicate to 1')
 	assert.deepEqual(precShares[0].credentials.policy, [{ action: 'allow', methods: ['POST'], path: '/v1/scoped' }], 'Provider-scoped pending share wins precedence over unscoped pending share')
@@ -4724,8 +4726,11 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	assert.ok(migratedPendingShare)
 	assert.equal(migratedPendingShare.userId, null, 'Stub user share is migrated to pending share with user_id = NULL')
 	assert.equal(migratedPendingShare.account, 'stub-recipient@acme.com')
-	const claimedRecipient = db.logins.resolveUser('github', 'stub-recipient@acme.com')
-	assert.equal(db.tokens.get(legacyShareId).userId, claimedRecipient.id, 'Migrated pending share can be claimed by non-Google provider')
+	const unverifiedClaimAttempt = db.logins.resolveUser('custom_idp', 'stub-recipient@acme.com')
+	assert.ok(unverifiedClaimAttempt)
+	assert.equal(db.tokens.get(legacyShareId).userId, null, 'Migrated unscoped pending email share cannot be claimed by unverified provider')
+	const claimedRecipient = db.logins.resolveUser('google', 'stub-recipient@acme.com')
+	assert.equal(db.tokens.get(legacyShareId).userId, claimedRecipient.id, 'Migrated pending share is claimed by verified-email provider')
 	const migratedPrefixedShare = db.tokens.get(legacyPrefixedShareId)
 	assert.equal(migratedPrefixedShare.userId, null)
 	assert.equal(migratedPrefixedShare.account, 'prefixedhandle', 'provider:account stub splits cleanAccount into tokens.name')

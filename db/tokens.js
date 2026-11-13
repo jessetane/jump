@@ -283,18 +283,25 @@ function listByUserId (userId, opts = {}) {
 	return rows.map(formatToken)
 }
 
-function claimPendingShares ({ userId, provider, account }) {
+function claimPendingShares ({ userId, provider, account, allowUnscoped = false }) {
 	const cleanProvider = String(provider).trim().toLowerCase()
 	const cleanAccount = String(account).trim().toLowerCase()
-	const pendingRows = sqlite.prepare(`
-		SELECT id, credentials, updated FROM tokens
-		WHERE user_id IS NULL AND type = 'share' AND name = ?
-			AND (json_extract(credentials, '$.authProvider') IS NULL OR json_extract(credentials, '$.authProvider') = ?)
-		ORDER BY
-			CASE WHEN json_extract(credentials, '$.authProvider') = ? THEN 0 ELSE 1 END ASC,
-			updated DESC,
-			rowid DESC
-	`).all(cleanAccount, cleanProvider, cleanProvider)
+	const pendingRows = allowUnscoped
+		? sqlite.prepare(`
+			SELECT id, credentials, updated FROM tokens
+			WHERE user_id IS NULL AND type = 'share' AND name = ?
+				AND (json_extract(credentials, '$.authProvider') IS NULL OR json_extract(credentials, '$.authProvider') = ?)
+			ORDER BY
+				CASE WHEN json_extract(credentials, '$.authProvider') = ? THEN 0 ELSE 1 END ASC,
+				updated DESC,
+				rowid DESC
+		`).all(cleanAccount, cleanProvider, cleanProvider)
+		: sqlite.prepare(`
+			SELECT id, credentials, updated FROM tokens
+			WHERE user_id IS NULL AND type = 'share' AND name = ?
+				AND json_extract(credentials, '$.authProvider') = ?
+			ORDER BY updated DESC, rowid DESC
+		`).all(cleanAccount, cleanProvider)
 	for (const row of pendingRows) {
 		const creds = row.credentials ? JSON.parse(row.credentials) : {}
 		const appId = creds.appId

@@ -1,6 +1,7 @@
 import { sqlite } from './index.js'
 import * as users from './users.js'
 import * as tokens from './tokens.js'
+import { getProvider } from '../providers/index.js'
 import { parseAccountSpec } from '../util.js'
 import { randomUUID } from 'node:crypto'
 
@@ -110,6 +111,7 @@ function runInTransaction (fn) {
 function upsert ({ id = randomUUID(), userId, provider, account }) {
 	const cleanProvider = String(provider).trim().toLowerCase()
 	const cleanAccount = String(account).trim().toLowerCase()
+	const allowUnscoped = Boolean(getProvider(cleanProvider)?.verifiedEmail)
 	return runInTransaction(() => {
 		const existing = sqlite.prepare('SELECT * FROM logins WHERE provider = ? AND account = ?').get(cleanProvider, cleanAccount)
 		if (existing) {
@@ -118,7 +120,7 @@ function upsert ({ id = randomUUID(), userId, provider, account }) {
 				err.status = 409
 				throw err
 			}
-			tokens.claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount })
+			tokens.claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
 			return formatLogin(existing)
 		}
 		const now = new Date().toISOString()
@@ -126,7 +128,7 @@ function upsert ({ id = randomUUID(), userId, provider, account }) {
 			INSERT INTO logins (id, user_id, provider, account, created)
 			VALUES (?, ?, ?, ?, ?)
 		`).run(id, userId, cleanProvider, cleanAccount, now)
-		tokens.claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount })
+		tokens.claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
 		return get(id)
 	})
 }
@@ -169,10 +171,11 @@ function resolveUser (provider, account, { createIfMissing = true } = {}) {
 	if (!provider || !account) return null
 	const cleanProvider = String(provider).trim().toLowerCase()
 	const cleanAccount = String(account).trim().toLowerCase()
+	const allowUnscoped = Boolean(getProvider(cleanProvider)?.verifiedEmail)
 	return runInTransaction(() => {
 		const row = sqlite.prepare('SELECT user_id FROM logins WHERE provider = ? AND account = ?').get(cleanProvider, cleanAccount)
 		if (row) {
-			tokens.claimPendingShares({ userId: row.user_id, provider: cleanProvider, account: cleanAccount })
+			tokens.claimPendingShares({ userId: row.user_id, provider: cleanProvider, account: cleanAccount, allowUnscoped })
 			return users.get(row.user_id)
 		}
 		if (!createIfMissing) return null
