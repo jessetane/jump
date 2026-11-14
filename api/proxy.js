@@ -4,7 +4,6 @@ import { evaluatePolicy } from '../policy.js'
 
 export {
 	request,
-	executeUpstream,
 	readResponseBody
 }
 

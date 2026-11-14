@@ -20,8 +20,7 @@ export {
 	unlinkApp,
 	linkLogin,
 	unlinkLogin,
-	listLogs,
-	validateBaseUrl
+	listLogs
 }
 
 function formatLogin (login) {

@@ -1,7 +1,6 @@
 export {
 	evaluatePolicy,
 	matchPattern,
-	normalizeUrl,
 	parsePolicy,
 	validatePolicy
 }

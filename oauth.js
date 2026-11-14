@@ -8,17 +8,8 @@ import { getBody, sendJson } from './util.js'
 
 export {
 	handleOauth,
-	handleRegister,
 	handleAuthorize,
 	handleAuthorizeConsent,
-	handleVerify,
-	handleProviderConnect,
-	handleProviderConsent,
-	handleCallback,
-	handleToken,
-	handleRevoke,
-	handleProtectedResourceMetadata,
-	handleAuthServerMetadata,
 	isAllowedRedirectUri,
 	deriveClientName,
 	getBaseUrl

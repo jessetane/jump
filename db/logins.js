@@ -14,8 +14,7 @@ export {
 	upsert,
 	remove,
 	resolveUser,
-	userAccountSql,
-	CREATE_LOGINS_SQL
+	userAccountSql
 }
 
 const CREATE_LOGINS_SQL = `

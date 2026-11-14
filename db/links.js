@@ -7,9 +7,7 @@ export {
 	get,
 	listBySessionId,
 	listByAppId,
-	updatePolicy,
-	remove,
-	formatLink
+	remove
 }
 
 function init () {
@@ -119,17 +117,6 @@ function listByAppId (appId) {
 			account: r.account
 		}
 	}))
-}
-
-function updatePolicy (sessionId, appId, policy) {
-	const now = new Date().toISOString()
-	const policyStr = policy && typeof policy === 'object' ? JSON.stringify(policy) : policy
-	const res = sqlite.prepare(`
-		UPDATE links
-		SET policy = ?, updated = ?
-		WHERE session_id = ? AND app_id = ?
-	`).run(policyStr, now, sessionId, appId)
-	return res.changes > 0 ? get(sessionId, appId) : null
 }
 
 function remove (sessionId, appId) {

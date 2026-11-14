@@ -1,7 +1,6 @@
 export {
 	getBody,
 	sendJson,
-	isAllowedUpstreamHost,
 	validateBaseUrl,
 	parseAccountSpec
 }

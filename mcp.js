@@ -6,8 +6,6 @@ import { getProvider } from './providers/index.js'
 import { getBody, sendJson } from './util.js'
 
 export {
-	buildProviderTool,
-	getAvailableTools,
 	executeTool,
 	redactLogArgs,
 	handleMcp
@@ -65,7 +63,7 @@ const adminTool = {
 				description: 'Administrative action to perform.'
 			},
 			sessionId: { type: 'string', description: 'Target session token ID.' },
-			appId: { type: 'string', description: 'Target upstream app token ID (used for connect_app, update_app, disconnect_app, share_app, unshare_app, link_app, unlink_app).' },
+			appId: { type: 'string', description: 'Target upstream app token ID (used for connect_app, update_app, disconnect_app, share_app, unshare_app, link_app, unlink_app, list_logs).' },
 			linkAppIds: {
 				type: 'array',
 				items: { type: 'string' },
@@ -117,7 +115,7 @@ const adminTool = {
 					}
 				}
 			},
-			admin: { type: 'boolean', description: 'Grant admin permissions to a new session.' },
+			admin: { type: 'boolean', description: 'Grant or revoke admin permissions on a session (used for create_session and update_session).' },
 			rotateToken: { type: 'boolean', description: 'When action is update_session, set to true to rotate and regenerate the session bearer token.' },
 			revoke: { type: 'boolean', description: 'When action is disconnect_app, set to false to remove locally without upstream revocation (defaults to true).' },
 			allOthers: { type: 'boolean', description: 'When action is revoke, set to true to revoke all other sessions.' },
