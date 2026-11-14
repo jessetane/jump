@@ -12,7 +12,7 @@ process.env.DB_PATH = testDbPath
 process.env.NODE_ENV = 'test'
 process.env.GOOGLE_CLIENT_ID = 'test-client-id'
 process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret'
-process.env.ALLOWED_REDIRECT_DOMAINS = 'localhost,127.0.0.1,chatgpt.com,antigravity.google,antigravity,cursor,vscode'
+process.env.ALLOWED_REDIRECT_DOMAINS = 'chatgpt.com,*.antigravity.google,antigravity,cursor,vscode'
 
 fs.rmSync(testDbPath, { force: true })
 fs.rmSync(`${testDbPath}-wal`, { force: true })
@@ -795,8 +795,13 @@ test('oauth pkce flow with S256', async () => {
 test('isAllowedRedirectUri exact and wildcard matching', () => {
 	assert.equal(isAllowedRedirectUri('https://chatgpt.com/callback'), true)
 	assert.equal(isAllowedRedirectUri('https://foo.chatgpt.com/callback'), false)
+	assert.equal(isAllowedRedirectUri('http://localhost:3000/cb'), true)
 	assert.equal(isAllowedRedirectUri('https://localhost:3000/cb'), true)
+	assert.equal(isAllowedRedirectUri('http://127.0.0.1:8080/cb'), true)
+	assert.equal(isAllowedRedirectUri('http://[::1]:8080/cb'), true)
+	assert.equal(isAllowedRedirectUri('custom://localhost/cb'), false)
 	assert.equal(isAllowedRedirectUri('https://antigravity.google/oauth-callback'), true)
+	assert.equal(isAllowedRedirectUri('https://sub.antigravity.google/oauth-callback'), true)
 	assert.equal(isAllowedRedirectUri('antigravity://auth-callback'), true)
 	assert.equal(isAllowedRedirectUri('cursor://anyscheme/callback'), true)
 	assert.equal(isAllowedRedirectUri('vscode://callback'), true)
@@ -804,6 +809,16 @@ test('isAllowedRedirectUri exact and wildcard matching', () => {
 	assert.equal(isAllowedRedirectUri('malicious://callback'), false)
 	assert.equal(isAllowedRedirectUri(''), false)
 	assert.equal(isAllowedRedirectUri(null), false)
+	const prev = process.env.ALLOWED_REDIRECT_DOMAINS
+	delete process.env.ALLOWED_REDIRECT_DOMAINS
+	try {
+		assert.equal(isAllowedRedirectUri('http://127.0.0.1:4321/cb'), true)
+		assert.equal(isAllowedRedirectUri('https://chatgpt.com/callback'), false)
+		assert.equal(isAllowedRedirectUri('https://antigravity.google/oauth-callback'), false)
+		assert.equal(isAllowedRedirectUri('antigravity://auth-callback'), false)
+	} finally {
+		process.env.ALLOWED_REDIRECT_DOMAINS = prev
+	}
 })
 
 test('oauth pkce authorize endpoint validation and stateless rendering', async () => {

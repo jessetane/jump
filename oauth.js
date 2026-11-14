@@ -29,8 +29,10 @@ const dirname = path.dirname(fileURLToPath(import.meta.url))
 const KNOWN_CLIENT_NAMES = {
 	'antigravity.google': 'Google Antigravity',
 	'claude.ai': 'Claude',
+	'claude.com': 'Claude',
 	'anthropic.com': 'Anthropic',
 	'chatgpt.com': 'ChatGPT',
+	'chat.openai.com': 'ChatGPT',
 	'openai.com': 'OpenAI',
 	'cursor.sh': 'Cursor',
 	'cursor.com': 'Cursor',
@@ -243,13 +245,14 @@ function isAllowedRedirectUri (redirectUri) {
 	const protocol = url.protocol.toLowerCase()
 	if (DISALLOWED_REDIRECT_SCHEMES.has(protocol)) return false
 	const hostname = url.hostname.toLowerCase()
+	const isLoopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
 	if (protocol === 'http:') {
-		return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+		return isLoopback
 	}
-	if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === 'antigravity.google' || hostname.endsWith('.antigravity.google')) {
+	if (protocol === 'https:' && isLoopback) {
 		return true
 	}
-	const envDomains = process.env.ALLOWED_REDIRECT_DOMAINS || 'localhost,127.0.0.1,antigravity.google,claude.ai,anthropic.com,chatgpt.com,chat.openai.com,openai.com,cursor.sh,cursor.com,windsurf.com,codeium.com,vscode.dev,github.dev,antigravity,cursor,vscode'
+	const envDomains = process.env.ALLOWED_REDIRECT_DOMAINS || ''
 	const allowedDomains = envDomains.split(',').map(d => d.trim().toLowerCase()).filter(Boolean)
 	if (protocol !== 'https:') {
 		const scheme = protocol.replace(/:$/, '')
