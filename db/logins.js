@@ -95,7 +95,7 @@ function findUserByAccount (account, provider = null) {
 
 function runInTransaction (fn) {
 	if (!sqlite.isTransaction) {
-		sqlite.exec('BEGIN;')
+		sqlite.exec('BEGIN IMMEDIATE;')
 		try {
 			const result = fn()
 			sqlite.exec('COMMIT;')
@@ -136,35 +136,37 @@ function upsert ({ id = randomUUID(), userId, provider, account }) {
 function remove (userId, { loginId = null, provider = null, account = null } = {}) {
 	if (!userId) return null
 	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
-	const allLogins = listByUserId(userId)
-	let matches = allLogins
-	if (loginId) {
-		matches = matches.filter(l => l.id === loginId)
-	}
-	if (cleanProvider) {
-		matches = matches.filter(l => l.provider === cleanProvider)
-	}
-	if (cleanAccount) {
-		matches = matches.filter(l => l.account === cleanAccount)
-	}
-	if (matches.length === 0) {
-		const err = new Error('Login key not found')
-		err.status = 404
-		throw err
-	}
-	if (matches.length > 1) {
-		const err = new Error('Multiple login keys match; specify account')
-		err.status = 400
-		throw err
-	}
-	if (allLogins.length <= 1) {
-		const err = new Error('Cannot unlink your only login key')
-		err.status = 400
-		throw err
-	}
-	const target = matches[0]
-	sqlite.prepare('DELETE FROM logins WHERE id = ? AND user_id = ?').run(target.id, userId)
-	return target
+	return runInTransaction(() => {
+		const allLogins = listByUserId(userId)
+		let matches = allLogins
+		if (loginId) {
+			matches = matches.filter(l => l.id === loginId)
+		}
+		if (cleanProvider) {
+			matches = matches.filter(l => l.provider === cleanProvider)
+		}
+		if (cleanAccount) {
+			matches = matches.filter(l => l.account === cleanAccount)
+		}
+		if (matches.length === 0) {
+			const err = new Error('Login key not found')
+			err.status = 404
+			throw err
+		}
+		if (matches.length > 1) {
+			const err = new Error('Multiple login keys match; specify account')
+			err.status = 400
+			throw err
+		}
+		if (allLogins.length <= 1) {
+			const err = new Error('Cannot unlink your only login key')
+			err.status = 400
+			throw err
+		}
+		const target = matches[0]
+		sqlite.prepare('DELETE FROM logins WHERE id = ? AND user_id = ?').run(target.id, userId)
+		return target
+	})
 }
 
 function resolveUser (provider, account, { createIfMissing = true } = {}) {

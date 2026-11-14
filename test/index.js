@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { Worker } from 'node:worker_threads'
 
 const dirname = path.dirname(fileURLToPath(import.meta.url))
 const testDbPath = path.join(dirname, 'test.db')
@@ -5296,6 +5297,36 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 	} finally {
 		await new Promise(resolve => mockUpstream.close(resolve))
 	}
+})
+
+test('db.logins transactions use BEGIN IMMEDIATE to wait on WAL write locks instead of throwing SQLITE_BUSY', async () => {
+	const lockSignal = new Int32Array(new SharedArrayBuffer(4))
+	const workerSrc = `
+		import { DatabaseSync } from 'node:sqlite'
+		import { workerData } from 'node:worker_threads'
+		const conn = new DatabaseSync(workerData.dbPath)
+		conn.exec('PRAGMA busy_timeout = 5000;')
+		conn.exec('BEGIN IMMEDIATE;')
+		Atomics.store(workerData.lockSignal, 0, 1)
+		Atomics.notify(workerData.lockSignal, 0)
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40)
+		conn.exec('COMMIT;')
+		conn.close()
+	`
+	const worker = new Worker(new URL(`data:text/javascript,${encodeURIComponent(workerSrc)}`), {
+		workerData: { dbPath: testDbPath, lockSignal }
+	})
+	Atomics.wait(lockSignal, 0, 0, 2000)
+	const resolved = db.logins.resolveUser('google', 'wal-contention@example.com')
+	assert.ok(resolved?.id, 'resolveUser waits on busy_timeout under concurrent WAL write lock')
+	await new Promise((resolve, reject) => {
+		worker.once('exit', code => code === 0 ? resolve() : reject(new Error(`Worker exited with ${code}`)))
+		worker.once('error', reject)
+	})
+	db.logins.upsert({ userId: resolved.id, provider: 'github', account: 'wal-gh-user' })
+	const removed = db.logins.remove(resolved.id, { provider: 'github' })
+	assert.equal(removed.account, 'wal-gh-user')
+	assert.throws(() => db.logins.remove(resolved.id, { provider: 'google' }), /Cannot unlink your only login key/)
 })
 
 test('teardown server', (t, done) => {

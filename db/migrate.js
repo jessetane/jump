@@ -92,7 +92,7 @@ function migrate (sqlite) {
 		: 'id, NULL AS legacy_account, created, updated'
 	sqlite.exec('PRAGMA foreign_keys = OFF;')
 	try {
-		sqlite.exec('BEGIN;')
+		sqlite.exec('BEGIN IMMEDIATE;')
 		try {
 			if (legacyTables.has('token_links')) {
 				sqlite.exec(`
