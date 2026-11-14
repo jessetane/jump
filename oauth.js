@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, timingSafeEqual, randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -287,8 +287,8 @@ async function handleAuthServerMetadata (req, res) {
 		response_types_supported: ['code'],
 		response_modes_supported: ['query'],
 		grant_types_supported: ['authorization_code', 'refresh_token'],
-		token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
-		revocation_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
+		token_endpoint_auth_methods_supported: ['none'],
+		revocation_endpoint_auth_methods_supported: ['none'],
 		code_challenge_methods_supported: ['S256'],
 		scopes_supported: ['mcp', 'offline_access', 'openid', 'profile', 'email'],
 		client_id_metadata_document_supported: true
@@ -320,28 +320,20 @@ async function handleRegister (req, res) {
 			return
 		}
 	}
-	const authMethod = body.token_endpoint_auth_method || 'none'
 	const grantTypes = (Array.isArray(body.grant_types) && body.grant_types.length > 0 && body.grant_types.every(x => typeof x === 'string'))
 		? body.grant_types
 		: ['authorization_code', 'refresh_token']
 	const clientPrefix = grantTypes.includes('refresh_token') ? 'client_' : 'client_bearer_'
 	const clientId = `${clientPrefix}${randomUUID()}`
-	const needsSecret = authMethod === 'client_secret_basic' || authMethod === 'client_secret_post'
-	const clientSecret = needsSecret ? `cs_${randomBytes(24).toString('hex')}` : null
-	const response = {
+	sendJson(res, {
 		client_id: clientId,
 		client_id_issued_at: Math.floor(Date.now() / 1000),
 		client_name: body.client_name || 'MCP Client',
 		redirect_uris: redirectUris,
 		grant_types: grantTypes,
 		response_types: body.response_types || ['code'],
-		token_endpoint_auth_method: authMethod
-	}
-	if (clientSecret) {
-		response.client_secret = clientSecret
-		response.client_secret_expires_at = 0
-	}
-	sendJson(res, response, 201)
+		token_endpoint_auth_method: 'none'
+	}, 201)
 }
 
 function validateAuthorizeParams (query) {
@@ -399,31 +391,38 @@ async function handleAuthorize (req, res, query) {
 	res.end(html)
 }
 
-function completeLogin (req, res, { user, clientId, clientRedirectUri, clientState, codeChallenge, codeChallengeMethod, sessionName, admin, ip, appIds = [] }) {
-	const ua = req.headers['user-agent'] || null
-	const session = db.tokens.create({
-		userId: user.id,
-		provider: 'self',
-		type: 'bearer',
-		name: sessionName || (admin ? 'Admin Session' : 'Default Session'),
-		token: clientRedirectUri ? null : undefined,
-		expiresAt: clientRedirectUri ? Date.now() + 10 * 60 * 1000 : null,
-		admin: admin ? 1 : 0,
-		ip: ip || getClientIp(req),
-		ua
-	})
+function filterValidAppIds (userId, appIds = []) {
+	const valid = []
 	for (const appId of appIds) {
 		const app = db.tokens.get(appId)
-		if (app && app.userId === user.id && db.tokens.isUpstreamApp(app, { allowShare: true })) {
-			db.links.create({
-				sessionId: session.id,
-				appId: app.id
-			})
+		if (app && app.userId === userId && db.tokens.isUpstreamApp(app, { allowShare: true })) {
+			valid.push(app.id)
 		}
 	}
+	return valid
+}
+
+function linkSessionApps (sessionId, userId, appIds = []) {
+	for (const appId of filterValidAppIds(userId, appIds)) {
+		db.links.create({
+			sessionId,
+			appId
+		})
+	}
+}
+
+function completeLogin (req, res, { user, clientId, clientRedirectUri, clientState, codeChallenge, codeChallengeMethod, sessionName, admin, ip, appIds = [] }) {
+	const ua = req.headers['user-agent'] || null
+	const name = sessionName || (admin ? 'Admin Session' : 'Default Session')
+	const clientIp = ip || getClientIp(req)
 	if (clientRedirectUri) {
 		const authCode = db.tokens.createAuthCode({
-			sessionId: session.id,
+			userId: user.id,
+			sessionName: name,
+			admin: admin ? 1 : 0,
+			ip: clientIp,
+			ua,
+			appIds: filterValidAppIds(user.id, appIds),
 			clientId,
 			clientRedirectUri,
 			codeChallenge,
@@ -437,6 +436,16 @@ function completeLogin (req, res, { user, clientId, clientRedirectUri, clientSta
 		res.end()
 		return
 	}
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		type: 'bearer',
+		name,
+		admin: admin ? 1 : 0,
+		ip: clientIp,
+		ua
+	})
+	linkSessionApps(session.id, user.id, appIds)
 	res.statusCode = 200
 	res.setHeader('content-type', 'text/plain; charset=utf-8')
 	res.end(`user: ${db.logins.getAccountByUserId(user.id)}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
@@ -1031,13 +1040,25 @@ async function handleToken (req, res) {
 			return
 		}
 	}
-	const withRefresh = !authCode.clientId?.startsWith('client_bearer_')
-	const session = db.tokens.issueOauthTokens(authCode.sessionId, { refresh: withRefresh })
-	if (!session) {
-		console.warn('[oauth] Token exchange failed: Session not found')
-		sendJson(res, { error: 'invalid_grant', error_description: 'Session not found' }, 400)
+	const user = authCode.userId ? db.users.get(authCode.userId) : null
+	if (!user) {
+		console.warn('[oauth] Token exchange failed: User not found')
+		sendJson(res, { error: 'invalid_grant', error_description: 'User not found' }, 400)
 		return
 	}
+	const withRefresh = !authCode.clientId?.startsWith('client_bearer_')
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		type: 'bearer',
+		name: authCode.sessionName || (authCode.admin ? 'Admin Session' : 'Default Session'),
+		credentials: withRefresh ? { refreshToken: randomUUID() } : null,
+		expiresAt: withRefresh ? Date.now() + 3600 * 1000 : null,
+		admin: authCode.admin ? 1 : 0,
+		ip: authCode.ip || getClientIp(req),
+		ua: req.headers['user-agent'] || authCode.ua || null
+	})
+	linkSessionApps(session.id, user.id, authCode.appIds)
 	if (!withRefresh) {
 		sendJson(res, {
 			access_token: session.token,

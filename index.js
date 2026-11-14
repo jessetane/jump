@@ -94,7 +94,7 @@ const server = http.createServer(async (req, res) => {
 
 function bootstrapLocalAdmin () {
 	if (listAuthProviders().length > 0) return null
-	const existing = db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE provider = 'self' AND type = 'bearer' AND admin = 1 AND token IS NOT NULL AND (expires_at IS NULL OR expires_at > ?)").get(Date.now())
+	const existing = db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE provider = 'self' AND type = 'bearer' AND admin = 1 AND (expires_at IS NULL OR expires_at > ?)").get(Date.now())
 	if (existing?.count > 0) return null
 	const user = db.users.create()
 	const session = db.tokens.create({

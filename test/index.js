@@ -343,9 +343,11 @@ test('oauth state flow', async () => {
 })
 
 test('oauth code exchange flow', async () => {
-	const { session } = createTestSession({ account: 'test@example.com', name: 'Test User' })
+	const { session, app } = createTestSession({ account: 'test@example.com', name: 'Test User' })
 	const code = db.tokens.createAuthCode({
-		sessionId: session.id,
+		userId: session.userId,
+		sessionName: 'Test OAuth Session',
+		appIds: [app.id],
 		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
 	assert.ok(code)
@@ -363,7 +365,9 @@ test('oauth code exchange flow', async () => {
 	const mismatchData = await mismatchRes.json()
 	assert.equal(mismatchData.error, 'invalid_grant')
 	const code2 = db.tokens.createAuthCode({
-		sessionId: session.id,
+		userId: session.userId,
+		sessionName: 'Test OAuth Session',
+		appIds: [app.id],
 		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
 	const res = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
@@ -377,31 +381,45 @@ test('oauth code exchange flow', async () => {
 	})
 	assert.equal(res.status, 200)
 	const data = await res.json()
-	assert.equal(data.access_token, session.token)
+	assert.ok(data.access_token)
+	assert.notEqual(data.access_token, session.token)
 	assert.ok(data.refresh_token)
 	assert.equal(data.token_type, 'Bearer')
 	assert.equal(data.expires_in, 3600)
 	assert.equal(data.scope, 'mcp')
 	assert.equal(db.tokens.consumeAuthCode(code2), null)
-	const issuedSession = db.tokens.get(session.id)
+	const issuedSession = db.tokens.getByToken(data.access_token)
+	assert.ok(issuedSession)
+	assert.equal(issuedSession.userId, session.userId)
+	assert.equal(issuedSession.name, 'Test OAuth Session')
 	assert.ok(issuedSession.expiresAt > Date.now())
 	assert.equal(issuedSession.credentials.refreshToken, data.refresh_token)
-	const nonSelfApp = db.tokens.create({
-		userId: issuedSession.userId,
-		provider: 'google',
-		type: 'oauth',
-		name: 'Non-self App'
+	const issuedLinks = db.links.listBySessionId(issuedSession.id)
+	assert.equal(issuedLinks.length, 1)
+	assert.equal(issuedLinks[0].appId, app.id)
+	const orphanCode = db.tokens.createAuthCode({
+		userId: null,
+		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
-	assert.equal(db.tokens.issueOauthTokens(nonSelfApp.id), null, 'issueOauthTokens must return null on non-self/bearer row')
-	const reissuedSession = db.tokens.issueOauthTokens(session.id)
-	assert.equal(reissuedSession.credentials.refreshToken, data.refresh_token, 'Re-issuing OAuth tokens preserves existing refreshToken')
+	const orphanRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			code: orphanCode,
+			redirect_uri: 'https://chatgpt.com/callback',
+			grant_type: 'authorization_code'
+		}).toString()
+	})
+	assert.equal(orphanRes.status, 400, 'Code referencing deleted user must fail loud with 400 invalid_grant')
 })
 
 test('oauth refresh_token grant rotation, access_token expiration, and embedded session indefinite TTL', async () => {
 	const addr = server.address()
-	const { session } = createTestSession({ account: 'refresh-flow@example.com', name: 'Refresh User', admin: true })
+	const user = db.logins.resolveUser('google', 'refresh-flow@example.com')
 	const code = db.tokens.createAuthCode({
-		sessionId: session.id,
+		userId: user.id,
+		sessionName: 'Refresh User',
+		admin: 1,
 		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
 	const tokenRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
@@ -415,7 +433,10 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	})
 	assert.equal(tokenRes.status, 200)
 	const initialTokens = await tokenRes.json()
-	assert.equal(initialTokens.access_token, session.token)
+	const session = db.tokens.getByToken(initialTokens.access_token)
+	assert.ok(session)
+	assert.equal(session.admin, true)
+	assert.equal(session.name, 'Refresh User')
 	assert.ok(initialTokens.refresh_token)
 	assert.equal(initialTokens.expires_in, 3600)
 	const unsupportedRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
@@ -627,9 +648,8 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	assert.equal(bearerSession.expiresAt, null, 'Static bearer OAuth session must have expiresAt: null')
 	assert.equal(bearerSession.credentials, null, 'Static bearer OAuth session must have credentials: null')
 	assert.equal(bearerSession.name, 'Default Session')
-	const mismatchCodeSession = db.tokens.create({ userId: bearerSession.userId, provider: 'self' })
 	const boundCode = db.tokens.createAuthCode({
-		sessionId: mismatchCodeSession.id,
+		userId: bearerSession.userId,
 		clientId: 'client_refresh_bound',
 		clientRedirectUri: 'http://localhost:8080/cb'
 	})
@@ -648,7 +668,7 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	assert.equal(mismatchClientData.error, 'invalid_grant')
 	assert.equal(mismatchClientData.error_description, 'client_id mismatch')
 	const unboundCode = db.tokens.createAuthCode({
-		sessionId: mismatchCodeSession.id,
+		userId: bearerSession.userId,
 		clientRedirectUri: 'http://localhost:8080/cb'
 	})
 	const spoofAttemptRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
@@ -695,6 +715,8 @@ test('well-known oauth discovery endpoints', async () => {
 	assert.ok(authData.registration_endpoint.endsWith('/oauth/register'))
 	assert.ok(authData.revocation_endpoint.endsWith('/oauth/revoke'))
 	assert.deepEqual(authData.grant_types_supported, ['authorization_code', 'refresh_token'])
+	assert.deepEqual(authData.token_endpoint_auth_methods_supported, ['none'])
+	assert.deepEqual(authData.revocation_endpoint_auth_methods_supported, ['none'])
 	assert.deepEqual(authData.code_challenge_methods_supported, ['S256'])
 	assert.equal(authData.client_id_metadata_document_supported, true)
 	const resAuthMcp = await fetch(`http://127.0.0.1:${addr.port}/.well-known/oauth-authorization-server/mcp`)
@@ -711,7 +733,7 @@ test('oauth pkce flow with S256', async () => {
 	const verifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
 	const challenge = createHash('sha256').update(verifier).digest('base64url')
 	const codeMissing = db.tokens.createAuthCode({
-		sessionId: session.id,
+		userId: session.userId,
 		clientRedirectUri: 'https://chatgpt.com/callback',
 		codeChallenge: challenge,
 		codeChallengeMethod: 'S256'
@@ -729,7 +751,7 @@ test('oauth pkce flow with S256', async () => {
 	const missingData = await missingVerifierRes.json()
 	assert.equal(missingData.error_description, 'Missing code_verifier')
 	const codeWrong = db.tokens.createAuthCode({
-		sessionId: session.id,
+		userId: session.userId,
 		clientRedirectUri: 'https://chatgpt.com/callback',
 		codeChallenge: challenge,
 		codeChallengeMethod: 'S256'
@@ -747,7 +769,7 @@ test('oauth pkce flow with S256', async () => {
 	const wrongData = await wrongVerifierRes.json()
 	assert.equal(wrongData.error_description, 'Invalid code_verifier')
 	const codeSuccess = db.tokens.createAuthCode({
-		sessionId: session.id,
+		userId: session.userId,
 		clientRedirectUri: 'https://chatgpt.com/callback',
 		codeChallenge: challenge,
 		codeChallengeMethod: 'S256'
@@ -763,7 +785,8 @@ test('oauth pkce flow with S256', async () => {
 	})
 	assert.equal(successRes.status, 200)
 	const successData = await successRes.json()
-	assert.equal(successData.access_token, session.token)
+	assert.ok(successData.access_token)
+	assert.equal(db.tokens.getByToken(successData.access_token)?.userId, session.userId)
 })
 
 test('isAllowedRedirectUri exact and wildcard matching', () => {
@@ -881,13 +904,12 @@ test('oauth consent html page, post consent, callback login, and scanner-safe tw
 	assert.ok(code)
 	const agentUser = db.logins.findUserByAccount('agent@example.com')
 	const unexchangedSessions = db.tokens.listByUserId(agentUser.id, { provider: 'self' })
-	assert.deepEqual(unexchangedSessions, [], 'listByUserId must filter out unexchanged pending self sessions')
+	assert.deepEqual(unexchangedSessions, [], 'No bearer session exists before /oauth/token exchange')
+	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE user_id = ? AND type = 'bearer'").get(agentUser.id).count, 0, 'Unexchanged OAuth flow must not create bearer row until /oauth/token')
 	const codeRow = db.sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_code'").get(code)
-	const codeMeta = JSON.parse(codeRow.credentials)
-	const pendingSession = db.tokens.get(codeMeta.sessionId)
-	assert.ok(pendingSession)
-	assert.equal(pendingSession.token, null, 'Unexchanged OAuth session must have token: null until /oauth/token is called')
-	assert.ok(pendingSession.expiresAt > Date.now(), 'Unexchanged OAuth session must have temporary 10m expiresAt')
+	assert.equal(codeRow.user_id, agentUser.id)
+	assert.equal(codeRow.name, 'Coding Agent')
+	assert.ok(codeRow.expires_at > Date.now(), 'oauth_code must have 10m expiresAt')
 	const connectedApp = db.tokens.create({
 		userId: agentUser.id,
 		provider: 'stripe',
@@ -945,6 +967,7 @@ test('oauth consent html page, post consent, callback login, and scanner-safe tw
 	assert.equal(targetUrl.searchParams.get('state'), 'client-state-123')
 	assert.ok(targetUrl.searchParams.get('code'))
 	assert.equal(db.tokens.getState(verifyCode), null, 'POST /oauth/verify must consume verify state')
+	assert.deepEqual(db.links.listByAppId(connectedApp.id), [], 'App links must not be created until /oauth/token exchanges the auth code')
 })
 
 test('direct browser authorize without redirect_uri', async () => {
@@ -1210,14 +1233,18 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 	})
 	assert.equal(revokeJsonRes.status, 200)
 	assert.equal(db.tokens.get(sessionJson.id), null)
-	const { session: sessionRefreshRevoke, app: refreshSharedApp } = createTestSession({ account: 'revoke-refresh@example.com' })
-	const issuedRefresh = db.tokens.issueOauthTokens(sessionRefreshRevoke.id)
-	assert.ok(issuedRefresh.credentials?.refreshToken)
-	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id = ?').run(Date.now() - 5000, sessionRefreshRevoke.id)
+	const { session: baseRevokeSession, app: refreshSharedApp } = createTestSession({ account: 'revoke-refresh@example.com' })
+	const sessionRefreshRevoke = db.tokens.create({
+		userId: baseRevokeSession.userId,
+		provider: 'self',
+		credentials: { refreshToken: 'rt_revoke_expired_access' },
+		expiresAt: Date.now() - 5000
+	})
+	db.links.create({ sessionId: sessionRefreshRevoke.id, appId: refreshSharedApp.id })
 	const revokeByRefreshRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/revoke`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ token: issuedRefresh.credentials.refreshToken }).toString()
+		body: new URLSearchParams({ token: sessionRefreshRevoke.credentials.refreshToken }).toString()
 	})
 	assert.equal(revokeByRefreshRes.status, 200)
 	assert.equal(db.tokens.get(sessionRefreshRevoke.id), null, 'Revoking by refresh_token must delete the session even if access_token expired')
@@ -2634,14 +2661,13 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		admin: 1,
 		expiresAt: Date.now() - 5000
 	})
-	const unexchangedAdminSession = db.tokens.create({
+	const nonBearerAdminCode = db.tokens.createAuthCode({
 		userId: user.id,
-		provider: 'self',
 		admin: 1,
-		token: null,
-		expiresAt: Date.now() + 60000
+		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
-	for (const invalidSid of [expiredAdminSession.id, unexchangedAdminSession.id]) {
+	assert.ok(db.tokens.create({ userId: user.id, provider: 'self', token: null }).token, 'db.tokens.create must always mint a non-null token for self bearer sessions')
+	for (const invalidSid of [expiredAdminSession.id, nonBearerAdminCode]) {
 		const expConsent = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -3615,8 +3641,9 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 		})
 		assert.equal(confRegRes.status, 201)
 		const confRegData = await confRegRes.json()
-		assert.ok(confRegData.client_secret?.startsWith('cs_'), 'Confidential DCR client receives generated cs_ secret')
-		assert.equal(confRegData.client_secret_expires_at, 0)
+		assert.equal(confRegData.token_endpoint_auth_method, 'none', 'Stateless DCR normalizes token_endpoint_auth_method to none')
+		assert.equal(confRegData.client_secret, undefined, 'Stateless DCR must not issue unverified client_secret')
+		assert.equal(confRegData.client_secret_expires_at, undefined)
 		const user = db.logins.resolveUser('google', 'multi-provider@example.com')
 		const session = db.tokens.create({
 			userId: user.id,

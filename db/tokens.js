@@ -10,7 +10,6 @@ export {
 	getActiveSession,
 	getByToken,
 	findRevocable,
-	issueOauthTokens,
 	refreshOauthSession,
 	listByUserId,
 	claimPendingShares,
@@ -130,7 +129,6 @@ function create (opts = {}) {
 		provider = 'self',
 		type = 'bearer',
 		name = null,
-		token = opts.token !== undefined ? opts.token : ((provider === 'self' && type === 'bearer') ? randomUUID() : null),
 		credentials = null,
 		expiresAt = null,
 		scopes = null,
@@ -138,6 +136,7 @@ function create (opts = {}) {
 		ip = null,
 		ua = null
 	} = opts
+	const token = opts.token || ((provider === 'self' && type === 'bearer') ? randomUUID() : null)
 	pruneDormant()
 	const now = new Date().toISOString()
 	const credsJson = credentials && typeof credentials === 'object' ? JSON.stringify(credentials) : credentials
@@ -164,7 +163,7 @@ function get (id) {
 function getActiveSession (id) {
 	if (!id) return null
 	const session = get(id)
-	if (!session || session.provider !== 'self' || session.type !== 'bearer' || !session.token) return null
+	if (!session || session.provider !== 'self' || session.type !== 'bearer') return null
 	if (session.expiresAt && session.expiresAt <= Date.now()) return null
 	return session
 }
@@ -197,36 +196,6 @@ function findRevocable (token) {
 			AND (tokens.token = ? OR json_extract(tokens.credentials, '$.refreshToken') = ?)
 	`).get(token, token)
 	return formatToken(row)
-}
-
-function issueOauthTokens (id, { refresh = true } = {}) {
-	if (!id) return null
-	const session = get(id)
-	if (!session || session.provider !== 'self' || session.type !== 'bearer') return null
-	const now = Date.now()
-	const token = session.token || randomUUID()
-	let expiresAt = null
-	let credentials = null
-	if (refresh) {
-		expiresAt = now + 3600 * 1000
-		const refreshToken = session.credentials?.refreshToken || randomUUID()
-		credentials = JSON.stringify({
-			...(session.credentials || {}),
-			refreshToken
-		})
-	} else if (session.credentials) {
-		const { refreshToken, ...rest } = session.credentials
-		if (Object.keys(rest).length > 0) {
-			credentials = JSON.stringify(rest)
-		}
-	}
-	const nowIso = new Date(now).toISOString()
-	sqlite.prepare(`
-		UPDATE tokens
-		SET token = ?, credentials = ?, expires_at = ?, updated = ?
-		WHERE id = ?
-	`).run(token, credentials, expiresAt, nowIso, id)
-	return get(id)
 }
 
 function refreshOauthSession (refreshToken) {
@@ -271,7 +240,6 @@ function listByUserId (userId, opts = {}) {
 		JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
 		WHERE tokens.user_id = ? AND tokens.type IN ('bearer', 'oauth', 'api_key', 'share')
-			AND NOT (tokens.provider = 'self' AND tokens.type = 'bearer' AND tokens.token IS NULL)
 	`
 	const params = [userId]
 	if (opts.provider) {
@@ -525,7 +493,7 @@ function remove (id) {
 
 function pruneExpired () {
 	const now = Date.now()
-	sqlite.prepare("DELETE FROM tokens WHERE (type IN ('oauth_state', 'oauth_code') OR (provider = 'self' AND type = 'bearer' AND token IS NULL)) AND expires_at IS NOT NULL AND expires_at < ?").run(now)
+	sqlite.prepare("DELETE FROM tokens WHERE type IN ('oauth_state', 'oauth_code') AND expires_at IS NOT NULL AND expires_at < ?").run(now)
 }
 
 function pruneDormant (maxAgeMs = 30 * 24 * 60 * 60 * 1000) {
@@ -616,23 +584,37 @@ function consumeState (state) {
 }
 
 function createAuthCode (opts = {}) {
-	const { sessionId, clientId = null, clientRedirectUri = null, codeChallenge = null, codeChallengeMethod = null } = opts
+	const {
+		userId,
+		sessionName = null,
+		admin = 0,
+		ip = null,
+		ua = null,
+		appIds = [],
+		clientId = null,
+		clientRedirectUri = null,
+		codeChallenge = null,
+		codeChallengeMethod = null
+	} = opts
 	pruneExpired()
 	const code = randomBytes(24).toString('base64url')
-	const session = get(sessionId)
 	create({
 		id: code,
-		userId: session?.userId || null,
+		userId,
 		provider: 'self',
 		type: 'oauth_code',
+		name: sessionName,
 		credentials: {
-			sessionId,
+			appIds,
 			clientId,
 			clientRedirectUri,
 			codeChallenge,
 			codeChallengeMethod
 		},
-		expiresAt: Date.now() + 10 * 60 * 1000
+		expiresAt: Date.now() + 10 * 60 * 1000,
+		admin: admin ? 1 : 0,
+		ip,
+		ua
 	})
 	return code
 }
@@ -647,7 +629,12 @@ function consumeAuthCode (code) {
 	const meta = tok.credentials || {}
 	return {
 		code: tok.id,
-		sessionId: meta.sessionId,
+		userId: tok.userId,
+		sessionName: tok.name,
+		admin: tok.admin,
+		ip: tok.ip,
+		ua: tok.ua,
+		appIds: Array.isArray(meta.appIds) ? meta.appIds : [],
 		clientId: meta.clientId || null,
 		clientRedirectUri: meta.clientRedirectUri || null,
 		codeChallenge: meta.codeChallenge || null,

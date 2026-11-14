@@ -119,7 +119,7 @@ function requireApp (userId, appId, { allowShare = true, requireId = false } = {
 
 function requireTargetSession (userId, sessionId) {
 	const targetSession = db.tokens.get(sessionId)
-	if (!targetSession || targetSession.userId !== userId || targetSession.provider !== 'self' || !targetSession.token) {
+	if (!targetSession || targetSession.userId !== userId || targetSession.provider !== 'self' || targetSession.type !== 'bearer') {
 		const error = new Error(`Session not found: ${sessionId}`)
 		error.status = 404
 		throw error
