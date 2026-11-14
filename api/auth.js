@@ -119,7 +119,7 @@ function requireApp (userId, appId, { allowShare = true, requireId = false } = {
 
 function requireTargetSession (userId, sessionId) {
 	const targetSession = db.tokens.get(sessionId)
-	if (!targetSession || targetSession.userId !== userId || targetSession.provider !== 'self' || targetSession.type !== 'bearer') {
+	if (!db.tokens.isSession(targetSession) || targetSession.userId !== userId) {
 		const error = new Error(`Session not found: ${sessionId}`)
 		error.status = 404
 		throw error
@@ -234,7 +234,7 @@ async function revoke (token, { sessionId, allOthers } = {}) {
 			throw error
 		}
 		const targetSession = db.tokens.get(sessionId)
-		if (!targetSession || targetSession.userId !== session.userId || targetSession.provider !== 'self') {
+		if (!db.tokens.isSession(targetSession) || targetSession.userId !== session.userId) {
 			return {
 				revoked: false,
 				message: `Session not found: ${sessionId}`
@@ -459,6 +459,11 @@ async function updateApp (token, opts = {}) {
 	const { appId, name, account, baseUrl, apiKey } = opts
 	const { session } = requireAdmin(token, opts)
 	const targetApp = requireApp(session.userId, appId, { allowShare: false, requireId: true })
+	if ((account !== undefined || baseUrl !== undefined || apiKey !== undefined) && targetApp.type !== 'api_key') {
+		const error = new Error('account, baseUrl, and apiKey can only be updated on api_key apps')
+		error.status = 400
+		throw error
+	}
 	let normalizedBaseUrl
 	if (baseUrl !== undefined) {
 		normalizedBaseUrl = validateBaseUrl(baseUrl)

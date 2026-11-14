@@ -330,7 +330,6 @@ async function handleMcp (req, res, token) {
 		return
 	}
 	if (req.method !== 'POST') {
-		console.warn(`[mcp] Rejected non-POST request to /mcp: ${req.method}`)
 		const err = new Error('Method Not Allowed')
 		err.status = 405
 		throw err

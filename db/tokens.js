@@ -29,6 +29,7 @@ export {
 	createAuthCode,
 	consumeAuthCode,
 	formatToken,
+	isSession,
 	isUpstreamApp,
 	USER_ACCOUNT_SQL,
 	UPSTREAM_SELECT,
@@ -85,6 +86,10 @@ const UPSTREAM_JOIN = `
 
 function init () {
 	sqlite.exec(CREATE_TOKENS_SQL)
+}
+
+function isSession (tok) {
+	return Boolean(tok && tok.provider === 'self' && tok.type === 'bearer')
 }
 
 function isUpstreamApp (tok, { allowShare = false } = {}) {
@@ -169,7 +174,7 @@ function get (id) {
 function getActiveSession (id) {
 	if (!id) return null
 	const session = get(id)
-	if (!session || session.provider !== 'self' || session.type !== 'bearer') return null
+	if (!isSession(session)) return null
 	const now = Date.now()
 	if (session.expiresAt) {
 		if (session.expiresAt <= now) return null

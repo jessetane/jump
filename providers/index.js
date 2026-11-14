@@ -269,9 +269,9 @@ function createProvider (config) {
 		async getFreshToken (appToken) {
 			if (!appToken) return null
 			const creds = appToken.credentials || {}
-			if (creds.apiKey) {
+			if (appToken.type === 'api_key') {
 				return {
-					token: creds.apiKey,
+					token: creds.apiKey || '',
 					app: appToken
 				}
 			}

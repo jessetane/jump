@@ -1295,6 +1295,10 @@ test('mcp auth whoami, list, and revoke', async () => {
 	const revokeAppAsSessionResult = await api.auth.revoke(session1.token, { sessionId: app.id })
 	assert.equal(revokeAppAsSessionResult.revoked, false, 'api.auth.revoke must reject non-self app IDs')
 	assert.ok(db.tokens.get(app.id), 'api.auth.revoke must not delete upstream app token')
+	const ephemeralCode = db.tokens.createAuthCode({ userId: user.id, clientRedirectUri: 'https://chatgpt.com/callback' })
+	const revokeCodeAsSessionResult = await api.auth.revoke(session1.token, { sessionId: ephemeralCode })
+	assert.equal(revokeCodeAsSessionResult.revoked, false, 'api.auth.revoke must reject non-bearer self rows (oauth_code / oauth_state)')
+	assert.ok(db.tokens.get(ephemeralCode), 'api.auth.revoke must not delete oauth_code row')
 	const revokeOtherResult = await executeTool('admin', { action: 'revoke', allOthers: true }, session1.token)
 	assert.equal(revokeOtherResult.isError, undefined)
 	const revokeOtherParsed = JSON.parse(revokeOtherResult.content[0].text)
@@ -3481,6 +3485,16 @@ test('admin update_app action', async () => {
 	assert.equal(updateData.app.account, 'owner@gmail.com')
 	const dbApp = db.tokens.get(app.id)
 	assert.equal(dbApp.name, 'Personal Google Workspace')
+	for (const forbiddenPatch of [{ account: 'spoofed@gmail.com' }, { apiKey: 'sk_injected' }, { baseUrl: 'https://api.stripe.com' }]) {
+		const res = await executeTool('admin', {
+			action: 'update_app',
+			appId: app.id,
+			...forbiddenPatch
+		}, adminSession.token)
+		assert.equal(res.isError, true, 'update_app must reject api_key-only fields on oauth apps')
+		assert.match(res.content[0].text, /can only be updated on api_key apps/)
+	}
+	assert.equal(db.tokens.get(app.id).credentials.account, 'owner@gmail.com')
 })
 
 test('admin update_session action', async () => {
