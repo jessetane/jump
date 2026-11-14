@@ -10,7 +10,7 @@ export {
 	format
 }
 
-let lastPruned = 0
+const RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
 function init () {
 	sqlite.exec(`
@@ -60,16 +60,9 @@ function normalizeAllowed (allowed) {
 	return undefined
 }
 
-function prune (maxAgeMs = 30 * 24 * 60 * 60 * 1000) {
-	lastPruned = Date.now()
-	const minDate = new Date(lastPruned - maxAgeMs).toISOString()
+function prune (maxAgeMs = RETENTION_MS) {
+	const minDate = new Date(Date.now() - maxAgeMs).toISOString()
 	sqlite.prepare('DELETE FROM logs WHERE created < ?').run(minDate)
-}
-
-function pruneIfNeeded () {
-	if (Date.now() - lastPruned > 60000) {
-		prune()
-	}
 }
 
 function create (opts = {}) {
@@ -86,7 +79,6 @@ function create (opts = {}) {
 		duration = null,
 		error = null
 	} = opts
-	pruneIfNeeded()
 	const created = new Date().toISOString()
 	const allowedInt = allowed ? 1 : 0
 	sqlite.prepare(`
@@ -111,8 +103,8 @@ function create (opts = {}) {
 
 function listByUserId (userId, opts = {}) {
 	if (!userId) return []
-	pruneIfNeeded()
 	const { sessionId, appId, provider, allowed, limit = 100 } = opts
+	const minDate = new Date(Date.now() - RETENTION_MS).toISOString()
 	let query = `
 		SELECT logs.*,
 			CASE
@@ -132,8 +124,9 @@ function listByUserId (userId, opts = {}) {
 		LEFT JOIN tokens AS owned ON owned.id = logs.app_id AND owned.user_id = ? AND owned.type != 'share'
 		LEFT JOIN tokens AS share ON share.user_id = ? AND share.type = 'share' AND json_extract(share.credentials, '$.appId') = logs.app_id
 		WHERE (logs.user_id = ? OR owned.id IS NOT NULL)
+			AND logs.created >= ?
 	`
-	const params = [userId, userId, userId, userId]
+	const params = [userId, userId, userId, userId, minDate]
 	if (sessionId) {
 		query += ' AND logs.session_id = ?'
 		params.push(sessionId)

@@ -8,6 +8,7 @@ import * as logs from './logs.js'
 import { migrate as runMigrate } from './migrate.js'
 
 const dbPath = process.env.DB_PATH || './data.db'
+const PRUNE_INTERVAL_MS = 15 * 60 * 1000
 
 const prevUmask = process.umask(0o077)
 const sqlite = new DatabaseSync(dbPath)
@@ -15,6 +16,7 @@ process.umask(prevUmask)
 
 sqlite.exec('PRAGMA journal_mode = WAL;')
 sqlite.exec('PRAGMA foreign_keys = ON;')
+sqlite.exec('PRAGMA recursive_triggers = ON;')
 sqlite.exec('PRAGMA busy_timeout = 5000;')
 
 for (const ext of ['', '-wal', '-shm']) {
@@ -24,6 +26,11 @@ for (const ext of ['', '-wal', '-shm']) {
 
 function migrate () {
 	runMigrate(sqlite)
+}
+
+function prune () {
+	tokens.prune()
+	logs.prune()
 }
 
 function init () {
@@ -36,13 +43,14 @@ function init () {
 }
 
 init()
-tokens.pruneDormant()
-logs.prune()
+prune()
+setInterval(prune, PRUNE_INTERVAL_MS).unref()
 
 export {
 	sqlite,
 	init,
 	migrate,
+	prune,
 	users,
 	logins,
 	tokens,

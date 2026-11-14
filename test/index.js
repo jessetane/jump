@@ -564,7 +564,9 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	assert.equal(expiredRefreshRes.status, 400, 'Dormant/expired refresh_token (>30d) must be rejected with 400')
 	const expiredRefreshData = await expiredRefreshRes.json()
 	assert.equal(expiredRefreshData.error, 'invalid_grant')
-	assert.equal(db.tokens.get(session.id), null, 'Dormant session must be pruned on refresh attempt')
+	assert.ok(!db.tokens.listByUserId(user.id, { provider: 'self' }).some(t => t.id === session.id), 'Dormant session is excluded at read time without inline DELETE')
+	db.prune()
+	assert.equal(db.tokens.get(session.id), null, 'Dormant session is physically deleted by db.prune()')
 	assert.equal(deriveClientName('client_12345'), null, 'Generated DCR client_id must not become derived session name')
 	assert.equal(deriveClientName('client_bearer_12345'), null, 'Generated DCR client_bearer_id must not become derived session name')
 	assert.equal(deriveClientName('client_12345', 'Explicit Client'), 'Explicit Client')
@@ -2190,8 +2192,19 @@ test('30-day dormancy pruning scopes only expiring self sessions and exempts sta
 	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, dormantSession.id)
 	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, staticSession.id)
 	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, upstreamApp.id)
-	db.tokens.pruneDormant(30 * 24 * 60 * 60 * 1000)
+	const expState = db.tokens.createState({ mode: 'login' })
+	const expCode = db.tokens.createAuthCode({ userId: user.id, clientRedirectUri: 'https://chatgpt.com/callback' })
+	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id IN (?, ?)').run(Date.now() - 1000, expState, expCode)
+	assert.equal(db.tokens.getState(expState), null, 'Expired oauth_state is rejected at read time before prune')
+	assert.equal(db.tokens.consumeState(expState), null, 'Expired oauth_state cannot be consumed before prune')
+	assert.equal(db.tokens.consumeAuthCode(expCode), null, 'Expired oauth_code cannot be consumed before prune')
+	assert.equal(db.tokens.getByToken(dormantSession.token), null, 'Dormant bearer token is rejected at read time before prune')
+	assert.equal(db.tokens.getActiveSession(dormantSession.id), null, 'Dormant bearer session is inactive at read time before prune')
+	assert.ok(!db.tokens.listByUserId(user.id).some(t => t.id === dormantSession.id), 'Dormant bearer session is excluded from listByUserId before prune')
+	db.tokens.prune(30 * 24 * 60 * 60 * 1000)
 	assert.equal(db.tokens.get(dormantSession.id), null)
+	assert.equal(db.tokens.get(expState), null)
+	assert.equal(db.tokens.get(expCode), null)
 	assert.ok(db.tokens.get(activeSession.id))
 	assert.ok(db.tokens.get(staticSession.id), 'Static bearer sessions (expires_at IS NULL) must not be pruned by dormancy')
 	assert.ok(db.tokens.get(upstreamApp.id), 'Upstream apps must not be pruned by dormancy')
@@ -3803,7 +3816,10 @@ test('usage logging: 30-day rolling window, proxy log capture, MCP list_logs, an
 		})
 		const oldDate = new Date(Date.now() - 35 * 24 * 60 * 60 * 1000).toISOString()
 		db.sqlite.prepare('UPDATE logs SET created = ? WHERE id = ?').run(oldDate, oldLog.id)
+		const prePruneRes = await executeTool('admin', { action: 'list_logs' }, adminSession.token)
+		assert.equal(JSON.parse(prePruneRes.content[0].text).logs.length, 4, 'list_logs enforces 30-day retention window at query time before prune')
 		db.logs.prune()
+		assert.equal(db.sqlite.prepare('SELECT id FROM logs WHERE id = ?').get(oldLog.id), undefined, 'db.logs.prune() physically deletes expired log row')
 		const adminLogsRes = await executeTool('admin', { action: 'list_logs' }, adminSession.token)
 		assert.equal(adminLogsRes.isError, undefined)
 		const { logs } = JSON.parse(adminLogsRes.content[0].text)
@@ -5294,6 +5310,25 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		}, sarahAdmin.token)
 		assert.equal(db.tokens.get(reshare3.shareId), null, 'Disconnecting upstream app cleans up all downstream share tokens')
 		assert.equal(db.links.listBySessionId(danAgentSession.id).length, 0, 'Disconnecting upstream app cascade-deletes all recipient session links')
+		const tempOwner = db.users.create()
+		const tempOwnerApp = db.tokens.create({
+			userId: tempOwner.id,
+			provider: 'stripe',
+			type: 'api_key',
+			name: 'Temp Owner Stripe',
+			credentials: { apiKey: 'sk_temp', baseUrl }
+		})
+		const tempShare = db.tokens.upsertShare({
+			userId: dan.id,
+			account: 'dan@acme.com',
+			authProvider: 'google',
+			appId: tempOwnerApp.id,
+			provider: 'stripe'
+		})
+		db.links.create({ sessionId: danAgentSession.id, appId: tempShare.id })
+		db.sqlite.prepare('DELETE FROM users WHERE id = ?').run(tempOwner.id)
+		assert.equal(db.tokens.get(tempShare.id), null, 'Deleting owner user row cascades through upstream app trigger to delete downstream shares')
+		assert.equal(db.links.listBySessionId(danAgentSession.id).length, 0, 'Cascaded share deletion cleans up recipient session links')
 	} finally {
 		await new Promise(resolve => mockUpstream.close(resolve))
 	}

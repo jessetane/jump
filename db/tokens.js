@@ -22,8 +22,7 @@ export {
 	rotateToken,
 	touch,
 	remove,
-	pruneDormant,
-	pruneExpired,
+	prune,
 	createState,
 	getState,
 	consumeState,
@@ -59,7 +58,15 @@ const CREATE_TOKENS_SQL = `
 	CREATE INDEX IF NOT EXISTS idx_tokens_user_provider ON tokens(user_id, provider);
 	CREATE INDEX IF NOT EXISTS idx_tokens_updated ON tokens(updated);
 	CREATE INDEX IF NOT EXISTS idx_tokens_share_app ON tokens(json_extract(credentials, '$.appId')) WHERE type = 'share';
+	CREATE TRIGGER IF NOT EXISTS trg_tokens_cascade_shares
+	AFTER DELETE ON tokens
+	WHEN OLD.type IN ('oauth', 'api_key')
+	BEGIN
+		DELETE FROM tokens WHERE type = 'share' AND json_extract(credentials, '$.appId') = OLD.id;
+	END;
 `
+
+const DORMANT_MS = 30 * 24 * 60 * 60 * 1000
 
 const USER_ACCOUNT_SQL = userAccountSql('tokens.user_id')
 
@@ -137,7 +144,6 @@ function create (opts = {}) {
 		ua = null
 	} = opts
 	const token = opts.token || ((provider === 'self' && type === 'bearer') ? randomUUID() : null)
-	pruneDormant()
 	const now = new Date().toISOString()
 	const credsJson = credentials && typeof credentials === 'object' ? JSON.stringify(credentials) : credentials
 	sqlite.prepare(`
@@ -164,20 +170,25 @@ function getActiveSession (id) {
 	if (!id) return null
 	const session = get(id)
 	if (!session || session.provider !== 'self' || session.type !== 'bearer') return null
-	if (session.expiresAt && session.expiresAt <= Date.now()) return null
+	const now = Date.now()
+	if (session.expiresAt) {
+		if (session.expiresAt <= now) return null
+		if (session.updated < new Date(now - DORMANT_MS).toISOString()) return null
+	}
 	return session
 }
 
 function getByToken (token) {
 	if (!token) return null
 	const now = Date.now()
+	const minUpdated = new Date(now - DORMANT_MS).toISOString()
 	const row = sqlite.prepare(`
 		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.token = ? AND tokens.provider = 'self' AND tokens.type = 'bearer'
-			AND (tokens.expires_at IS NULL OR tokens.expires_at > ?)
-	`).get(token, now)
+			AND (tokens.expires_at IS NULL OR (tokens.expires_at > ? AND tokens.updated >= ?))
+	`).get(token, now, minUpdated)
 	if (!row) return null
 	if (touch(row.id)) {
 		row.updated = new Date().toISOString()
@@ -187,7 +198,6 @@ function getByToken (token) {
 
 function findRevocable (token) {
 	if (!token || typeof token !== 'string') return null
-	pruneDormant()
 	const row = sqlite.prepare(`
 		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account
 		FROM tokens
@@ -200,17 +210,18 @@ function findRevocable (token) {
 
 function refreshOauthSession (refreshToken) {
 	if (!refreshToken) return null
-	pruneDormant()
+	const now = Date.now()
+	const minUpdated = new Date(now - DORMANT_MS).toISOString()
 	const row = sqlite.prepare(`
 		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.provider = 'self' AND tokens.type = 'bearer'
 			AND json_extract(tokens.credentials, '$.refreshToken') = ?
-	`).get(refreshToken)
+			AND (tokens.expires_at IS NULL OR tokens.updated >= ?)
+	`).get(refreshToken, minUpdated)
 	const session = formatToken(row)
 	if (!session) return null
-	const now = Date.now()
 	const nowIso = new Date(now).toISOString()
 	const isFresh = Boolean(session.token && session.expiresAt && (session.expiresAt - now > (3600 - 60) * 1000))
 	const accessToken = isFresh ? session.token : randomUUID()
@@ -233,15 +244,16 @@ function touch (id) {
 
 function listByUserId (userId, opts = {}) {
 	if (!userId) return []
-	pruneDormant()
+	const minUpdated = new Date(Date.now() - DORMANT_MS).toISOString()
 	let query = `
 		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account, ${UPSTREAM_SELECT}
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
 		WHERE tokens.user_id = ? AND tokens.type IN ('bearer', 'oauth', 'api_key', 'share')
+			AND NOT (tokens.provider = 'self' AND tokens.type = 'bearer' AND tokens.expires_at IS NOT NULL AND tokens.updated < ?)
 	`
-	const params = [userId]
+	const params = [userId, minUpdated]
 	if (opts.provider) {
 		query += ' AND tokens.provider = ?'
 		params.push(opts.provider)
@@ -483,22 +495,14 @@ function rotateToken (id, newToken = randomUUID()) {
 
 function remove (id) {
 	if (!id) return false
-	sqlite.prepare(`
-		DELETE FROM tokens
-		WHERE type = 'share' AND json_extract(credentials, '$.appId') = ?
-	`).run(id)
 	const res = sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(id)
 	return res.changes > 0
 }
 
-function pruneExpired () {
+function prune (maxAgeMs = DORMANT_MS) {
 	const now = Date.now()
-	sqlite.prepare("DELETE FROM tokens WHERE type IN ('oauth_state', 'oauth_code') AND expires_at IS NOT NULL AND expires_at < ?").run(now)
-}
-
-function pruneDormant (maxAgeMs = 30 * 24 * 60 * 60 * 1000) {
-	pruneExpired()
-	const minDate = new Date(Date.now() - maxAgeMs).toISOString()
+	const minDate = new Date(now - maxAgeMs).toISOString()
+	sqlite.prepare("DELETE FROM tokens WHERE type IN ('oauth_state', 'oauth_code') AND expires_at IS NOT NULL AND expires_at <= ?").run(now)
 	sqlite.prepare("DELETE FROM tokens WHERE provider = 'self' AND type = 'bearer' AND expires_at IS NOT NULL AND updated < ?").run(minDate)
 }
 
@@ -541,7 +545,6 @@ function createState (opts = {}) {
 		provider = null,
 		ip = null
 	} = opts
-	pruneExpired()
 	const state = randomBytes(24).toString('base64url')
 	const expiresAt = Date.now() + 15 * 60 * 1000
 	create({
@@ -569,15 +572,13 @@ function createState (opts = {}) {
 
 function getState (state) {
 	if (!state) return null
-	pruneExpired()
-	const row = sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_state'").get(state)
+	const row = sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?)").get(state, Date.now())
 	return formatState(row)
 }
 
 function consumeState (state) {
 	if (!state) return null
-	pruneExpired()
-	const row = sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_state'").get(state)
+	const row = sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?)").get(state, Date.now())
 	if (!row) return null
 	sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(state)
 	return formatState(row)
@@ -596,7 +597,6 @@ function createAuthCode (opts = {}) {
 		codeChallenge = null,
 		codeChallengeMethod = null
 	} = opts
-	pruneExpired()
 	const code = randomBytes(24).toString('base64url')
 	create({
 		id: code,
@@ -621,8 +621,7 @@ function createAuthCode (opts = {}) {
 
 function consumeAuthCode (code) {
 	if (!code) return null
-	pruneExpired()
-	const row = sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_code'").get(code)
+	const row = sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_code' AND (expires_at IS NULL OR expires_at > ?)").get(code, Date.now())
 	if (!row) return null
 	sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(code)
 	const tok = formatToken(row)
