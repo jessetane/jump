@@ -679,6 +679,13 @@ async function handleVerify (req, res, query) {
 	})
 }
 
+function getOwnedOauthApp (session, appId, providerId) {
+	if (!session?.admin || !appId) return null
+	const app = db.tokens.get(appId)
+	if (!app || app.userId !== session.userId || app.provider !== providerId || app.type !== 'oauth') return null
+	return app
+}
+
 async function handleProviderConnect (req, res, query, providerName = 'google') {
 	const provider = getProvider(providerName)
 	if (!provider || provider.type !== 'oauth') {
@@ -689,8 +696,8 @@ async function handleProviderConnect (req, res, query, providerName = 'google') 
 	const resolvedParams = { ...query }
 	if (query.reauth_app_id && query.services === undefined && query.write === undefined && provider.services) {
 		const session = query.session_id ? db.tokens.getActiveSession(query.session_id) : null
-		const existingApp = session?.admin ? db.tokens.get(query.reauth_app_id) : null
-		if (existingApp && existingApp.userId === session.userId && existingApp.provider === provider.id && existingApp.type === 'oauth' && existingApp.scopes) {
+		const existingApp = getOwnedOauthApp(session, query.reauth_app_id, provider.id)
+		if (existingApp?.scopes) {
 			const granted = parseGrantedServices(existingApp.scopes, provider.services)
 			if (granted.length > 0) {
 				resolvedParams.services = granted.map(g => g.id).join(',')
@@ -757,8 +764,8 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	}
 	let existingApp = null
 	if (reauthAppId) {
-		existingApp = db.tokens.get(reauthAppId)
-		if (!existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type !== 'oauth') {
+		existingApp = getOwnedOauthApp(session, reauthAppId, provider.id)
+		if (!existingApp) {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: unauthorized re-authentication request.')
@@ -891,8 +898,8 @@ async function handleCallback (req, res, query) {
 		return
 	}
 	if (oauthState.reauthAppId) {
-		const existingApp = db.tokens.get(oauthState.reauthAppId)
-		if (!existingApp || existingApp.userId !== session.userId || existingApp.provider !== provider.id || existingApp.type !== 'oauth') {
+		const existingApp = getOwnedOauthApp(session, oauthState.reauthAppId, provider.id)
+		if (!existingApp) {
 			res.statusCode = 403
 			res.setHeader('content-type', 'text/plain')
 			res.end('Access denied: unauthorized re-authentication request.')

@@ -309,10 +309,15 @@ async function connectApp (token, opts = {}) {
 	provider = (provider || 'google').toLowerCase()
 	const providerDef = getProvider(provider)
 	if (providerDef?.type === 'oauth' && !apiKey && !credentials) {
-		const reauthParam = appId ? `&reauth_app_id=${encodeURIComponent(appId)}` : ''
+		const params = new URLSearchParams({ session_id: session.id })
+		if (appId) {
+			params.set('reauth_app_id', appId)
+		} else if (typeof name === 'string' && name.trim()) {
+			params.set('name', name.trim())
+		}
 		return {
 			actionRequired: 'oauth_flow',
-			connectUrl: `${appUrl}/providers/${providerDef.id}/connect?session_id=${session.id}${reauthParam}`
+			connectUrl: `${appUrl}/providers/${providerDef.id}/connect?${params.toString()}`
 		}
 	}
 	const rawBase = baseUrl || credentials?.baseUrl || providerDef?.baseUrl || null

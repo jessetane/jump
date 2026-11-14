@@ -2276,6 +2276,17 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(connectData.app.account, 'acct_stripe_prod_123')
 	assert.equal(connectData.app.baseUrl, 'https://api.stripe.com')
 	const stripeAppId = connectData.app.id
+	const namedOauthRes = await executeTool('admin', {
+		action: 'connect_app',
+		provider: 'google',
+		name: 'Work Google'
+	}, adminSession.token, `http://127.0.0.1:${server.address().port}`)
+	assert.equal(namedOauthRes.isError, undefined)
+	const namedOauthData = JSON.parse(namedOauthRes.content[0].text)
+	assert.equal(namedOauthData.actionRequired, 'oauth_flow')
+	const namedConnectUrl = new URL(namedOauthData.connectUrl)
+	assert.equal(namedConnectUrl.searchParams.get('session_id'), adminSession.id)
+	assert.equal(namedConnectUrl.searchParams.get('name'), 'Work Google')
 	const reauthRes = await executeTool('admin', {
 		action: 'connect_app',
 		appId: googleApp.id
