@@ -24,7 +24,7 @@ const { isAllowedUrl: isGoogleAllowedUrl, services: googleServices } = google
 const { isAllowedUrl: isGithubAllowedUrl, services: githubServices } = github
 const { readResponseBody } = await import('../api/proxy.js')
 const { executeTool } = await import('../mcp.js')
-const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
+const { isAllowedRedirectUri, deriveClientName, getBaseUrl } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
 
@@ -88,6 +88,19 @@ test('root endpoint', async () => {
 	const res = await fetch(`http://127.0.0.1:${addr.port}/`)
 	assert.equal(res.status, 200)
 	assert.equal(res.headers.get('content-type'), 'text/html; charset=utf-8')
+	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'jump.acme.com', 'x-forwarded-proto': 'https' } }), 'https://jump.acme.com')
+	assert.equal(getBaseUrl({ headers: { host: 'localhost:8080' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'evil.com"><script>alert(1)</script>' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'jump.acme.com', 'x-forwarded-proto': 'javascript' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'user:pass@jump.acme.com' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'jump.acme.com/path' } }), 'http://localhost:8080')
+	const xssRootRes = await fetch(`http://127.0.0.1:${addr.port}/`, {
+		headers: { 'x-forwarded-host': 'evil.com"><script>alert(1)</script>' }
+	})
+	assert.equal(xssRootRes.status, 200)
+	const xssHtml = await xssRootRes.text()
+	assert.equal(xssHtml.includes('<script>alert(1)</script>'), false)
+	assert.match(xssHtml, /http:\/\/localhost:8080\/mcp/)
 	const text = await res.text()
 	assert.match(text, /jump/)
 	assert.match(text, /\/mcp/)
