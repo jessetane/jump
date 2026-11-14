@@ -9,7 +9,30 @@ export {
 	buildProviderTool,
 	getAvailableTools,
 	executeTool,
+	redactLogArgs,
 	handleMcp
+}
+
+const REDACTED_KEYS = new Set(['apiKey', 'credentials', 'token'])
+const REDACTED_HEADERS = /^(?:authorization|proxy-authorization|x-api-key|cookie)$/i
+
+function redactLogArgs (args) {
+	if (!args || typeof args !== 'object') return args
+	const out = {}
+	for (const [k, v] of Object.entries(args)) {
+		if (REDACTED_KEYS.has(k) && v !== undefined && v !== null) {
+			out[k] = '[REDACTED]'
+		} else if (k === 'headers' && v && typeof v === 'object' && !Array.isArray(v)) {
+			const cleanHeaders = {}
+			for (const [hk, hv] of Object.entries(v)) {
+				cleanHeaders[hk] = (REDACTED_HEADERS.test(hk) && hv !== undefined && hv !== null) ? '[REDACTED]' : hv
+			}
+			out.headers = cleanHeaders
+		} else {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 const adminTool = {
@@ -308,7 +331,7 @@ const rpcMethods = {
 		const name = params?.name
 		const args = { ...params?.arguments }
 		if (process.env.NODE_ENV !== 'test') {
-			console.log(`[mcp] tools/call: name=${name || '(missing)'} args=${JSON.stringify(args)}`)
+			console.log(`[mcp] tools/call: name=${name || '(missing)'} args=${JSON.stringify(redactLogArgs(args))}`)
 		}
 		return executeTool(name, args, token, appUrl)
 	}

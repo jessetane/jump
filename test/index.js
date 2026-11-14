@@ -24,7 +24,7 @@ const { google, github, createProvider, getProvider, listAuthProviders, requireA
 const { isAllowedUrl: isGoogleAllowedUrl, services: googleServices } = google
 const { isAllowedUrl: isGithubAllowedUrl, services: githubServices } = github
 const { readResponseBody } = await import('../api/proxy.js')
-const { executeTool } = await import('../mcp.js')
+const { executeTool, redactLogArgs } = await import('../mcp.js')
 const { isAllowedRedirectUri, deriveClientName, getBaseUrl } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
@@ -5391,6 +5391,36 @@ test('db.logins transactions use BEGIN IMMEDIATE to wait on WAL write locks inst
 	const removed = db.logins.remove(resolved.id, { provider: 'github' })
 	assert.equal(removed.account, 'wal-gh-user')
 	assert.throws(() => db.logins.remove(resolved.id, { provider: 'google' }), /Cannot unlink your only login key/)
+})
+
+test('redactLogArgs scrubs credentials and auth headers without mutating input', () => {
+	const raw = {
+		action: 'connect_app',
+		provider: 'stripe',
+		apiKey: 'sk_live_secret_123',
+		credentials: { accessToken: 'tok_abc' },
+		token: 'bearer_xyz',
+		headers: {
+			Authorization: 'Bearer secret',
+			'X-Api-Key': 'key_123',
+			Cookie: 'sid=abc',
+			'Content-Type': 'application/json'
+		},
+		body: { amount: 500 }
+	}
+	const redacted = redactLogArgs(raw)
+	assert.equal(redacted.action, 'connect_app')
+	assert.equal(redacted.provider, 'stripe')
+	assert.equal(redacted.apiKey, '[REDACTED]')
+	assert.equal(redacted.credentials, '[REDACTED]')
+	assert.equal(redacted.token, '[REDACTED]')
+	assert.equal(redacted.headers.Authorization, '[REDACTED]')
+	assert.equal(redacted.headers['X-Api-Key'], '[REDACTED]')
+	assert.equal(redacted.headers.Cookie, '[REDACTED]')
+	assert.equal(redacted.headers['Content-Type'], 'application/json')
+	assert.deepEqual(redacted.body, { amount: 500 })
+	assert.equal(raw.apiKey, 'sk_live_secret_123', 'Original args must not be mutated')
+	assert.equal(raw.headers.Authorization, 'Bearer secret', 'Original headers must not be mutated')
 })
 
 test('teardown server', (t, done) => {
