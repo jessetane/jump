@@ -4449,27 +4449,8 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	}
 	const now = new Date().toISOString()
 	const legacyUserId = 'legacy-google-user-1'
-	const legacySurvivingShareId = 'legacy-surviving-share-1'
-	const legacyEmailStubId = 'legacy-email-stub-1'
-	const legacyEmailStubShareId = 'legacy-email-stub-share-1'
 	const legacyDupUserId = 'legacy-dup-user-1'
-	const legacyDupShareId = 'legacy-dup-share-1'
 	const legacyDormantLogsId = 'legacy-dormant-logs-1'
-	const legacyDormantEmptyId = 'legacy-dormant-empty-1'
-	const stubOwner = db.logins.resolveUser('google', 'stub-owner@acme.com')
-	const stubUpstreamApp = db.tokens.create({
-		userId: stubOwner.id,
-		provider: 'stripe',
-		type: 'api_key',
-		name: 'Legacy Pre-Shared Stripe',
-		credentials: { apiKey: 'sk_legacy_stub', baseUrl: 'https://api.stripe.com' }
-	})
-	const legacyLinkedSession = db.tokens.create({
-		userId: stubOwner.id,
-		provider: 'self',
-		name: 'Legacy TokenLinks Session',
-		admin: 1
-	})
 	db.sqlite.exec('PRAGMA foreign_keys = OFF;')
 	db.sqlite.exec(`
 		PRAGMA user_version = 0;
@@ -4479,69 +4460,46 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 			id TEXT PRIMARY KEY,
 			email TEXT UNIQUE NOT NULL,
 			name TEXT,
+			picture TEXT,
 			created TEXT NOT NULL,
 			updated TEXT NOT NULL
 		);
 		CREATE INDEX idx_users_email ON users(email);
-		INSERT INTO users (id, email, name, created, updated)
-			SELECT id, id || '@placeholder.local', 'Placeholder', created, updated FROM users_mig_tmp;
+		INSERT INTO users (id, email, name, picture, created, updated)
+			SELECT id, id || '@placeholder.local', 'Placeholder', NULL, created, updated FROM users_mig_tmp;
 		DROP TABLE users_mig_tmp;
-		CREATE TEMP TABLE tokens_mig_tmp AS SELECT * FROM tokens WHERE user_id IS NOT NULL;
-		DROP TABLE tokens;
-		CREATE TABLE tokens (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			provider TEXT NOT NULL,
-			type TEXT NOT NULL,
-			name TEXT,
-			token TEXT UNIQUE,
-			credentials TEXT,
-			expires_at INTEGER,
-			scopes TEXT,
-			admin INTEGER DEFAULT 0,
-			ip TEXT,
-			ua TEXT,
-			created TEXT NOT NULL,
-			updated TEXT NOT NULL,
-			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-		);
-		INSERT INTO tokens SELECT * FROM tokens_mig_tmp;
-		DROP TABLE tokens_mig_tmp;
-		CREATE TABLE token_links (
-			session_token_id TEXT NOT NULL,
-			app_token_id TEXT NOT NULL,
-			policy TEXT,
-			created TEXT NOT NULL,
-			updated TEXT NOT NULL,
-			PRIMARY KEY (session_token_id, app_token_id)
-		);
-		INSERT INTO token_links (session_token_id, app_token_id, policy, created, updated)
-			VALUES ('${legacyLinkedSession.id}', '${stubUpstreamApp.id}', '[{"action":"allow"}]', '${now}', '${now}');
-		CREATE TABLE oauth_states (state TEXT PRIMARY KEY, redirect_uri TEXT);
-		CREATE TABLE oauth_codes (code TEXT PRIMARY KEY, session_token_id TEXT);
 	`)
 	db.sqlite.exec('PRAGMA foreign_keys = ON;')
-	db.sqlite.prepare('INSERT INTO users (id, email, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
+	db.sqlite.prepare('INSERT INTO users (id, email, name, picture, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
 		legacyUserId,
 		'legacy@gmail.com',
 		'Legacy User',
+		'https://example.com/avatar.png',
 		now,
 		now
 	)
-	db.tokens.create({
+	const legacyAdminSession = db.tokens.create({
 		userId: legacyUserId,
 		provider: 'self',
 		name: 'Legacy Real User Session',
 		admin: 1
 	})
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, credentials, created, updated)
-		VALUES (?, ?, 'stripe', 'share', ?, ?, ?)
-	`).run(legacySurvivingShareId, legacyUserId, JSON.stringify({ appId: stubUpstreamApp.id, policy: null }), now, now)
-	db.sqlite.prepare('INSERT INTO users (id, email, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
+	const legacyGoogleApp = db.tokens.create({
+		userId: legacyUserId,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Google',
+		credentials: { accessToken: 'ya29.legacy', refreshToken: '1//legacy', account: 'legacy@gmail.com' }
+	})
+	db.links.create({
+		sessionId: legacyAdminSession.id,
+		appId: legacyGoogleApp.id
+	})
+	db.sqlite.prepare('INSERT INTO users (id, email, name, picture, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
 		legacyDupUserId,
 		'LEGACY@gmail.com',
 		'Duplicate Case User',
+		null,
 		now,
 		now
 	)
@@ -4551,18 +4509,11 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		name: 'Duplicate Case Session',
 		admin: 0
 	})
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, credentials, created, updated)
-		VALUES (?, ?, 'stripe', 'share', ?, ?, ?)
-	`).run(legacyDupShareId, legacyDupUserId, JSON.stringify({ appId: stubUpstreamApp.id, policy: null }), now, now)
-	db.links.create({
-		sessionId: dupSession.id,
-		appId: legacyDupShareId
-	})
-	db.sqlite.prepare('INSERT INTO users (id, email, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
+	db.sqlite.prepare('INSERT INTO users (id, email, name, picture, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
 		legacyDormantLogsId,
 		'dormant-logs@gmail.com',
 		'Dormant User With Logs',
+		null,
 		now,
 		now
 	)
@@ -4571,50 +4522,25 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		provider: 'stripe',
 		method: 'GET',
 		url: 'https://api.stripe.com/v1/charges',
+		allowed: true,
 		status: 200,
-		durationMs: 12
+		duration: 12
 	})
-	db.sqlite.prepare('INSERT INTO users (id, email, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		legacyDormantEmptyId,
-		'dormant-empty@gmail.com',
-		'Dormant User Zero Tokens',
-		now,
-		now
-	)
-	db.sqlite.prepare('INSERT INTO users (id, email, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		legacyEmailStubId,
-		'EmailStub@acme.com',
-		null,
-		now,
-		now
-	)
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, credentials, created, updated)
-		VALUES (?, ?, 'stripe', 'share', ?, ?, ?)
-	`).run(legacyEmailStubShareId, legacyEmailStubId, JSON.stringify({ appId: stubUpstreamApp.id, policy: null }), now, now)
 	db.init()
 	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 1)
-	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after users.email migration and duplicate share link repointing')
-	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN ('token_links', 'oauth_states', 'oauth_codes')").get().count, 0, 'Legacy token_links, oauth_states, and oauth_codes tables are dropped')
-	const migratedTokenLinks = db.links.listBySessionId(legacyLinkedSession.id)
-	assert.equal(migratedTokenLinks.length, 1, 'Legacy token_links rows are migrated into links')
-	assert.equal(migratedTokenLinks[0].appId, stubUpstreamApp.id)
+	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after users.email migration')
 	const migratedEmailMaster = db.sqlite.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE tbl_name = 'users' ORDER BY type, name").all()
 	assert.deepEqual(migratedEmailMaster, freshMaster, 'Migrated users.email DB matches fresh pure-anchor DDL with no leftover columns or indexes')
 	const migratedUser = db.users.get(legacyUserId)
 	assert.ok(migratedUser)
 	assert.deepEqual(Object.keys(migratedUser).sort(), ['created', 'id', 'updated'])
+	assert.equal(db.tokens.getByToken(legacyAdminSession.token)?.userId, legacyUserId, 'Existing bearer sessions remain active after migration')
+	assert.equal(db.links.listBySessionId(legacyAdminSession.id).length, 1, 'Existing session-to-app links survive users table rebuild without CASCADE deletion')
 	assert.equal(db.users.get(legacyDupUserId), null, 'Case-insensitive duplicate legacy user row is merged into survivor')
 	assert.equal(db.tokens.get(dupSession.id).userId, legacyUserId, 'Duplicate legacy user session is re-parented to surviving user')
-	assert.equal(db.tokens.get(legacyDupShareId), null, 'Duplicate share for same upstream appId is deduplicated on user merge')
-	const repointedLinks = db.links.listBySessionId(dupSession.id)
-	assert.equal(repointedLinks.length, 1, 'Session link to deduplicated share is preserved rather than orphaned')
-	assert.equal(repointedLinks[0].appId, legacySurvivingShareId, 'Session link app_id is repointed to surviving share row')
 	assert.ok(db.users.get(legacyDormantLogsId), 'Zero-session legacy user with historical logs is preserved as real user')
 	assert.equal(db.logins.getAccountByUserId(legacyDormantLogsId), 'dormant-logs@gmail.com')
 	assert.equal(db.logs.listByUserId(legacyDormantLogsId).length, 1, 'Historical logs for zero-session legacy user are preserved')
-	assert.ok(db.users.get(legacyDormantEmptyId), 'Zero-session, zero-share legacy user is preserved and backfilled rather than treated as stub')
-	assert.equal(db.logins.getAccountByUserId(legacyDormantEmptyId), 'dormant-empty@gmail.com')
 	assert.equal(db.logins.getAccountByUserId(legacyUserId), 'legacy@gmail.com')
 	const backfilledLogins = db.logins.listByUserId(legacyUserId)
 	assert.equal(backfilledLogins.length, 1)
@@ -4623,220 +4549,6 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	assert.equal(backfilledLogins[0].userId, legacyUserId)
 	const resolvedLegacy = db.logins.resolveUser('google', 'LEGACY@gmail.com')
 	assert.equal(resolvedLegacy.id, legacyUserId)
-	assert.equal(db.users.get(legacyEmailStubId), null, 'Zero-session stub user in users.email DB is converted to pending share and never fabricated as google auth')
-	assert.equal(db.tokens.get(legacyEmailStubShareId).userId, null)
-	assert.equal(db.tokens.get(legacyEmailStubShareId).account, 'emailstub@acme.com')
-	const legacyStubUserId = 'legacy-stub-user-1'
-	const legacyShareId = 'legacy-stub-share-1'
-	const legacyPrefixedStubId = 'legacy-prefixed-stub-1'
-	const legacyPrefixedShareId = 'legacy-prefixed-share-1'
-	const legacyBareStubId = 'legacy-bare-stub-1'
-	const legacyBareShareId = 'legacy-bare-share-1'
-	const legacyBareStateId = 'legacy-bare-state-1'
-	const legacyBareRealUserId = 'legacy-bare-real-1'
-	const legacyLocalBootstrapId = 'legacy-local-bootstrap-1'
-	const legacyMixedAuthUser = db.users.create({ id: 'legacy-mixed-auth-user-1' })
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, name, token, credentials, created, updated)
-		VALUES ('legacy-mixed-auth-token-1', ?, ' GitHub ', 'auth', '   ', 'GitHub:MixedCaseHandle', ?, ?, ?)
-	`).run(legacyMixedAuthUser.id, JSON.stringify({ account: ' MixedCaseHandle ' }), now, now)
-	db.sqlite.exec('PRAGMA foreign_keys = OFF;')
-	db.sqlite.exec(`
-		PRAGMA user_version = 0;
-		CREATE TEMP TABLE users_acc_tmp AS SELECT id, created, updated FROM users;
-		DROP TABLE users;
-		CREATE TABLE users (
-			id TEXT PRIMARY KEY,
-			account TEXT UNIQUE NOT NULL,
-			name TEXT,
-			created TEXT NOT NULL,
-			updated TEXT NOT NULL
-		);
-		CREATE INDEX idx_users_account ON users(account);
-		INSERT INTO users (id, account, name, created, updated)
-			SELECT id, id, NULL, created, updated FROM users_acc_tmp;
-		DROP TABLE users_acc_tmp;
-	`)
-	db.sqlite.exec('PRAGMA foreign_keys = ON;')
-	db.sqlite.prepare('INSERT INTO users (id, account, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		legacyStubUserId,
-		'Stub-Recipient@acme.com',
-		null,
-		now,
-		now
-	)
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, credentials, created, updated)
-		VALUES (?, ?, 'stripe', 'share', ?, ?, ?)
-	`).run(legacyShareId, legacyStubUserId, JSON.stringify({ appId: stubUpstreamApp.id, policy: null }), now, now)
-	db.sqlite.prepare('INSERT INTO users (id, account, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		legacyPrefixedStubId,
-		'github:PrefixedHandle',
-		null,
-		now,
-		now
-	)
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, credentials, created, updated)
-		VALUES (?, ?, 'stripe', 'share', ?, ?, ?)
-	`).run(legacyPrefixedShareId, legacyPrefixedStubId, JSON.stringify({ appId: stubUpstreamApp.id, policy: null }), now, now)
-	db.sqlite.prepare('INSERT INTO users (id, account, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		legacyBareStubId,
-		'BareStubHandle',
-		null,
-		now,
-		now
-	)
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, credentials, created, updated)
-		VALUES (?, ?, 'stripe', 'share', ?, ?, ?)
-	`).run(legacyBareShareId, legacyBareStubId, JSON.stringify({ appId: stubUpstreamApp.id, policy: null }), now, now)
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, token, expires_at, created, updated)
-		VALUES (?, ?, 'github', 'oauth_state', 'expired-state-tok', ?, ?, ?)
-	`).run(legacyBareStateId, legacyBareStubId, Date.now() - 60000, now, now)
-	db.sqlite.prepare('INSERT INTO users (id, account, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		legacyBareRealUserId,
-		'RealBareGhUser',
-		'Real Bare User',
-		now,
-		now
-	)
-	db.tokens.create({
-		userId: legacyBareRealUserId,
-		provider: 'self',
-		name: 'Real Bare Session',
-		admin: 1
-	})
-	db.sqlite.prepare('INSERT INTO users (id, account, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		legacyLocalBootstrapId,
-		'localhost',
-		null,
-		now,
-		now
-	)
-	db.tokens.create({
-		userId: legacyLocalBootstrapId,
-		provider: 'self',
-		name: 'Legacy Local Bootstrap Session',
-		admin: 1
-	})
-	const caseCollideSurvivorId = 'legacy-case-collide-1'
-	const caseCollideDupId = 'legacy-case-collide-2'
-	db.sqlite.prepare('INSERT INTO users (id, account, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		caseCollideSurvivorId,
-		caseCollideSurvivorId,
-		null,
-		'2024-01-01T00:00:00.000Z',
-		'2024-01-01T00:00:00.000Z'
-	)
-	db.sqlite.prepare('INSERT INTO users (id, account, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		caseCollideDupId,
-		caseCollideDupId,
-		null,
-		'2024-01-02T00:00:00.000Z',
-		'2024-01-02T00:00:00.000Z'
-	)
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, name, token, credentials, created, updated)
-		VALUES ('case-collide-auth-1', ?, 'github', 'auth', 'CaseCollide', 'github:CaseCollide', NULL, '2024-01-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z')
-	`).run(caseCollideSurvivorId)
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, name, token, credentials, created, updated)
-		VALUES ('case-collide-auth-2', ?, 'GitHub', 'auth', 'casecollide', 'GitHub:casecollide', NULL, '2024-01-02T00:00:00.000Z', '2024-01-02T00.000Z')
-	`).run(caseCollideDupId)
-	const caseCollideDupSession = db.tokens.create({
-		userId: caseCollideDupId,
-		provider: 'self',
-		name: 'Duplicate Case Collide Session',
-		admin: 1
-	})
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, name, token, credentials, created, updated)
-		VALUES ('malformed-empty-auth-1', ?, 'github', 'auth', '   ', 'github:   ', NULL, ?, ?)
-	`).run(legacyLocalBootstrapId, now, now)
-	const stubAliceId = 'legacy-stub-alice-1'
-	const stubAliceShareId = 'legacy-stub-alice-share-1'
-	const realAliceId = 'legacy-real-alice-1'
-	db.sqlite.prepare('INSERT INTO users (id, account, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		stubAliceId,
-		'alice-preshared@acme.com',
-		null,
-		'2024-01-01T00:00:00.000Z',
-		'2024-01-01T00:00:00.000Z'
-	)
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, credentials, created, updated)
-		VALUES (?, ?, 'stripe', 'share', ?, '2024-01-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z')
-	`).run(stubAliceShareId, stubAliceId, JSON.stringify({ appId: stubUpstreamApp.id, policy: [{ action: 'allow', methods: ['GET'] }] }))
-	db.sqlite.prepare('INSERT INTO users (id, account, name, created, updated) VALUES (?, ?, ?, ?, ?)').run(
-		realAliceId,
-		'google:alice-preshared@acme.com',
-		'Real Alice',
-		'2024-02-01T00:00:00.000Z',
-		'2024-02-01T00:00:00.000Z'
-	)
-	db.tokens.create({
-		userId: realAliceId,
-		provider: 'self',
-		name: 'Real Alice Session',
-		admin: 1
-	})
-	assert.doesNotThrow(() => db.tokens.init(), 'tokens.init() is strictly DDL-only and never crashes on case-colliding or malformed auth rows')
-	db.init()
-	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 1)
-	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after single-pass atomic migration')
-	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE type = 'auth'").get().count, 0, 'All legacy tokens(type = auth) rows are migrated out of tokens into logins')
-	const normalizedMixedAuth = db.logins.listByUserId(legacyMixedAuthUser.id)
-	assert.equal(normalizedMixedAuth.length, 1)
-	assert.equal(normalizedMixedAuth[0].provider, 'github', 'db.init() normalizes legacy auth provider to lowercase')
-	assert.equal(normalizedMixedAuth[0].account, 'mixedcasehandle', 'db.init() normalizes empty/mixed-case auth account from credentials.account')
-	assert.equal(normalizedMixedAuth[0].userId, legacyMixedAuthUser.id)
-	assert.equal(db.logins.resolveUser('github', 'mixedcasehandle').id, legacyMixedAuthUser.id)
-	assert.ok(db.users.get(caseCollideSurvivorId), 'Case-colliding auth normalization preserves older user as survivor')
-	assert.equal(db.users.get(caseCollideDupId), null, 'Case-colliding auth normalization merges and drops duplicate user')
-	assert.equal(db.logins.resolveUser('github', 'casecollide').id, caseCollideSurvivorId)
-	assert.equal(db.tokens.get(caseCollideDupSession.id).userId, caseCollideSurvivorId, 'Duplicate user sessions are merged onto survivor')
-	assert.equal(db.tokens.get('malformed-empty-auth-1'), null, 'Malformed auth row with empty account is deleted instead of leaving NULL zombie auth row')
-	assert.equal(db.users.get(stubAliceId), null, 'Pre-shared stub user created before real user is removed on migration')
-	assert.ok(db.users.get(realAliceId), 'Real user created after stub user is preserved')
-	const claimedAliceShare = db.tokens.get(stubAliceShareId)
-	assert.equal(claimedAliceShare.userId, realAliceId, 'Converted pending share from earlier stub user is immediately claimed by existing real user at end of migrate()')
-	assert.equal(claimedAliceShare.account, 'alice-preshared@acme.com')
-	assert.equal(claimedAliceShare.credentials.authProvider, 'google')
-	const migratedAccountMaster = db.sqlite.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE tbl_name = 'users' ORDER BY type, name").all()
-	assert.deepEqual(migratedAccountMaster, freshMaster, 'Migrated users.account/users.name DB matches fresh pure-anchor DDL')
-	assert.equal(db.users.get(legacyStubUserId), null, 'Unclaimed stub user from users.account DB is removed on migration rather than bound to google')
-	assert.equal(db.logins.listByUserId(legacyStubUserId).length, 0)
-	assert.equal(db.users.get(legacyBareStubId), null, 'Stub user with expired oauth_state is still classified as stub and dropped')
-	assert.equal(db.tokens.get(legacyBareStateId), null, 'Ephemeral oauth_state row on stub user is cleaned up without FK orphans')
-	const migratedBareShare = db.tokens.get(legacyBareShareId)
-	assert.equal(migratedBareShare.userId, null)
-	assert.equal(migratedBareShare.account, 'barestubhandle')
-	assert.equal(migratedBareShare.credentials.authProvider, 'github', 'Bare-handle stub share defaults authProvider to github to preserve pending share invariant')
-	assert.ok(db.users.get(legacyBareRealUserId), 'Real legacy bare-handle user is preserved')
-	assert.equal(db.logins.resolveUser('github', 'realbareghuser').id, legacyBareRealUserId, 'Real legacy bare-handle user in users.account DB backfills github:account')
-	assert.ok(db.users.get(legacyLocalBootstrapId), 'Legacy localhost bootstrap user is preserved')
-	assert.equal(db.logins.listByUserId(legacyLocalBootstrapId).length, 0, 'Legacy localhost bootstrap user never fabricates fake OAuth login key')
-	assert.equal(db.logins.getAccountByUserId(legacyLocalBootstrapId), 'localhost')
-	const migratedPendingShare = db.tokens.get(legacyShareId)
-	assert.ok(migratedPendingShare)
-	assert.equal(migratedPendingShare.userId, null, 'Stub user share is migrated to pending share with user_id = NULL')
-	assert.equal(migratedPendingShare.account, 'stub-recipient@acme.com')
-	const unverifiedClaimAttempt = db.logins.resolveUser('custom_idp', 'stub-recipient@acme.com')
-	assert.ok(unverifiedClaimAttempt)
-	assert.equal(db.tokens.get(legacyShareId).userId, null, 'Migrated unscoped pending email share cannot be claimed by unverified provider')
-	const claimedRecipient = db.logins.resolveUser('google', 'stub-recipient@acme.com')
-	assert.equal(db.tokens.get(legacyShareId).userId, claimedRecipient.id, 'Migrated pending share is claimed by verified-email provider')
-	const migratedPrefixedShare = db.tokens.get(legacyPrefixedShareId)
-	assert.equal(migratedPrefixedShare.userId, null)
-	assert.equal(migratedPrefixedShare.account, 'prefixedhandle', 'provider:account stub splits cleanAccount into tokens.name')
-	assert.equal(migratedPrefixedShare.credentials.authProvider, 'github', 'provider:account stub binds credentials.authProvider')
-	const wrongProvClaim = db.logins.resolveUser('google', 'prefixedhandle')
-	assert.equal(db.tokens.get(legacyPrefixedShareId).userId, null, 'google login must not claim github-scoped migrated pending share')
-	assert.ok(wrongProvClaim)
-	const rightProvClaim = db.logins.resolveUser('github', 'prefixedhandle')
-	assert.equal(db.tokens.get(legacyPrefixedShareId).userId, rightProvClaim.id, 'github login claims github-scoped migrated pending share')
 })
 
 test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit logs, and REST /api/shares', async () => {

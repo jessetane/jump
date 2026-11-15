@@ -109,7 +109,7 @@ function formatToken (row) {
 		}
 	}
 	const isShare = row.type === 'share'
-	const resolvedAccount = row.user_id ? (row.account || null) : (isShare ? row.name : null)
+	const resolvedAccount = isShare ? (row.name || row.account || null) : (row.user_id ? (row.account || null) : null)
 	return {
 		id: row.id,
 		userId: row.user_id,
@@ -327,7 +327,7 @@ function listSharesByOwnerId (ownerUserId) {
 	if (!ownerUserId) return []
 	const rows = sqlite.prepare(`
 		SELECT tokens.*,
-			CASE WHEN tokens.user_id IS NOT NULL THEN COALESCE(tokens.name, ${USER_ACCOUNT_SQL}) ELSE tokens.name END AS account
+			CASE WHEN tokens.user_id IS NOT NULL THEN ${USER_ACCOUNT_SQL} ELSE NULL END AS account
 		FROM tokens
 		JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
 		WHERE upstream.user_id = ?
