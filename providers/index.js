@@ -8,7 +8,6 @@ export {
 	getProvider,
 	listAuthProviders,
 	requireAuthProvider,
-	hasSsoLock,
 	parseGrantedServices,
 	summarizeScopes,
 	google,
@@ -136,14 +135,12 @@ function createProvider (config) {
 		}
 	}
 	const envPrefix = id.toUpperCase()
-	const ssoOnly = Boolean(rawConfig.ssoOnly || oauth?.ssoOnly || process.env[`${envPrefix}_SSO_ONLY`] === 'true')
 	const verifiedEmail = Boolean(rawConfig.verifiedEmail || oauth?.verifiedEmail)
 	return {
 		id,
 		name: label,
 		type,
 		baseUrl,
-		ssoOnly,
 		verifiedEmail,
 		...(services && { services }),
 		toolDescription (baseHint) {
@@ -421,10 +418,4 @@ function requireAuthProvider (rawName) {
 		throw err
 	}
 	return provider
-}
-
-function hasSsoLock (userId, targetProvider) {
-	const existingLogins = db.logins.listByUserId(userId)
-	const otherProviderLogins = existingLogins.filter(l => l.provider !== targetProvider.id)
-	return otherProviderLogins.some(l => getProvider(l.provider)?.ssoOnly) || (Boolean(targetProvider.ssoOnly) && otherProviderLogins.length > 0)
 }

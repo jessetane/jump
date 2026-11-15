@@ -1,7 +1,6 @@
 import { sqlite } from './index.js'
 import * as users from './users.js'
 import * as tokens from './tokens.js'
-import { getProvider } from '../providers/index.js'
 import { parseAccountSpec } from '../util.js'
 import { randomUUID } from 'node:crypto'
 
@@ -107,10 +106,9 @@ function runInTransaction (fn) {
 	return fn()
 }
 
-function upsert ({ id = randomUUID(), userId, provider, account }) {
+function upsert ({ id = randomUUID(), userId, provider, account, allowUnscoped = false }) {
 	const cleanProvider = String(provider).trim().toLowerCase()
 	const cleanAccount = String(account).trim().toLowerCase()
-	const allowUnscoped = Boolean(getProvider(cleanProvider)?.verifiedEmail)
 	return runInTransaction(() => {
 		const existing = sqlite.prepare('SELECT * FROM logins WHERE provider = ? AND account = ?').get(cleanProvider, cleanAccount)
 		if (existing) {
@@ -168,11 +166,10 @@ function remove (userId, { loginId = null, provider = null, account = null } = {
 	})
 }
 
-function resolveUser (provider, account, { createIfMissing = true } = {}) {
+function resolveUser (provider, account, { createIfMissing = true, allowUnscoped = false } = {}) {
 	if (!provider || !account) return null
 	const cleanProvider = String(provider).trim().toLowerCase()
 	const cleanAccount = String(account).trim().toLowerCase()
-	const allowUnscoped = Boolean(getProvider(cleanProvider)?.verifiedEmail)
 	return runInTransaction(() => {
 		const row = sqlite.prepare('SELECT user_id FROM logins WHERE provider = ? AND account = ?').get(cleanProvider, cleanAccount)
 		if (row) {
@@ -181,7 +178,7 @@ function resolveUser (provider, account, { createIfMissing = true } = {}) {
 		}
 		if (!createIfMissing) return null
 		const user = users.create()
-		upsert({ userId: user.id, provider: cleanProvider, account: cleanAccount })
+		upsert({ userId: user.id, provider: cleanProvider, account: cleanAccount, allowUnscoped })
 		return user
 	})
 }

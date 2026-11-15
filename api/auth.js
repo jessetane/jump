@@ -1,5 +1,6 @@
 import * as db from '../db/index.js'
-import { getProvider, requireAuthProvider, hasSsoLock } from '../providers/index.js'
+import { getProvider, requireAuthProvider } from '../providers/index.js'
+import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
 import { validateBaseUrl, parseAccountSpec } from '../util.js'
 
@@ -426,11 +427,7 @@ async function linkLogin (token, opts = {}) {
 		throw error
 	}
 	const providerDef = requireAuthProvider(provider)
-	if (hasSsoLock(session.userId, providerDef)) {
-		const error = new Error('Access denied: SSO-only provider restriction prevents linking multiple sign-in providers')
-		error.status = 403
-		throw error
-	}
+	assertSsoLink(db.logins.listByUserId(session.userId), providerDef.id)
 	return {
 		actionRequired: 'oauth_flow',
 		connectUrl: `${appUrl}/oauth/authorize?session_id=${encodeURIComponent(session.id)}&provider=${encodeURIComponent(providerDef.id)}`
@@ -526,13 +523,7 @@ async function shareApp (token, opts = {}) {
 		error.status = 400
 		throw error
 	}
-	const sharerSsoLogin = selfLogins.find(l => getProvider(l.provider)?.ssoOnly)
-	if (sharerSsoLogin && cleanProvider && cleanProvider !== sharerSsoLogin.provider) {
-		const error = new Error(`Access denied: SSO-only provider restriction requires sharing within "${sharerSsoLogin.provider}"`)
-		error.status = 403
-		throw error
-	}
-	const effectiveProvider = cleanProvider || sharerSsoLogin?.provider || null
+	const effectiveProvider = resolveShareProvider(selfLogins, cleanAccount, cleanProvider)
 	if (effectiveProvider) {
 		requireAuthProvider(effectiveProvider)
 	}

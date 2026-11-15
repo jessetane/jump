@@ -20,6 +20,8 @@ $ cp .env.example .env
 
 For upstream OAuth providers (`google`, `github`, etc.), register `https://<host>/oauth/callback` as the redirect URI in the provider's developer console and set `<PROVIDER>_CLIENT_ID` and `<PROVIDER>_CLIENT_SECRET` in `.env`. If no OAuth providers are configured, `jump` bootstraps a `localhost` admin bearer token on first startup and prints it to stdout.
 
+Set `SSO_DOMAINS=domain:provider[,domain:provider:strict]` to pin email domains to an authoritative OAuth provider (and optionally lock outbound sharing from that domain with `:strict`).
+
 `jump` binds to `::1` by default and derives public URLs and client IPs from `Host` / `X-Forwarded-*` headers; in production, run it behind a trusted reverse proxy that sets and overwrites `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Forwarded-For`.
 
 ## Usage

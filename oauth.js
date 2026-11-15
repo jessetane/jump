@@ -3,7 +3,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as db from './db/index.js'
-import { getProvider, listAuthProviders, requireAuthProvider, hasSsoLock, parseGrantedServices, summarizeScopes } from './providers/index.js'
+import { getProvider, listAuthProviders, requireAuthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
+import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
 import { getBody, sendJson } from './util.js'
 
 export {
@@ -64,6 +65,21 @@ function getBaseUrl (req) {
 
 function getClientIp (req) {
 	return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || null
+}
+
+function enforceSso (res, fn) {
+	try {
+		fn()
+		return true
+	} catch (err) {
+		if (err.status === 403) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end(`${err.message}.`)
+			return false
+		}
+		throw err
+	}
 }
 
 function escapeHtml (str) {
@@ -554,12 +570,7 @@ async function handleAuthorizeConsent (req, res) {
 			res.end('Access denied: admin session required.')
 			return
 		}
-		if (hasSsoLock(session.userId, provider)) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: SSO-only provider restriction prevents linking multiple sign-in providers.')
-			return
-		}
+		if (!enforceSso(res, () => assertSsoLink(db.logins.listByUserId(session.userId), provider.id))) return
 	}
 	const callbackUrl = `${base}/oauth/callback`
 	const stateToken = db.tokens.createState({
@@ -833,18 +844,15 @@ async function handleCallback (req, res, query) {
 			res.end('Access denied: admin session required.')
 			return
 		}
-		if (hasSsoLock(session.userId, provider)) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: SSO-only provider restriction prevents linking multiple sign-in providers.')
-			return
-		}
 		const cleanAccount = String(account).trim().toLowerCase()
+		if (!enforceSso(res, () => assertSsoLink(db.logins.listByUserId(session.userId), provider.id, cleanAccount))) return
+		const allowUnscoped = shouldClaimUnscoped(provider.id, cleanAccount, { verifiedEmail: provider.verifiedEmail })
 		try {
 			db.logins.upsert({
 				userId: session.userId,
 				provider: provider.id,
-				account: cleanAccount
+				account: cleanAccount,
+				allowUnscoped
 			})
 		} catch (err) {
 			if (err.status === 409) {
@@ -866,7 +874,9 @@ async function handleCallback (req, res, query) {
 	}
 	if (oauthState.mode === 'login') {
 		const cleanAccount = String(account).trim().toLowerCase()
-		const user = db.logins.resolveUser(provider.id, cleanAccount)
+		if (!enforceSso(res, () => assertSsoLogin(provider.id, cleanAccount))) return
+		const allowUnscoped = shouldClaimUnscoped(provider.id, cleanAccount, { verifiedEmail: provider.verifiedEmail })
+		const user = db.logins.resolveUser(provider.id, cleanAccount, { allowUnscoped })
 		redirectToVerifyOrComplete(req, res, base, {
 			user,
 			provider: provider.id,
