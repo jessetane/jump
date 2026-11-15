@@ -28,6 +28,7 @@ const { executeTool, redactLogArgs } = await import('../mcp.js')
 const { isAllowedRedirectUri, deriveClientName, getBaseUrl } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
+const { parseSsoDomains, shouldClaimUnscoped } = await import('../sso.js')
 
 function createTestSession (opts = {}) {
 	const {
@@ -2814,7 +2815,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	})
 	const unverifiedPrecUser = db.logins.resolveUser('custom_unverified_idp', 'prec@acme.com')
 	assert.equal(db.tokens.listByUserId(unverifiedPrecUser.id).filter(t => t.type === 'share').length, 0, 'Unverified-email provider must never claim unscoped pending email shares')
-	const precUser = db.logins.resolveUser('google', 'prec@acme.com')
+	const precUser = db.logins.resolveUser('google', 'prec@acme.com', { allowUnscoped: true })
 	const precShares = db.tokens.listByUserId(precUser.id).filter(t => t.type === 'share')
 	assert.equal(precShares.length, 1, 'Overlapping unscoped and provider-scoped pending shares deduplicate to 1')
 	assert.deepEqual(precShares[0].credentials.policy, [{ action: 'allow', methods: ['POST'], path: '/v1/scoped' }], 'Provider-scoped pending share wins precedence over unscoped pending share')
@@ -2841,7 +2842,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		policy: [{ action: 'allow', methods: ['POST'], path: '/v1/scoped-seq' }]
 	})
-	const seqUser = db.logins.resolveUser('google', 'seq@acme.com')
+	const seqUser = db.logins.resolveUser('google', 'seq@acme.com', { allowUnscoped: true })
 	const seqSession = db.tokens.create({ userId: seqUser.id, provider: 'self', admin: 1 })
 	const seqSharesAfterGoogle = db.tokens.listByUserId(seqUser.id).filter(t => t.type === 'share')
 	assert.equal(seqSharesAfterGoogle.length, 1)
@@ -2891,7 +2892,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		policy: [{ action: 'allow', methods: ['GET'], path: '/v1/initial' }]
 	})
-	const staleUser = db.logins.resolveUser('google', 'stale@acme.com')
+	const staleUser = db.logins.resolveUser('google', 'stale@acme.com', { allowUnscoped: true })
 	db.tokens.upsertShare({
 		userId: staleUser.id,
 		account: 'stale@acme.com',
@@ -2910,7 +2911,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		policy: [{ action: 'allow', methods: ['GET'], path: '/v1/should-not-clobber' }]
 	})
-	db.logins.upsert({ userId: seqUser.id, provider: 'google', account: 'seq-extra@acme.com' })
+	db.logins.upsert({ userId: seqUser.id, provider: 'google', account: 'seq-extra@acme.com', allowUnscoped: true })
 	const seqSharesAfterUnscoped = db.tokens.listByUserId(seqUser.id).filter(t => t.type === 'share')
 	assert.deepEqual(seqSharesAfterUnscoped[0].credentials.policy, [{ action: 'allow', methods: ['POST'], path: '/v1/scoped-seq' }], 'Unscoped pending share never clobbers an already-claimed provider-scoped share')
 	const usersCountBefore = db.sqlite.prepare('SELECT COUNT(*) AS count FROM users').get().count
@@ -3368,96 +3369,282 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 			})
 			assert.equal(badPathRes.status, 400, `Malformed percent-encoding on ${badPath} fails loud with 400`)
 		}
-		google.ssoOnly = true
-		try {
-			const ssoUser = db.logins.resolveUser('google', 'sso-locked@example.com')
-			const ssoAdmin = db.tokens.create({ userId: ssoUser.id, provider: 'self', admin: 1 })
-			const ssoLinkAttempt = await executeTool('admin', {
-				action: 'link_login',
-				provider: 'github'
-			}, ssoAdmin.token)
-			assert.equal(ssoLinkAttempt.isError, true, 'link_login must enforce ssoOnly restriction upfront')
-			assert.match(ssoLinkAttempt.content[0].text, /SSO-only provider restriction/)
-			const ssoConsentAttempt = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/x-www-form-urlencoded' },
-				body: new URLSearchParams({ session_id: ssoAdmin.id, provider: 'github' }).toString(),
-				redirect: 'manual'
-			})
-			assert.equal(ssoConsentAttempt.status, 403, 'handleAuthorizeConsent must enforce ssoOnly restriction')
-			const ssoState = db.tokens.createState({
-				mode: 'auth',
-				sessionId: ssoAdmin.id,
-				provider: 'github'
-			})
-			const ssoCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${ssoState}`)
-			assert.equal(ssoCbRes.status, 403)
-			assert.match(await ssoCbRes.text(), /SSO-only provider restriction/)
-			const ssoApp = db.tokens.create({
-				userId: ssoUser.id,
-				provider: 'stripe',
-				type: 'api_key',
-				name: 'Enterprise Stripe',
-				credentials: { apiKey: 'sk_ent', baseUrl: 'https://api.stripe.com' }
-			})
-			const ssoCrossProvShare = await executeTool('admin', {
-				action: 'share_app',
-				appId: ssoApp.id,
-				account: 'newhire@corp.com',
-				provider: 'github'
-			}, ssoAdmin.token)
-			assert.equal(ssoCrossProvShare.isError, true, 'ssoOnly sharer must not create cross-provider share')
-			assert.match(ssoCrossProvShare.content[0].text, /SSO-only provider restriction/)
-			const ssoPendingShare = JSON.parse((await executeTool('admin', {
-				action: 'share_app',
-				appId: ssoApp.id,
-				account: 'newhire@corp.com'
-			}, ssoAdmin.token)).content[0].text)
-			assert.equal(ssoPendingShare.provider, 'google', 'ssoOnly sharer binds pending share to ssoOnly provider')
-			const ghImpersonator = db.logins.resolveUser('github', 'newhire@corp.com')
-			assert.equal(db.tokens.listByUserId(ghImpersonator.id).filter(t => t.type === 'share').length, 0, 'Consumer provider must not claim enterprise ssoOnly pending share')
-			const googleCorpUser = db.logins.resolveUser('google', 'newhire@corp.com')
-			assert.equal(db.tokens.listByUserId(googleCorpUser.id).filter(t => t.type === 'share').length, 1, 'Matching ssoOnly provider claims pending share')
-			db.tokens.upsertShare({
-				userId: null,
-				account: 'legacy-unscoped@corp.com',
-				authProvider: null,
-				appId: ssoApp.id,
-				provider: 'stripe'
-			})
-			db.tokens.upsertShare({
-				userId: null,
-				account: 'contractor-gh',
-				authProvider: 'github',
-				appId: ssoApp.id,
-				provider: 'stripe'
-			})
-			const ssoRevokeUnscoped = JSON.parse((await executeTool('admin', {
-				action: 'unshare_app',
-				appId: ssoApp.id,
-				account: 'legacy-unscoped@corp.com'
-			}, ssoAdmin.token)).content[0].text)
-			assert.equal(ssoRevokeUnscoped.unshared, true, 'ssoOnly admin can revoke pre-existing unscoped shares on their app')
-			const ssoRevokeCrossProv = JSON.parse((await executeTool('admin', {
-				action: 'unshare_app',
-				appId: ssoApp.id,
-				account: 'github:contractor-gh'
-			}, ssoAdmin.token)).content[0].text)
-			assert.equal(ssoRevokeCrossProv.unshared, true, 'ssoOnly admin can revoke pre-existing cross-provider shares on their app')
-			db.tokens.upsertShare({
-				userId: null,
-				account: 'unscoped@corp.com',
-				authProvider: null,
-				appId: shayApp.id,
-				provider: 'stripe'
-			})
-			const ssoUnscopedUser = db.logins.resolveUser('google', 'unscoped@corp.com')
-			assert.equal(db.tokens.listByUserId(ssoUnscopedUser.id).filter(t => t.type === 'share').length, 1, 'ssoOnly login verifying email ownership claims unscoped pending email share')
-		} finally {
-			google.ssoOnly = false
-		}
 	} finally {
 		globalThis.fetch = origFetch
+	}
+})
+
+test('SSO_DOMAINS pinning, login isolation, strict outbound sharing, and verifiedEmail claim protection', async () => {
+	const addr = server.address()
+	const origFetch = globalThis.fetch
+	const origSsoDomains = process.env.SSO_DOMAINS
+	let googleMockEmail = 'alice@corp.com'
+	let ghMockLogin = 'contractor-gh'
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://oauth2.googleapis.com/token') {
+			return new Response(JSON.stringify({ access_token: 'ya29.sso', token_type: 'Bearer' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+			return new Response(JSON.stringify({ email: googleMockEmail }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://github.com/login/oauth/access_token') {
+			return new Response(JSON.stringify({ access_token: 'gho_sso', token_type: 'bearer' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://api.github.com/user') {
+			return new Response(JSON.stringify({ login: ghMockLogin }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		return origFetch(input, init)
+	}
+	process.env.SSO_DOMAINS = 'corp.com:google, strictcorp.com:google:strict, partner.io:github'
+	try {
+		ghMockLogin = 'alice@corp.com'
+		const wrongLoginState = db.tokens.createState({ mode: 'login', provider: 'github' })
+		const wrongLoginRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${wrongLoginState}`, { redirect: 'manual' })
+		assert.equal(wrongLoginRes.status, 403, 'Login on pinned domain with wrong provider must fail with 403')
+		assert.match(await wrongLoginRes.text(), /SSO domain "corp\.com"/)
+		assert.equal(db.logins.findUserByAccount('alice@corp.com', 'github'), null, 'Rejected SSO login must not create user or login row')
+		googleMockEmail = 'alice@corp.com'
+		const validLoginState = db.tokens.createState({ mode: 'login', provider: 'google' })
+		const validLoginRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${validLoginState}`, { redirect: 'manual' })
+		assert.equal(validLoginRes.status, 200, 'Login on pinned domain with pinned provider succeeds')
+		assert.match(await validLoginRes.text(), /user:\s*alice@corp\.com/)
+		const corpUser = db.logins.findUserByAccount('alice@corp.com', 'google')
+		assert.ok(corpUser?.id)
+		const corpAdmin = db.tokens.create({ userId: corpUser.id, provider: 'self', admin: 1 })
+		ghMockLogin = 'flex-user@flex.com'
+		const flexGhState = db.tokens.createState({ mode: 'login', provider: 'github' })
+		const flexGhRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${flexGhState}`, { redirect: 'manual' })
+		assert.equal(flexGhRes.status, 200, 'Login on unpinned domain succeeds with github')
+		googleMockEmail = 'flex-user@flex.com'
+		const flexGoogleState = db.tokens.createState({ mode: 'login', provider: 'google' })
+		const flexGoogleRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${flexGoogleState}`, { redirect: 'manual' })
+		assert.equal(flexGoogleRes.status, 200, 'Login on unpinned domain succeeds with google')
+		const linkOtherFromPinned = await executeTool('admin', {
+			action: 'link_login',
+			provider: 'github'
+		}, corpAdmin.token)
+		assert.equal(linkOtherFromPinned.isError, true, 'link_login rejects linking another provider onto a user holding a pinned domain login')
+		assert.match(linkOtherFromPinned.content[0].text, /SSO domain "corp\.com"/)
+		const consentOtherFromPinned = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ session_id: corpAdmin.id, provider: 'github' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(consentOtherFromPinned.status, 403, 'handleAuthorizeConsent rejects linking another provider onto a pinned domain user')
+		ghMockLogin = 'alice-gh'
+		const authCbOtherFromPinnedState = db.tokens.createState({ mode: 'auth', sessionId: corpAdmin.id, provider: 'github' })
+		const authCbOtherFromPinned = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${authCbOtherFromPinnedState}`)
+		assert.equal(authCbOtherFromPinned.status, 403, 'handleCallback mode=auth rejects linking another provider onto a pinned domain user')
+		assert.equal(db.logins.findUserByAccount('alice-gh', 'github'), null)
+		const linkSameFromPinned = await executeTool('admin', {
+			action: 'link_login',
+			provider: 'google'
+		}, corpAdmin.token)
+		assert.equal(linkSameFromPinned.isError, undefined, 'link_login allows linking on the pinned provider itself')
+		const ghUser = db.logins.resolveUser('github', 'contractor-gh')
+		const ghAdmin = db.tokens.create({ userId: ghUser.id, provider: 'self', admin: 1 })
+		googleMockEmail = 'bob@corp.com'
+		const linkPinnedOntoOtherState = db.tokens.createState({ mode: 'auth', sessionId: ghAdmin.id, provider: 'google' })
+		const linkPinnedOntoOtherRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${linkPinnedOntoOtherState}`)
+		assert.equal(linkPinnedOntoOtherRes.status, 403, 'User with other-provider logins cannot link a login in a pinned domain')
+		assert.equal(db.logins.findUserByAccount('bob@corp.com', 'google'), null)
+		googleMockEmail = 'bob@flex.com'
+		const linkUnpinnedOntoOtherState = db.tokens.createState({ mode: 'auth', sessionId: ghAdmin.id, provider: 'google' })
+		const linkUnpinnedOntoOtherRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${linkUnpinnedOntoOtherState}`)
+		assert.equal(linkUnpinnedOntoOtherRes.status, 200, 'User with other-provider logins can link an unpinned email domain')
+		assert.equal(db.logins.findUserByAccount('bob@flex.com', 'google')?.id, ghUser.id)
+		const flexOnlyUser = db.logins.resolveUser('google', 'carol@flex.com')
+		const flexOnlyAdmin = db.tokens.create({ userId: flexOnlyUser.id, provider: 'self', admin: 1 })
+		ghMockLogin = 'carol@corp.com'
+		const linkPinnedWrongProvState = db.tokens.createState({ mode: 'auth', sessionId: flexOnlyAdmin.id, provider: 'github' })
+		const linkPinnedWrongProvRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${linkPinnedWrongProvState}`)
+		assert.equal(linkPinnedWrongProvRes.status, 403, 'Linking a login in a pinned domain with wrong provider must fail with 403')
+		assert.equal(db.logins.findUserByAccount('carol@corp.com', 'github'), null)
+		const flexApp = db.tokens.create({
+			userId: flexOnlyUser.id,
+			provider: 'stripe',
+			type: 'api_key',
+			name: 'Flex Stripe',
+			credentials: { apiKey: 'sk_flex', baseUrl: 'https://api.stripe.com' }
+		})
+		const conflictPinnedRestShare = await fetch(`http://127.0.0.1:${addr.port}/api/shares`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${flexOnlyAdmin.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({
+				appId: flexApp.id,
+				account: 'newhire@corp.com',
+				provider: 'github'
+			})
+		})
+		assert.equal(conflictPinnedRestShare.status, 403, 'Sharing to pinned domain with explicit conflicting provider fails with 403 regardless of sharer')
+		const autoPinnedShare = JSON.parse((await executeTool('admin', {
+			action: 'share_app',
+			appId: flexApp.id,
+			account: 'newhire@corp.com'
+		}, flexOnlyAdmin.token)).content[0].text)
+		assert.equal(autoPinnedShare.provider, 'google', 'Sharing to pinned domain auto-resolves authProvider to pinned provider')
+		ghMockLogin = 'newhire@corp.com'
+		const ghImpersonatorState = db.tokens.createState({ mode: 'login', provider: 'github' })
+		const ghImpersonatorRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${ghImpersonatorState}`, { redirect: 'manual' })
+		assert.equal(ghImpersonatorRes.status, 403, 'Wrong provider callback must not sign in or claim pinned-domain pending share')
+		assert.equal(db.tokens.get(autoPinnedShare.shareId).userId, null)
+		googleMockEmail = 'newhire@corp.com'
+		const googleCorpState = db.tokens.createState({ mode: 'login', provider: 'google' })
+		const googleCorpRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${googleCorpState}`, { redirect: 'manual' })
+		assert.equal(googleCorpRes.status, 302, 'Pinned provider callback claims pending share and redirects to verify')
+		const googleCorpUser = db.logins.findUserByAccount('newhire@corp.com', 'google')
+		assert.equal(db.tokens.listByUserId(googleCorpUser.id).filter(t => t.type === 'share').length, 1, 'Pinned provider claims pending share via /oauth/callback')
+		const unscopedCorpPending = db.tokens.upsertShare({
+			userId: null,
+			account: 'unscoped@corp.com',
+			authProvider: null,
+			appId: flexApp.id,
+			provider: 'stripe'
+		})
+		ghMockLogin = 'unscoped@corp.com'
+		const ghCorpState = db.tokens.createState({ mode: 'login', provider: 'github' })
+		const ghCorpRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${ghCorpState}`, { redirect: 'manual' })
+		assert.equal(ghCorpRes.status, 403, 'Wrong provider callback must not claim unscoped pending share on pinned domain')
+		assert.equal(db.tokens.get(unscopedCorpPending.id).userId, null)
+		googleMockEmail = 'unscoped@corp.com'
+		const googleUnscopedCorpState = db.tokens.createState({ mode: 'login', provider: 'google' })
+		const googleUnscopedCorpRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${googleUnscopedCorpState}`, { redirect: 'manual' })
+		assert.equal(googleUnscopedCorpRes.status, 302)
+		const googleCorpUnscopedUser = db.logins.findUserByAccount('unscoped@corp.com', 'google')
+		assert.equal(db.tokens.listByUserId(googleCorpUnscopedUser.id).filter(t => t.type === 'share').length, 1, 'Pinned provider claims unscoped pending share on pinned domain via /oauth/callback')
+		const unscopedPartnerPending = db.tokens.upsertShare({
+			userId: null,
+			account: 'member@partner.io',
+			authProvider: null,
+			appId: flexApp.id,
+			provider: 'stripe'
+		})
+		googleMockEmail = 'member@partner.io'
+		const googlePartnerState = db.tokens.createState({ mode: 'login', provider: 'google' })
+		const googlePartnerRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${googlePartnerState}`, { redirect: 'manual' })
+		assert.equal(googlePartnerRes.status, 403, 'Even verifiedEmail provider callback must not claim unscoped share on domain pinned to another provider')
+		assert.equal(db.tokens.get(unscopedPartnerPending.id).userId, null)
+		ghMockLogin = 'member@partner.io'
+		const githubPartnerState = db.tokens.createState({ mode: 'login', provider: 'github' })
+		const githubPartnerRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${githubPartnerState}`, { redirect: 'manual' })
+		assert.equal(githubPartnerRes.status, 302)
+		const githubPartnerUser = db.logins.findUserByAccount('member@partner.io', 'github')
+		assert.equal(db.tokens.listByUserId(githubPartnerUser.id).filter(t => t.type === 'share').length, 1, 'Pinned provider claims unscoped pending share on its pinned domain even without verifiedEmail')
+		const unscopedFlexPending = db.tokens.upsertShare({
+			userId: null,
+			account: 'unscoped@flex.com',
+			authProvider: null,
+			appId: flexApp.id,
+			provider: 'stripe'
+		})
+		ghMockLogin = 'unscoped@flex.com'
+		const ghFlexState = db.tokens.createState({ mode: 'login', provider: 'github' })
+		const ghFlexRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${ghFlexState}`, { redirect: 'manual' })
+		assert.equal(ghFlexRes.status, 200, 'Unpinned email domain allows github login without claiming unscoped pending share')
+		const ghFlexUser = db.logins.findUserByAccount('unscoped@flex.com', 'github')
+		assert.equal(db.tokens.listByUserId(ghFlexUser.id).filter(t => t.type === 'share').length, 0, 'Unpinned email domain still requires verifiedEmail to claim unscoped pending share')
+		assert.equal(db.tokens.get(unscopedFlexPending.id).userId, null)
+		googleMockEmail = 'unscoped@flex.com'
+		const googleFlexState = db.tokens.createState({ mode: 'login', provider: 'google' })
+		const googleFlexRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${googleFlexState}`, { redirect: 'manual' })
+		assert.equal(googleFlexRes.status, 302)
+		const googleFlexUser = db.logins.findUserByAccount('unscoped@flex.com', 'google')
+		assert.equal(db.tokens.listByUserId(googleFlexUser.id).filter(t => t.type === 'share').length, 1, 'verifiedEmail provider claims unscoped pending share on unpinned domain via /oauth/callback')
+		const corpApp = db.tokens.create({
+			userId: corpUser.id,
+			provider: 'stripe',
+			type: 'api_key',
+			name: 'Non-Strict Corp Stripe',
+			credentials: { apiKey: 'sk_corp', baseUrl: 'https://api.stripe.com' }
+		})
+		const nonStrictCrossShare = JSON.parse((await executeTool('admin', {
+			action: 'share_app',
+			appId: corpApp.id,
+			account: 'github:ext-contractor'
+		}, corpAdmin.token)).content[0].text)
+		assert.equal(nonStrictCrossShare.provider, 'github', 'Non-strict pinned sharer can share out to other providers')
+		const nonStrictPartnerShare = JSON.parse((await executeTool('admin', {
+			action: 'share_app',
+			appId: corpApp.id,
+			account: 'ally@partner.io'
+		}, corpAdmin.token)).content[0].text)
+		assert.equal(nonStrictPartnerShare.provider, 'github', 'Non-strict pinned sharer auto-resolves partner pinned domain provider')
+		const nonStrictFlexShare = JSON.parse((await executeTool('admin', {
+			action: 'share_app',
+			appId: corpApp.id,
+			account: 'bob@flex.com'
+		}, corpAdmin.token)).content[0].text)
+		assert.equal(nonStrictFlexShare.userId, ghUser.id, 'Non-strict share to unpinned domain resolves existing user via findUserByAccount')
+		const strictUser = db.logins.resolveUser('google', 'boss@strictcorp.com')
+		const strictAdmin = db.tokens.create({ userId: strictUser.id, provider: 'self', admin: 1 })
+		const strictApp = db.tokens.create({
+			userId: strictUser.id,
+			provider: 'stripe',
+			type: 'api_key',
+			name: 'Strict Corp Stripe',
+			credentials: { apiKey: 'sk_strict', baseUrl: 'https://api.stripe.com' }
+		})
+		const strictCrossShare = await executeTool('admin', {
+			action: 'share_app',
+			appId: strictApp.id,
+			account: 'ext-contractor',
+			provider: 'github'
+		}, strictAdmin.token)
+		assert.equal(strictCrossShare.isError, true, 'Strict pinned sharer must not create explicit cross-provider share')
+		assert.match(strictCrossShare.content[0].text, /SSO domain "strictcorp\.com" requires sharing within "google"/)
+		const strictPartnerCrossShare = await executeTool('admin', {
+			action: 'share_app',
+			appId: strictApp.id,
+			account: 'ally@partner.io'
+		}, strictAdmin.token)
+		assert.equal(strictPartnerCrossShare.isError, true, 'Strict pinned sharer must not share to domain pinned to another provider')
+		const strictDefaultEmailShare = JSON.parse((await executeTool('admin', {
+			action: 'share_app',
+			appId: strictApp.id,
+			account: 'outside@flex.com'
+		}, strictAdmin.token)).content[0].text)
+		assert.equal(strictDefaultEmailShare.provider, 'google', 'Strict pinned sharer defaults unpinned target without provider to strict pinned provider')
+		const strictDefaultBareShare = JSON.parse((await executeTool('admin', {
+			action: 'share_app',
+			appId: strictApp.id,
+			account: 'bare-strict-target'
+		}, strictAdmin.token)).content[0].text)
+		assert.equal(strictDefaultBareShare.provider, 'google', 'Strict pinned sharer defaults bare target without provider to strict pinned provider')
+		db.tokens.upsertShare({
+			userId: null,
+			account: 'legacy-unscoped@strictcorp.com',
+			authProvider: null,
+			appId: strictApp.id,
+			provider: 'stripe'
+		})
+		db.tokens.upsertShare({
+			userId: null,
+			account: 'legacy-gh',
+			authProvider: 'github',
+			appId: strictApp.id,
+			provider: 'stripe'
+		})
+		const strictRevokeUnscoped = JSON.parse((await executeTool('admin', {
+			action: 'unshare_app',
+			appId: strictApp.id,
+			account: 'legacy-unscoped@strictcorp.com'
+		}, strictAdmin.token)).content[0].text)
+		assert.equal(strictRevokeUnscoped.unshared, true, 'Strict SSO admin can revoke pre-existing unscoped shares on their app')
+		const strictRevokeCross = JSON.parse((await executeTool('admin', {
+			action: 'unshare_app',
+			appId: strictApp.id,
+			account: 'github:legacy-gh'
+		}, strictAdmin.token)).content[0].text)
+		assert.equal(strictRevokeCross.unshared, true, 'Strict SSO admin can revoke pre-existing cross-provider shares on their app')
+	} finally {
+		globalThis.fetch = origFetch
+		if (origSsoDomains === undefined) delete process.env.SSO_DOMAINS
+		else process.env.SSO_DOMAINS = origSsoDomains
 	}
 })
 
@@ -4128,12 +4315,23 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 	const wildcardNoBaseProv = createProvider({ id: 'wildcard_only', name: 'WildcardOnly', baseUrl: null, allowedHosts: ['*.example.org'] })
 	assert.equal(wildcardNoBaseProv.isAllowedUrl('https://api.example.org/v1/test').allowed, true)
 	assert.equal(wildcardNoBaseProv.isAllowedUrl('https://evil.org/v1/test').allowed, false)
-	process.env.OKTA_TEST_SSO_ONLY = 'true'
+	assert.equal(Object.hasOwn(google, 'ssoOnly'), false, 'ssoOnly is retired from provider objects')
+	const parsedSso = parseSsoDomains(' Acme.COM:Google , partner.io:GitHub:STRICT , ')
+	assert.deepEqual(parsedSso.get('acme.com'), { domain: 'acme.com', provider: 'google', strict: false })
+	assert.deepEqual(parsedSso.get('partner.io'), { domain: 'partner.io', provider: 'github', strict: true })
+	assert.throws(() => parseSsoDomains('acme.com'), /Invalid SSO_DOMAINS entry/)
+	assert.throws(() => parseSsoDomains('acme.com:google:bogus'), /Invalid SSO_DOMAINS entry/)
+	assert.throws(() => parseSsoDomains('acme.com:google,acme.com:github'), /Duplicate domain/)
+	const origSsoUnit = process.env.SSO_DOMAINS
+	process.env.SSO_DOMAINS = 'pinned.io:github'
 	try {
-		const envSsoProv = createProvider({ id: 'okta_test', name: 'OktaTest', oauth: { authUrl: 'https://okta.test/auth', tokenUrl: 'https://okta.test/token', userInfoUrl: 'https://okta.test/me' } })
-		assert.equal(envSsoProv.ssoOnly, true, '<PROVIDER>_SSO_ONLY=true env variable configures ssoOnly on createProvider')
+		assert.equal(shouldClaimUnscoped('github', 'u@pinned.io', { verifiedEmail: false }), true)
+		assert.equal(shouldClaimUnscoped('google', 'u@pinned.io', { verifiedEmail: true }), false)
+		assert.equal(shouldClaimUnscoped('github', 'u@open.io', { verifiedEmail: false }), false)
+		assert.equal(shouldClaimUnscoped('google', 'u@open.io', { verifiedEmail: true }), true)
 	} finally {
-		delete process.env.OKTA_TEST_SSO_ONLY
+		if (origSsoUnit === undefined) delete process.env.SSO_DOMAINS
+		else process.env.SSO_DOMAINS = origSsoUnit
 	}
 	const addr = server.address()
 	const origFetchGoogle = globalThis.fetch
@@ -4660,7 +4858,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		assert.equal(sarahStripe.shares[0].userId, null)
 		assert.equal(sarahStripe.shares[0].account, 'dan@acme.com')
 		assert.deepEqual(sarahStripe.shares[0].policy, updatedCeilingPolicy)
-		const dan = db.logins.resolveUser('google', 'dan@acme.com')
+		const dan = db.logins.resolveUser('google', 'dan@acme.com', { allowUnscoped: true })
 		assert.ok(dan)
 		const sarahAppsAfterClaim = JSON.parse((await executeTool('admin', { action: 'list_apps' }, sarahAdmin.token)).content[0].text).apps
 		assert.equal(sarahAppsAfterClaim.find(a => a.id === sarahApp.id).shares[0].userId, dan.id, 'Pending share transitions cleanly to claimed userId once Dan signs in')
