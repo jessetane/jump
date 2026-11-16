@@ -195,10 +195,10 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 		const links = db.links.listBySessionId(session.id)
 		const providerLinks = links.filter(l => l.app?.provider === provider.id)
 		if (providerLinks.length === 0) {
-			const connectHint = provider.type === 'oauth'
-				? ` Connect an account at: ${appUrl}/providers/${provider.id}/connect`
-				: ''
-			const err = new Error(`No ${provider.name} app linked to session.${connectHint}`)
+			const hint = session.admin
+				? 'Use connect_app or link_app to attach one.'
+				: 'Ask an admin to link one.'
+			const err = new Error(`No ${provider.name} app linked to session. ${hint}`)
 			err.status = 403
 			throw err
 		}
