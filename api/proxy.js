@@ -294,7 +294,14 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 				error.status = 401
 				throw error
 			}
-			const reauthUrl = `${appUrl}/providers/${provider.id}/connect?session_id=${encodeURIComponent(session.id)}&reauth_app_id=${encodeURIComponent(upstreamApp.id)}`
+			const setupCode = db.tokens.createState({
+				mode: 'setup_connect',
+				sessionId: session.id,
+				provider: provider.id,
+				reauthAppId: upstreamApp.id,
+				ttl: 10 * 60 * 1000
+			})
+			const reauthUrl = `${appUrl}/providers/${provider.id}/connect?code=${encodeURIComponent(setupCode)}`
 			const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. Re-authenticate: ${reauthUrl}`)
 			error.status = 401
 			throw error

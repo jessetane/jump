@@ -309,15 +309,17 @@ async function connectApp (token, opts = {}) {
 	provider = (provider || 'google').toLowerCase()
 	const providerDef = getProvider(provider)
 	if (providerDef?.type === 'oauth' && !apiKey && !credentials) {
-		const params = new URLSearchParams({ session_id: session.id })
-		if (appId) {
-			params.set('reauth_app_id', appId)
-		} else if (typeof name === 'string' && name.trim()) {
-			params.set('name', name.trim())
-		}
+		const setupCode = db.tokens.createState({
+			mode: 'setup_connect',
+			sessionId: session.id,
+			provider: providerDef.id,
+			reauthAppId: appId || null,
+			sessionName: typeof name === 'string' && name.trim() ? name.trim() : null,
+			ttl: 10 * 60 * 1000
+		})
 		return {
 			actionRequired: 'oauth_flow',
-			connectUrl: `${appUrl}/providers/${providerDef.id}/connect?${params.toString()}`
+			connectUrl: `${appUrl}/providers/${providerDef.id}/connect?code=${encodeURIComponent(setupCode)}`
 		}
 	}
 	const rawBase = baseUrl || credentials?.baseUrl || providerDef?.baseUrl || null
@@ -428,9 +430,15 @@ async function linkLogin (token, opts = {}) {
 	}
 	const providerDef = requireAuthProvider(provider)
 	assertSsoLink(db.logins.listByUserId(session.userId), providerDef.id)
+	const setupCode = db.tokens.createState({
+		mode: 'setup_link',
+		sessionId: session.id,
+		provider: providerDef.id,
+		ttl: 10 * 60 * 1000
+	})
 	return {
 		actionRequired: 'oauth_flow',
-		connectUrl: `${appUrl}/oauth/authorize?session_id=${encodeURIComponent(session.id)}&provider=${encodeURIComponent(providerDef.id)}`
+		connectUrl: `${appUrl}/oauth/authorize?code=${encodeURIComponent(setupCode)}`
 	}
 }
 

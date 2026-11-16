@@ -130,7 +130,7 @@
 				</div>
 				<div class="form-group" id="token-group" style="display: none;">
 					<label for="token">Admin Bearer Token</label>
-					<input type="password" name="token" id="token" placeholder="Paste existing admin token">
+					<input type="password" name="token" id="token" placeholder="Paste existing admin token" disabled>
 				</div>
 				<div id="provider-buttons"></div>
 			</form>
@@ -143,6 +143,7 @@
 				const clientName = initData.clientName || null
 				const providers = Array.isArray(initData.providers) ? initData.providers : []
 				const localAuth = Boolean(initData.localAuth)
+				const linkMode = Boolean(initData.linkMode)
 				const nameEl = document.getElementById('session_name')
 				if (params.session_name && nameEl) {
 					nameEl.value = params.session_name
@@ -150,7 +151,7 @@
 					nameEl.value = clientName
 				}
 				const subEl = document.getElementById('page-subtitle')
-				if (params.session_id) {
+				if (linkMode) {
 					const nameGroup = document.getElementById('session-name-group')
 					const adminGroup = document.getElementById('admin-group')
 					if (nameGroup) nameGroup.style.display = 'none'
@@ -167,7 +168,7 @@
 				const filteredProviders = params.provider
 					? providers.filter(p => p.id === String(params.provider).toLowerCase())
 					: providers
-				const listToRender = filteredProviders.length > 0 ? filteredProviders : providers
+				const listToRender = linkMode ? filteredProviders : (filteredProviders.length > 0 ? filteredProviders : providers)
 				for (const p of listToRender) {
 					const btn = document.createElement('button')
 					btn.type = 'submit'
@@ -176,11 +177,14 @@
 					btn.textContent = 'Continue with ' + p.name
 					btnContainer.appendChild(btn)
 				}
-				if (localAuth || listToRender.length === 0) {
+				if (localAuth) {
 					const tokenGroup = document.getElementById('token-group')
 					const tokenInput = document.getElementById('token')
 					if (tokenGroup) tokenGroup.style.display = 'block'
-					if (tokenInput && listToRender.length === 0) tokenInput.required = true
+					if (tokenInput) {
+						tokenInput.disabled = false
+						if (listToRender.length === 0) tokenInput.required = true
+					}
 					const btn = document.createElement('button')
 					btn.type = 'submit'
 					btn.id = 'submit-btn'

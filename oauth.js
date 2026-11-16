@@ -379,19 +379,49 @@ function validateAuthorizeParams (query) {
 	return { codeChallenge, codeChallengeMethod }
 }
 
+function resolveSetupState (setup, expectedMode, expectedProvider = null) {
+	if (!setup || setup.mode !== expectedMode) return null
+	if (expectedProvider && setup.provider && setup.provider !== expectedProvider) return null
+	const session = setup.sessionId ? db.tokens.getActiveSession(setup.sessionId) : null
+	if (!session || !session.admin) return null
+	return session
+}
+
 async function handleAuthorize (req, res, query) {
+	if (query.session_id !== undefined) {
+		res.statusCode = 403
+		res.setHeader('content-type', 'text/plain')
+		res.end('Access denied: invalid or expired setup code.')
+		return
+	}
 	try {
 		validateAuthorizeParams(query)
 	} catch (err) {
 		sendJson(res, { error: err.code || 'invalid_request', error_description: err.message }, err.status || 400)
 		return
 	}
+	let linkMode = false
+	let resolvedParams = query
+	if (query.code !== undefined) {
+		const setup = db.tokens.getState(query.code)
+		const session = resolveSetupState(setup, 'setup_link')
+		if (!session) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: invalid or expired setup code.')
+			return
+		}
+		if (!enforceSso(res, () => assertSsoLink(db.logins.listByUserId(session.userId), setup.provider))) return
+		linkMode = true
+		resolvedParams = { ...query, ...(setup.provider && { provider: setup.provider }) }
+	}
 	const clientName = deriveClientName(query.client_id, query.client_name)
 	const authProviders = listAuthProviders().map(p => ({ id: p.id, name: p.name }))
 	const initData = {
-		params: query,
+		params: resolvedParams,
 		providers: authProviders,
-		localAuth: authProviders.length === 0,
+		localAuth: !linkMode && authProviders.length === 0,
+		...(linkMode && { linkMode: true }),
 		...(clientName && { clientName })
 	}
 	const authorizeHtml = await fs.readFile(path.join(dirname, 'public/authorize.html'), 'utf8')
@@ -497,7 +527,8 @@ async function handleAuthorizeConsent (req, res) {
 	let providerName = null
 	let localToken = null
 	let sessionName = null
-	let sessionId = null
+	let setupCode = null
+	let hasSessionId = false
 	let admin = 0
 	for (const [key, value] of params.entries()) {
 		if (key === 'provider') {
@@ -506,13 +537,21 @@ async function handleAuthorizeConsent (req, res) {
 			localToken = value.trim() || null
 		} else if (key === 'session_name') {
 			sessionName = value.trim() || null
+		} else if (key === 'code') {
+			setupCode = value.trim() || null
 		} else if (key === 'session_id') {
-			sessionId = value.trim() || null
+			hasSessionId = true
 		} else if (key === 'admin') {
 			admin = value === 'true' || value === '1' || value === 'on' ? 1 : 0
 		} else {
 			query[key] = value
 		}
+	}
+	if (hasSessionId) {
+		res.statusCode = 403
+		res.setHeader('content-type', 'text/plain')
+		res.end('Access denied: invalid or expired setup code.')
+		return
 	}
 	let validation
 	try {
@@ -529,7 +568,13 @@ async function handleAuthorizeConsent (req, res) {
 	const effectiveSessionName = sessionName || derivedName || null
 	const ip = getClientIp(req)
 	const base = getBaseUrl(req)
-	if (localToken && !providerName) {
+	if (!setupCode && localToken && !providerName) {
+		if (listAuthProviders().length > 0) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: local token sign-in is disabled when OAuth providers are configured.')
+			return
+		}
 		const adminSession = db.tokens.getByToken(localToken)
 		const user = adminSession?.admin ? db.users.get(adminSession.userId) : null
 		if (!user) {
@@ -551,6 +596,26 @@ async function handleAuthorizeConsent (req, res) {
 		})
 		return
 	}
+	let linkSession = null
+	if (setupCode) {
+		const setup = db.tokens.consumeState(setupCode)
+		linkSession = resolveSetupState(setup, 'setup_link')
+		if (!linkSession) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: invalid or expired setup code.')
+			return
+		}
+		if (setup.provider) {
+			if (providerName && providerName !== setup.provider) {
+				res.statusCode = 403
+				res.setHeader('content-type', 'text/plain')
+				res.end('Access denied: provider mismatch for setup code.')
+				return
+			}
+			providerName = setup.provider
+		}
+	}
 	if (!providerName) {
 		sendJson(res, { error: 'invalid_request', error_description: 'OAuth provider or admin token is required' }, 400)
 		return
@@ -562,19 +627,10 @@ async function handleAuthorizeConsent (req, res) {
 		sendJson(res, { error: 'invalid_request', error_description: err.message }, err.status || 400)
 		return
 	}
-	if (sessionId) {
-		const session = db.tokens.getActiveSession(sessionId)
-		if (!session || !session.admin) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: admin session required.')
-			return
-		}
-		if (!enforceSso(res, () => assertSsoLink(db.logins.listByUserId(session.userId), provider.id))) return
-	}
+	if (linkSession && !enforceSso(res, () => assertSsoLink(db.logins.listByUserId(linkSession.userId), provider.id))) return
 	const callbackUrl = `${base}/oauth/callback`
 	const stateToken = db.tokens.createState({
-		mode: sessionId ? 'auth' : 'login',
+		mode: linkSession ? 'auth' : 'login',
 		provider: provider.id,
 		clientId,
 		clientRedirectUri,
@@ -583,7 +639,7 @@ async function handleAuthorizeConsent (req, res) {
 		codeChallengeMethod,
 		sessionName: effectiveSessionName,
 		admin,
-		sessionId,
+		sessionId: linkSession ? linkSession.id : null,
 		ip
 	})
 	let authUrl
@@ -695,17 +751,42 @@ async function handleProviderConnect (req, res, query, providerName = 'google') 
 		err.status = 404
 		throw err
 	}
+	if (query.session_id !== undefined) {
+		res.statusCode = 403
+		res.setHeader('content-type', 'text/plain')
+		res.end('Access denied: invalid or expired setup code.')
+		return
+	}
 	const resolvedParams = { ...query }
-	if (query.reauth_app_id && query.services === undefined && query.write === undefined && provider.services) {
-		const session = query.session_id ? db.tokens.getActiveSession(query.session_id) : null
-		const existingApp = getOwnedOauthApp(session, query.reauth_app_id, provider.id)
-		if (existingApp?.scopes) {
-			const granted = parseGrantedServices(existingApp.scopes, provider.services)
-			if (granted.length > 0) {
-				resolvedParams.services = granted.map(g => g.id).join(',')
-				const rwIds = granted.filter(g => g.mode === 'rw').map(g => g.id)
-				if (rwIds.length > 0) resolvedParams.write = rwIds.join(',')
+	delete resolvedParams.reauth_app_id
+	if (query.code !== undefined) {
+		const setup = db.tokens.getState(query.code)
+		const session = resolveSetupState(setup, 'setup_connect', provider.id)
+		if (!session) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: invalid or expired setup code.')
+			return
+		}
+		if (setup.reauthAppId) {
+			const existingApp = getOwnedOauthApp(session, setup.reauthAppId, provider.id)
+			if (!existingApp) {
+				res.statusCode = 403
+				res.setHeader('content-type', 'text/plain')
+				res.end('Access denied: unauthorized re-authentication request.')
+				return
 			}
+			resolvedParams.reauth_app_id = setup.reauthAppId
+			if (query.services === undefined && query.write === undefined && provider.services && existingApp.scopes) {
+				const granted = parseGrantedServices(existingApp.scopes, provider.services)
+				if (granted.length > 0) {
+					resolvedParams.services = granted.map(g => g.id).join(',')
+					const rwIds = granted.filter(g => g.mode === 'rw').map(g => g.id)
+					if (rwIds.length > 0) resolvedParams.write = rwIds.join(',')
+				}
+			}
+		} else if (setup.sessionName && !resolvedParams.name && !resolvedParams.app_name) {
+			resolvedParams.name = setup.sessionName
 		}
 	}
 	const initData = {
@@ -755,13 +836,26 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 			if (clean) writeList.push(clean)
 		}
 	}
-	const sessionId = params.get('session_id') || null
-	const reauthAppId = params.get('reauth_app_id') || null
-	const session = sessionId ? db.tokens.getActiveSession(sessionId) : null
-	if (!session || !session.admin) {
+	if (params.has('session_id')) {
 		res.statusCode = 403
 		res.setHeader('content-type', 'text/plain')
 		res.end('Access denied: admin session required.')
+		return
+	}
+	const setupCode = params.get('code') || null
+	const setup = db.tokens.consumeState(setupCode)
+	const session = resolveSetupState(setup, 'setup_connect', provider.id)
+	if (!session) {
+		res.statusCode = 403
+		res.setHeader('content-type', 'text/plain')
+		res.end('Access denied: admin session required.')
+		return
+	}
+	const reauthAppId = setup.reauthAppId || null
+	if (params.get('reauth_app_id') && params.get('reauth_app_id') !== reauthAppId) {
+		res.statusCode = 403
+		res.setHeader('content-type', 'text/plain')
+		res.end('Access denied: unauthorized re-authentication request.')
 		return
 	}
 	let existingApp = null
@@ -774,13 +868,14 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 			return
 		}
 	}
-	const rawAppName = params.get('app_name') || params.get('name') || ''
+	const rawAppName = params.get('app_name') || params.get('name') || setup.sessionName || ''
 	const sessionName = rawAppName ? String(rawAppName).trim() : null
 	const base = getBaseUrl(req)
 	const callbackUrl = `${base}/oauth/callback`
 	const ip = getClientIp(req)
 	const stateToken = db.tokens.createState({
-		sessionId,
+		mode: 'connect',
+		sessionId: session.id,
 		reauthAppId,
 		sessionName,
 		provider: provider.id,
@@ -816,7 +911,7 @@ async function handleCallback (req, res, query) {
 		return
 	}
 	const oauthState = db.tokens.consumeState(rawState)
-	if (!oauthState) {
+	if (!oauthState || (oauthState.mode !== null && oauthState.mode !== 'connect' && oauthState.mode !== 'auth' && oauthState.mode !== 'login')) {
 		res.statusCode = 403
 		res.setHeader('content-type', 'text/plain')
 		res.end('Invalid or expired OAuth state (CSRF verification failed). Please try connecting again.')
