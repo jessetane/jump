@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { validateBaseUrl } from '../util.js'
+import { validateBaseUrl, resolveTargetUrl, hasPathTraversal } from '../util.js'
 import googleConfig from './google.js'
 import githubConfig from './github.js'
 
@@ -330,26 +330,19 @@ function createProvider (config) {
 		},
 		normalizeTargetUrl (targetUrl, appToken) {
 			if (!targetUrl || typeof targetUrl !== 'string') return ''
-			let clean = targetUrl.trim()
-			if (clean.startsWith('https:/') && !clean.startsWith('https://')) {
-				clean = clean.replace(/^https:\/+/, 'https://')
-			}
-			if (clean.startsWith('http://') || clean.startsWith('https://')) {
-				return clean
-			}
-			const noLeadingSlash = clean.replace(/^\/+/, '')
 			const appBase = appToken?.credentials?.baseUrl || null
 			if (!appBase && hasWildcardHost) {
-				const slashIdx = noLeadingSlash.indexOf('/')
-				const firstSegment = slashIdx === -1 ? noLeadingSlash : noLeadingSlash.slice(0, slashIdx)
-				if (firstSegment.includes('.') && matchesAllowedHost(firstSegment, allowedHosts)) {
-					return `https://${noLeadingSlash}`
+				const clean = targetUrl.trim()
+				if (clean && !clean.startsWith('http://') && !clean.startsWith('https:/')) {
+					const noLeadingSlash = clean.replace(/^\/+/, '')
+					const slashIdx = noLeadingSlash.indexOf('/')
+					const firstSegment = slashIdx === -1 ? noLeadingSlash : noLeadingSlash.slice(0, slashIdx)
+					if (firstSegment.includes('.') && matchesAllowedHost(firstSegment, allowedHosts)) {
+						return `https://${noLeadingSlash}`
+					}
 				}
 			}
-			const base = appBase || baseUrl
-			if (!base) return clean
-			const cleanBase = base.replace(/\/+$/, '')
-			return `${cleanBase}/${noLeadingSlash}`
+			return resolveTargetUrl(targetUrl, appBase || baseUrl)
 		},
 		isAllowedUrl (urlString, appToken) {
 			let parsed
@@ -357,6 +350,9 @@ function createProvider (config) {
 				parsed = new URL(urlString)
 			} catch {
 				return { allowed: false, reason: `Invalid target URL: ${urlString}` }
+			}
+			if (hasPathTraversal(urlString) || hasPathTraversal(parsed.pathname)) {
+				return { allowed: false, reason: 'Invalid target URL: path traversal is not permitted' }
 			}
 			const appBase = appToken?.credentials?.baseUrl
 			if (appBase || (!baseUrl && allowedHosts.length === 0)) {

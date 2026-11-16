@@ -2,6 +2,8 @@ export {
 	getBody,
 	sendJson,
 	validateBaseUrl,
+	resolveTargetUrl,
+	hasPathTraversal,
 	parseAccountSpec
 }
 
@@ -53,19 +55,23 @@ function sendJson (res, data, status = 200, headers = null) {
 	res.end(typeof data === 'string' ? data : JSON.stringify(data, null, '\t'))
 }
 
-function isAllowedUpstreamHost (hostname) {
+function isLoopbackHost (hostname) {
 	if (!hostname || typeof hostname !== 'string') return false
 	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
-	const isLoopback = host === 'localhost' || host.endsWith('.localhost') || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
-	if (isLoopback) {
+	return host === 'localhost' || host.endsWith('.localhost') || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+}
+
+function isAllowedUpstreamHost (hostname) {
+	if (!hostname || typeof hostname !== 'string') return false
+	if (isLoopbackHost(hostname)) {
 		return process.env.NODE_ENV === 'test'
 	}
+	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
 	if (
 		host === '0.0.0.0' ||
 		host === '::' ||
-		host.startsWith('fe80:') ||
-		host.startsWith('fc') ||
-		host.startsWith('fd') ||
+		/^fe[89ab][0-9a-f]:/.test(host) ||
+		/^f[cd][0-9a-f]{2}:/.test(host) ||
 		host.startsWith('::ffff:') ||
 		/^0\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
 		/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
@@ -87,13 +93,33 @@ function validateBaseUrl (baseUrl) {
 		return null
 	}
 	if (!isAllowedUpstreamHost(parsed.hostname)) return null
-	const host = parsed.hostname.toLowerCase()
-	const isLocal = host === 'localhost' || host.endsWith('.localhost') || host === '127.0.0.1' || host === '[::1]'
-	if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLocal && process.env.NODE_ENV === 'test')) {
+	if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname) && process.env.NODE_ENV === 'test')) {
 		return null
 	}
 	const pathname = parsed.pathname.replace(/\/+$/, '')
 	return `${parsed.origin}${pathname}`
+}
+
+function resolveTargetUrl (targetUrl, baseUrl = null) {
+	if (!targetUrl || typeof targetUrl !== 'string') return ''
+	let clean = targetUrl.trim()
+	if (!clean) return ''
+	if (clean.startsWith('https:/') && !clean.startsWith('https://')) {
+		clean = clean.replace(/^https:\/+/, 'https://')
+	}
+	if (clean.startsWith('http://') || clean.startsWith('https://')) {
+		return clean
+	}
+	if (!baseUrl) return clean
+	const noLeadingSlash = clean.replace(/^\/+/, '')
+	const cleanBase = baseUrl.replace(/\/+$/, '')
+	return `${cleanBase}/${noLeadingSlash}`
+}
+
+function hasPathTraversal (urlOrPath) {
+	if (typeof urlOrPath !== 'string' || !urlOrPath) return false
+	const pathPart = urlOrPath.split(/[?#]/, 1)[0]
+	return /(?:^|\/|%2f|%5c)(?:\.\.|%2e\.|\.%2e|%2e%2e)(?:\/|%2f|%5c|$)/i.test(pathPart)
 }
 
 function getBody (req, maxBytes = 1024 * 1024) {

@@ -1,3 +1,5 @@
+import { resolveTargetUrl, hasPathTraversal } from './util.js'
+
 export {
 	evaluatePolicy,
 	matchPattern,
@@ -126,7 +128,7 @@ function matchFieldMap (expectedMap, actualObj) {
 
 function canonicalizePath (str) {
 	if (typeof str !== 'string') return ''
-	if (/(?:%2e%2e|%2e\.|%2E%2E|%2E\.|\.%2e|\.%2E)(?:[/?#]|$)/i.test(str) || /\/\.\.(?:[/?#]|$)/.test(str)) {
+	if (hasPathTraversal(str)) {
 		return null
 	}
 	let decoded = str.replace(/%([0-9a-fA-F]{2})/g, (match, hex) => {
@@ -253,17 +255,8 @@ function matchPattern (pattern, str) {
 }
 
 function normalizeUrl (targetUrl, baseUrl = null) {
-	if (!targetUrl || typeof targetUrl !== 'string') return null
-	let clean = targetUrl.trim()
-	if (clean.startsWith('https:/') && !clean.startsWith('https://')) {
-		clean = clean.replace(/^https:\/+/, 'https://')
-	}
-	let fullUrl = clean
-	if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
-		const noLeadingSlash = clean.replace(/^\/+/, '')
-		const cleanBase = (baseUrl || 'http://localhost').replace(/\/+$/, '')
-		fullUrl = `${cleanBase}/${noLeadingSlash}`
-	}
+	const fullUrl = resolveTargetUrl(targetUrl, baseUrl || 'http://localhost')
+	if (!fullUrl) return null
 	try {
 		return new URL(fullUrl)
 	} catch {
@@ -284,7 +277,7 @@ function evaluatePolicy (policy, req = {}) {
 		return { allowed: false, reason: 'Empty policy denies all requests' }
 	}
 	const reqMethod = (req.method || 'GET').toUpperCase()
-	if (typeof req.url === 'string' && (/(?:%2e%2e|%2e\.|%2E%2E|%2E\.|\.%2e|\.%2E)(?:[/?#]|$)/i.test(req.url) || /\/\.\.(?:[/?#]|$)/.test(req.url))) {
+	if (typeof req.url === 'string' && hasPathTraversal(req.url)) {
 		return { allowed: false, reason: 'Invalid path: path traversal is not permitted' }
 	}
 	const parsedUrl = req.url ? normalizeUrl(req.url, req.baseUrl) : null
