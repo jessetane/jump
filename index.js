@@ -64,6 +64,13 @@ const server = http.createServer(async (req, res) => {
 			res.end(indexHtml.replaceAll('{{APP_URL}}', base))
 			return
 		}
+		if (pathname === '/style.css' && (req.method === 'GET' || req.method === 'HEAD')) {
+			const styleCss = await fs.readFile(path.join(dirname, 'public/style.css'), 'utf8')
+			res.statusCode = 200
+			res.setHeader('content-type', 'text/css; charset=utf-8')
+			res.end(req.method === 'HEAD' ? undefined : styleCss)
+			return
+		}
 		if (pathname.startsWith('/api/')) {
 			await handleRest(req, res, { pathname, url, query, token })
 			return
