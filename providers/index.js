@@ -117,6 +117,22 @@ async function parseTokenResponse (res, fallbackErrorMsg) {
 	return data
 }
 
+function requireOauthEnv (envPrefix) {
+	const clientId = process.env[`${envPrefix}_CLIENT_ID`]
+	if (!clientId) {
+		const err = new Error(`${envPrefix}_CLIENT_ID environment variable is missing`)
+		err.status = 500
+		throw err
+	}
+	const clientSecret = process.env[`${envPrefix}_CLIENT_SECRET`]
+	if (!clientSecret) {
+		const err = new Error(`${envPrefix}_CLIENT_SECRET environment variable is missing`)
+		err.status = 500
+		throw err
+	}
+	return { clientId, clientSecret }
+}
+
 function createProvider (config) {
 	const rawConfig = typeof config === 'string' ? { id: config } : (config || {})
 	const id = String(rawConfig.id || '').toLowerCase()
@@ -158,13 +174,11 @@ function createProvider (config) {
 				: 'Target HTTPS URL (or relative path if baseUrl is configured on the app).'
 		},
 		...(oauth && {
+			requireEnv () {
+				return requireOauthEnv(envPrefix)
+			},
 			buildAuthUrl ({ state, callbackUrl, services: selectedServices = [], write = [], login = false, loginHint = null }) {
-				const clientId = process.env[`${envPrefix}_CLIENT_ID`]
-				if (!clientId) {
-					const err = new Error(`${envPrefix}_CLIENT_ID environment variable is missing`)
-					err.status = 500
-					throw err
-				}
+				const { clientId } = requireOauthEnv(envPrefix)
 				const scopes = login
 					? (oauth.baseScopes || []).join(' ')
 					: buildScopesFromSelection(services, oauth.baseScopes, selectedServices, write)
@@ -185,13 +199,7 @@ function createProvider (config) {
 				return u.toString()
 			},
 			async exchangeCode ({ code, callbackUrl }) {
-				const clientId = process.env[`${envPrefix}_CLIENT_ID`]
-				const clientSecret = process.env[`${envPrefix}_CLIENT_SECRET`]
-				if (!clientId || !clientSecret) {
-					const err = new Error(`${envPrefix}_CLIENT_ID or ${envPrefix}_CLIENT_SECRET environment variable is missing`)
-					err.status = 500
-					throw err
-				}
+				const { clientId, clientSecret } = requireOauthEnv(envPrefix)
 				const params = new URLSearchParams({
 					code,
 					client_id: clientId,
@@ -277,13 +285,7 @@ function createProvider (config) {
 					return inflightRefreshes.get(appToken.id)
 				}
 				const refreshPromise = (async () => {
-					const clientId = process.env[`${envPrefix}_CLIENT_ID`]
-					const clientSecret = process.env[`${envPrefix}_CLIENT_SECRET`]
-					if (!clientId || !clientSecret) {
-						const err = new Error(`${envPrefix}_CLIENT_ID or ${envPrefix}_CLIENT_SECRET environment variable is missing`)
-						err.status = 500
-						throw err
-					}
+					const { clientId, clientSecret } = requireOauthEnv(envPrefix)
 					const params = new URLSearchParams({
 						client_id: clientId,
 						client_secret: clientSecret,
@@ -402,7 +404,11 @@ function getProvider (name) {
 }
 
 function listAuthProviders () {
-	return Object.values(providers).filter(p => p.type === 'oauth' && Boolean(process.env[`${p.id.toUpperCase()}_CLIENT_ID`]))
+	return Object.values(providers).filter(p => {
+		if (p.type !== 'oauth') return false
+		const prefix = p.id.toUpperCase()
+		return Boolean(process.env[`${prefix}_CLIENT_ID`] && process.env[`${prefix}_CLIENT_SECRET`])
+	})
 }
 
 function requireAuthProvider (rawName) {

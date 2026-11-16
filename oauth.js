@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import * as db from './db/index.js'
 import { getProvider, listAuthProviders, requireAuthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
-import { getBody, sendJson } from './util.js'
+import { getBody, sendJson, isLoopbackHost } from './util.js'
 
 export {
 	handleOauth,
@@ -47,17 +47,17 @@ function getBaseUrl (req) {
 	if (req && req.headers && (req.headers['x-forwarded-host'] || req.headers.host)) {
 		const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host).split(',')[0].trim().toLowerCase()
 		if (rawHost) {
-			const isLocal = rawHost.startsWith('localhost') || rawHost.startsWith('127.0.0.1') || rawHost.startsWith('[::1]')
-			const rawProto = String(req.headers['x-forwarded-proto'] || (isLocal ? 'http' : 'https')).split(',')[0].trim().toLowerCase()
-			if (rawProto === 'http' || rawProto === 'https') {
-				try {
-					const candidate = `${rawProto}://${rawHost}`
-					const parsed = new URL(candidate)
-					if (!parsed.username && !parsed.password && (parsed.host === rawHost || parsed.origin === candidate)) {
-						return parsed.origin
-					}
-				} catch {}
-			}
+			try {
+				const parsed = new URL(`http://${rawHost}`)
+				const isLocal = isLoopbackHost(parsed.hostname)
+				const rawProto = String(req.headers['x-forwarded-proto'] || (isLocal ? 'http' : 'https')).split(',')[0].trim().toLowerCase()
+				const validHost = parsed.host === rawHost || (!parsed.port && rawHost === `${parsed.hostname}:80`)
+				if ((rawProto === 'http' || rawProto === 'https') && parsed.port !== '0' && !parsed.username && !parsed.password && parsed.pathname === '/' && !parsed.search && !parsed.hash && validHost) {
+					const port = parsed.port || (rawHost === `${parsed.hostname}:80` ? '80' : '')
+					const effectivePort = (rawProto === 'https' && port === '443') || (rawProto === 'http' && port === '80') ? '' : port
+					return `${rawProto}://${parsed.hostname}${effectivePort ? `:${effectivePort}` : ''}`
+				}
+			} catch {}
 		}
 	}
 	return 'http://localhost:8080'
@@ -157,7 +157,7 @@ function isAllowedRedirectUri (redirectUri) {
 	const protocol = url.protocol.toLowerCase()
 	if (DISALLOWED_REDIRECT_SCHEMES.has(protocol)) return false
 	const hostname = url.hostname.toLowerCase()
-	const isLoopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+	const isLoopback = isLoopbackHost(hostname)
 	if (protocol === 'http:') {
 		return isLoopback
 	}
@@ -503,7 +503,7 @@ async function handleAuthorizeConsent (req, res) {
 	}
 	let linkSession = null
 	if (setupCode) {
-		const setup = db.tokens.consumeState(setupCode)
+		const setup = db.tokens.getState(setupCode)
 		linkSession = resolveSetupState(setup, 'setup_link')
 		if (!linkSession) {
 			res.statusCode = 403
@@ -533,6 +533,16 @@ async function handleAuthorizeConsent (req, res) {
 		return
 	}
 	if (linkSession && !enforceSso(res, () => assertSsoLink(db.logins.listByUserId(linkSession.userId), provider.id))) return
+	if (setupCode) {
+		const consumed = db.tokens.consumeState(setupCode)
+		linkSession = resolveSetupState(consumed, 'setup_link')
+		if (!linkSession) {
+			res.statusCode = 403
+			res.setHeader('content-type', 'text/plain')
+			res.end('Access denied: invalid or expired setup code.')
+			return
+		}
+	}
 	const callbackUrl = `${base}/oauth/callback`
 	const stateToken = db.tokens.createState({
 		mode: linkSession ? 'auth' : 'login',
@@ -547,19 +557,11 @@ async function handleAuthorizeConsent (req, res) {
 		sessionId: linkSession ? linkSession.id : null,
 		ip
 	})
-	let authUrl
-	try {
-		authUrl = provider.buildAuthUrl({
-			state: stateToken,
-			callbackUrl,
-			login: true
-		})
-	} catch (err) {
-		res.statusCode = err.status || 500
-		res.setHeader('content-type', 'text/plain')
-		res.end(err.message)
-		return
-	}
+	const authUrl = provider.buildAuthUrl({
+		state: stateToken,
+		callbackUrl,
+		login: true
+	})
 	res.statusCode = 302
 	res.setHeader('location', authUrl)
 	res.end()
@@ -642,6 +644,18 @@ async function handleVerify (req, res, query) {
 	})
 }
 
+function requireProviderEnv (res, provider) {
+	try {
+		provider.requireEnv()
+		return true
+	} catch (err) {
+		res.statusCode = err.status || 500
+		res.setHeader('content-type', 'text/plain')
+		res.end(err.message)
+		return false
+	}
+}
+
 function getOwnedOauthApp (session, appId, providerId) {
 	if (!session?.admin || !appId) return null
 	const app = db.tokens.get(appId)
@@ -656,6 +670,7 @@ async function handleProviderConnect (req, res, query, providerName = 'google') 
 		err.status = 404
 		throw err
 	}
+	if (!requireProviderEnv(res, provider)) return
 	if (query.session_id !== undefined) {
 		res.statusCode = 403
 		res.setHeader('content-type', 'text/plain')
@@ -725,6 +740,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		err.status = 404
 		throw err
 	}
+	if (!requireProviderEnv(res, provider)) return
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
 	const servicesList = []
@@ -786,21 +802,13 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		provider: provider.id,
 		ip
 	})
-	let authUrl
-	try {
-		authUrl = provider.buildAuthUrl({
-			state: stateToken,
-			callbackUrl,
-			services: servicesList,
-			write: writeList,
-			loginHint: existingApp?.credentials?.account || null
-		})
-	} catch (err) {
-		res.statusCode = err.status || 500
-		res.setHeader('content-type', 'text/plain')
-		res.end(err.message)
-		return
-	}
+	const authUrl = provider.buildAuthUrl({
+		state: stateToken,
+		callbackUrl,
+		services: servicesList,
+		write: writeList,
+		loginHint: existingApp?.credentials?.account || null
+	})
 	res.statusCode = 302
 	res.setHeader('location', authUrl)
 	res.end()
@@ -1045,8 +1053,8 @@ async function handleToken (req, res) {
 		sendJson(res, { error: 'invalid_grant', error_description: 'redirect_uri mismatch' }, 400)
 		return
 	}
-	if (authCode.clientId && params.client_id && authCode.clientId !== params.client_id) {
-		console.warn(`[oauth] Token exchange failed: client_id mismatch (expected "${authCode.clientId}", got "${params.client_id}")`)
+	if (authCode.clientId && authCode.clientId !== params.client_id) {
+		console.warn(`[oauth] Token exchange failed: client_id mismatch (expected "${authCode.clientId}", got "${params.client_id || '(missing)'}")`)
 		sendJson(res, { error: 'invalid_grant', error_description: 'client_id mismatch' }, 400)
 		return
 	}
