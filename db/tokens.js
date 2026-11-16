@@ -548,10 +548,11 @@ function createState (opts = {}) {
 		reauthAppId = null,
 		sessionId = null,
 		provider = null,
-		ip = null
+		ip = null,
+		ttl = 15 * 60 * 1000
 	} = opts
 	const state = randomBytes(24).toString('base64url')
-	const expiresAt = Date.now() + 15 * 60 * 1000
+	const expiresAt = Date.now() + ttl
 	create({
 		id: state,
 		userId,
@@ -583,9 +584,7 @@ function getState (state) {
 
 function consumeState (state) {
 	if (!state) return null
-	const row = sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?)").get(state, Date.now())
-	if (!row) return null
-	sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(state)
+	const row = sqlite.prepare("DELETE FROM tokens WHERE id = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?) RETURNING *").get(state, Date.now())
 	return formatState(row)
 }
 
@@ -626,9 +625,8 @@ function createAuthCode (opts = {}) {
 
 function consumeAuthCode (code) {
 	if (!code) return null
-	const row = sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_code' AND (expires_at IS NULL OR expires_at > ?)").get(code, Date.now())
+	const row = sqlite.prepare("DELETE FROM tokens WHERE id = ? AND type = 'oauth_code' AND (expires_at IS NULL OR expires_at > ?) RETURNING *").get(code, Date.now())
 	if (!row) return null
-	sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(code)
 	const tok = formatToken(row)
 	const meta = tok.credentials || {}
 	return {
