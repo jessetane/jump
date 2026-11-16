@@ -108,6 +108,13 @@ test('root endpoint', async () => {
 	assert.match(text, /jump/)
 	assert.match(text, /\/mcp/)
 	assert.match(text, /href="\/oauth\/authorize"/)
+	assert.match(text, /href="\/style\.css"/)
+	const cssRes = await fetch(`http://127.0.0.1:${addr.port}/style.css`)
+	assert.equal(cssRes.status, 200)
+	assert.equal(cssRes.headers.get('content-type'), 'text/css; charset=utf-8')
+	const cssText = await cssRes.text()
+	assert.match(cssText, /\.view\s*\{/)
+	assert.match(cssText, /@media\s*\(min-width:\s*520px\)/)
 })
 
 test('mcp initialize & tools/list and RFC 9728 401 WWW-Authenticate when unauthenticated', async () => {
@@ -1212,6 +1219,17 @@ test('mcp invalid json returns jsonrpc parse error', async () => {
 	const data = await res.json()
 	assert.equal(data.jsonrpc, '2.0')
 	assert.equal(data.error?.code, -32700)
+	for (const endpoint of ['/oauth/token', '/oauth/revoke']) {
+		const badOauthJson = await fetch(`http://127.0.0.1:${addr.port}${endpoint}`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: '{"corrupt'
+		})
+		assert.equal(badOauthJson.status, 400, `${endpoint} fails loud with 400 on malformed JSON body`)
+		const badOauthData = await badOauthJson.json()
+		assert.equal(badOauthData.error, 'invalid_request')
+		assert.match(badOauthData.error_description, /Invalid JSON body/)
+	}
 })
 
 test('mcp non-POST request returns 405 Method Not Allowed', async () => {
