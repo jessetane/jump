@@ -1,5 +1,6 @@
 import { sqlite } from './index.js'
-import { userAccountSql } from './logins.js'
+import { userAccountSql } from './users.js'
+import { requireBoolean } from '../util.js'
 import { randomUUID } from 'node:crypto'
 
 export {
@@ -51,12 +52,6 @@ function format (row) {
 		error: row.error,
 		created: row.created
 	}
-}
-
-function normalizeAllowed (allowed) {
-	if (allowed === true || allowed === 'true' || allowed === 1 || allowed === '1') return 1
-	if (allowed === false || allowed === 'false' || allowed === 0 || allowed === '0') return 0
-	return undefined
 }
 
 function prune (maxAgeMs = RETENTION_MS) {
@@ -138,10 +133,10 @@ function listByUserId (userId, opts = {}) {
 		query += ' AND logs.provider = ?'
 		params.push(provider)
 	}
-	const normalizedAllowed = normalizeAllowed(allowed)
-	if (normalizedAllowed !== undefined) {
+	const parsedAllowed = requireBoolean(allowed, 'allowed')
+	if (parsedAllowed !== undefined) {
 		query += ' AND logs.allowed = ?'
-		params.push(normalizedAllowed)
+		params.push(parsedAllowed ? 1 : 0)
 	}
 	const clampedLimit = Math.max(1, Math.min(Number(limit) || 100, 1000))
 	query += ' ORDER BY logs.created DESC, logs.rowid DESC LIMIT ?'

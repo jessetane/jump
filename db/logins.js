@@ -12,8 +12,7 @@ export {
 	findUserByAccount,
 	upsert,
 	remove,
-	resolveUser,
-	userAccountSql
+	resolveUser
 }
 
 const CREATE_LOGINS_SQL = `
@@ -29,10 +28,6 @@ const CREATE_LOGINS_SQL = `
 	CREATE INDEX IF NOT EXISTS idx_logins_user ON logins(user_id);
 	CREATE INDEX IF NOT EXISTS idx_logins_account ON logins(account);
 `
-
-function userAccountSql (userIdExpr) {
-	return `COALESCE((SELECT l.account FROM logins AS l WHERE l.user_id = ${userIdExpr} ORDER BY l.created ASC, l.rowid ASC LIMIT 1), 'localhost')`
-}
 
 function formatLogin (row) {
 	if (!row) return null

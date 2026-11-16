@@ -5,7 +5,12 @@ export {
 	init,
 	create,
 	get,
+	userAccountSql,
 	CREATE_USERS_SQL
+}
+
+function userAccountSql (userIdExpr) {
+	return `COALESCE((SELECT l.account FROM logins AS l WHERE l.user_id = ${userIdExpr} ORDER BY l.created ASC, l.rowid ASC LIMIT 1), 'localhost')`
 }
 
 const CREATE_USERS_SQL = `

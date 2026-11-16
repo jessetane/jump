@@ -1,10 +1,161 @@
 export {
 	getBody,
 	sendJson,
+	isLoopbackHost,
+	isXml,
 	validateBaseUrl,
 	resolveTargetUrl,
 	hasPathTraversal,
-	parseAccountSpec
+	parseAccountSpec,
+	requireBoolean
+}
+
+function isXmlNameStart (code) {
+	return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95
+}
+
+function isXmlNameChar (code) {
+	return isXmlNameStart(code) || (code >= 48 && code <= 57) || code === 58 || code === 45 || code === 46
+}
+
+function readXmlName (s, start) {
+	if (start >= s.length || !isXmlNameStart(s.charCodeAt(start))) return -1
+	let i = start + 1
+	while (i < s.length && isXmlNameChar(s.charCodeAt(i))) i++
+	return i
+}
+
+function scanXmlDelimited (s, start, mode) {
+	let quote = null
+	let bracketDepth = 0
+	for (let i = start; i < s.length; i++) {
+		const ch = s[i]
+		if (quote) {
+			if (ch === quote) quote = null
+			continue
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch
+			continue
+		}
+		if (mode === 'doctype') {
+			if (ch === '[') {
+				bracketDepth++
+				continue
+			}
+			if (ch === ']' && bracketDepth > 0) {
+				bracketDepth--
+				continue
+			}
+			if (bracketDepth === 0 && ch === '>') return { end: i + 1 }
+			continue
+		}
+		if (mode === 'pi') {
+			if (ch === '?' && s[i + 1] === '>') return { end: i + 2 }
+			continue
+		}
+		if (ch === '/') {
+			if (s[i + 1] === '>') return { end: i + 2, selfClose: true }
+			return null
+		}
+		if (ch === '>') return { end: i + 1, selfClose: false }
+	}
+	return null
+}
+
+function isXml (str) {
+	if (typeof str !== 'string') return false
+	const s = str.trim()
+	const n = s.length
+	if (!n || s[0] !== '<') return false
+	let i = 0
+	const stack = []
+	let rootSeen = false
+	let rootClosed = false
+	while (i < n) {
+		if (stack.length === 0) {
+			while (i < n && s.charCodeAt(i) <= 32) i++
+			if (i >= n) break
+			if (s[i] !== '<') return false
+		} else {
+			const nextLt = s.indexOf('<', i)
+			if (nextLt === -1) return false
+			i = nextLt
+		}
+		if (s.startsWith('<!--', i)) {
+			const end = s.indexOf('-->', i + 4)
+			if (end === -1) return false
+			i = end + 3
+			continue
+		}
+		if (s.startsWith('<![CDATA[', i)) {
+			if (stack.length === 0) return false
+			const end = s.indexOf(']]>', i + 9)
+			if (end === -1) return false
+			i = end + 3
+			continue
+		}
+		if (s.startsWith('<?', i)) {
+			const nameEnd = readXmlName(s, i + 2)
+			if (nameEnd === -1) return false
+			if (s.charCodeAt(nameEnd) > 32 && !s.startsWith('?>', nameEnd)) return false
+			const res = scanXmlDelimited(s, nameEnd, 'pi')
+			if (!res) return false
+			i = res.end
+			continue
+		}
+		if (s.startsWith('<!', i)) {
+			if (rootSeen || stack.length > 0) return false
+			const nameEnd = readXmlName(s, i + 2)
+			if (nameEnd === -1 || (s.charCodeAt(nameEnd) > 32 && s[nameEnd] !== '>')) return false
+			const res = scanXmlDelimited(s, nameEnd, 'doctype')
+			if (!res) return false
+			i = res.end
+			continue
+		}
+		if (s.startsWith('</', i)) {
+			const nameEnd = readXmlName(s, i + 2)
+			if (nameEnd === -1) return false
+			const tagName = s.slice(i + 2, nameEnd)
+			let j = nameEnd
+			while (j < n && s.charCodeAt(j) <= 32) j++
+			if (s[j] !== '>' || stack.pop() !== tagName) return false
+			if (stack.length === 0) rootClosed = true
+			i = j + 1
+			continue
+		}
+		if (rootClosed) return false
+		const nameEnd = readXmlName(s, i + 1)
+		if (nameEnd === -1) return false
+		const tagName = s.slice(i + 1, nameEnd)
+		const nextCh = s[nameEnd]
+		if (s.charCodeAt(nameEnd) > 32 && nextCh !== '>' && nextCh !== '/') return false
+		const res = scanXmlDelimited(s, nameEnd, 'tag')
+		if (!res) return false
+		rootSeen = true
+		if (res.selfClose) {
+			if (stack.length === 0) rootClosed = true
+		} else {
+			stack.push(tagName)
+		}
+		i = res.end
+	}
+	return rootSeen && rootClosed && stack.length === 0
+}
+
+function requireBoolean (val, name, defaultValue = undefined) {
+	if (val === undefined) return defaultValue
+	if (typeof val === 'boolean') return val
+	if (val === 1) return true
+	if (val === 0) return false
+	if (typeof val === 'string') {
+		const lower = val.trim().toLowerCase()
+		if (lower === 'true' || lower === '1') return true
+		if (lower === 'false' || lower === '0') return false
+	}
+	const err = new Error(`${name} must be a boolean`)
+	err.status = 400
+	throw err
 }
 
 function parseAccountSpec (rawAccount, rawProvider = null) {
@@ -119,7 +270,7 @@ function resolveTargetUrl (targetUrl, baseUrl = null) {
 function hasPathTraversal (urlOrPath) {
 	if (typeof urlOrPath !== 'string' || !urlOrPath) return false
 	const pathPart = urlOrPath.split(/[?#]/, 1)[0]
-	return /(?:^|\/|%2f|%5c)(?:\.\.|%2e\.|\.%2e|%2e%2e)(?:\/|%2f|%5c|$)/i.test(pathPart)
+	return /(?:^|\/|\\|%2f|%5c)(?:\.\.|%2e\.|\.%2e|%2e%2e)(?:\/|\\|%2f|%5c|$)/i.test(pathPart)
 }
 
 function getBody (req, maxBytes = 1024 * 1024) {

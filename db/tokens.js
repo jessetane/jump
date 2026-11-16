@@ -1,5 +1,5 @@
 import { sqlite } from './index.js'
-import { userAccountSql } from './logins.js'
+import { userAccountSql } from './users.js'
 import { parseAccountSpec } from '../util.js'
 import { randomUUID, randomBytes } from 'node:crypto'
 
@@ -449,18 +449,29 @@ function removeShare ({ account = null, provider = null, appId }) {
 }
 
 function updateCredentials (id, opts = {}) {
-	const { credentials, expiresAt = null, scopes = null, name = null } = opts
+	const sets = []
+	const params = []
+	if (opts.credentials !== undefined) {
+		const credsJson = opts.credentials && typeof opts.credentials === 'object' ? JSON.stringify(opts.credentials) : opts.credentials
+		sets.push('credentials = ?')
+		params.push(credsJson)
+	}
+	if (opts.expiresAt !== undefined) {
+		sets.push('expires_at = ?')
+		params.push(opts.expiresAt)
+	}
+	if (opts.scopes !== undefined) {
+		sets.push('scopes = ?')
+		params.push(opts.scopes)
+	}
+	if (opts.name !== undefined) {
+		sets.push('name = ?')
+		params.push(opts.name)
+	}
 	const now = new Date().toISOString()
-	const credsJson = credentials && typeof credentials === 'object' ? JSON.stringify(credentials) : credentials
-	sqlite.prepare(`
-		UPDATE tokens
-		SET credentials = COALESCE(?, credentials),
-			expires_at = COALESCE(?, expires_at),
-			scopes = COALESCE(?, scopes),
-			name = COALESCE(?, name),
-			updated = ?
-		WHERE id = ?
-	`).run(credsJson, expiresAt, scopes, name, now, id)
+	sets.push('updated = ?')
+	params.push(now, id)
+	sqlite.prepare(`UPDATE tokens SET ${sets.join(', ')} WHERE id = ?`).run(...params)
 	return get(id)
 }
 
