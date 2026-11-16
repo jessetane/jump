@@ -29,6 +29,7 @@ const { isAllowedRedirectUri, deriveClientName, getBaseUrl } = await import('../
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
 const { parseSsoDomains, shouldClaimUnscoped } = await import('../sso.js')
+const { validateBaseUrl, resolveTargetUrl, hasPathTraversal } = await import('../util.js')
 
 function createTestSession (opts = {}) {
 	const {
@@ -258,6 +259,7 @@ test('mcp rejects unknown tool call', async () => {
 
 test('google.isAllowedUrl domain restrictions', () => {
 	assert.equal(isGoogleAllowedUrl('https://www.googleapis.com/drive/v3/files').allowed, true)
+	assert.equal(isGoogleAllowedUrl('https://fcm.googleapis.com/v1/projects/myproj/messages:send').allowed, true)
 	assert.equal(isGoogleAllowedUrl('https://sheets.googleapis.com/v4/spreadsheets').allowed, true)
 	assert.equal(isGoogleAllowedUrl('https://docs.googleapis.com/v1/documents').allowed, true)
 	assert.equal(isGoogleAllowedUrl('https://calendar.googleapis.com/calendar/v3/events').allowed, true)
@@ -267,6 +269,26 @@ test('google.isAllowedUrl domain restrictions', () => {
 	assert.equal(isGoogleAllowedUrl('https://evilgoogleapis.com').allowed, false)
 	assert.equal(isGoogleAllowedUrl('https://localhost:8080').allowed, false)
 	assert.equal(isGoogleAllowedUrl('not-a-url').allowed, false)
+	assert.equal(validateBaseUrl('https://fcc.gov/api/v1'), 'https://fcc.gov/api/v1')
+	assert.equal(validateBaseUrl('https://fda.gov/v1/drugs/'), 'https://fda.gov/v1/drugs')
+	assert.equal(validateBaseUrl('https://fcm.googleapis.com'), 'https://fcm.googleapis.com')
+	assert.equal(validateBaseUrl('https://[fc00::1]'), null)
+	assert.equal(validateBaseUrl('https://[fd12:3456::1]'), null)
+	assert.equal(validateBaseUrl('https://[fe80::1]'), null)
+	assert.equal(validateBaseUrl('https://[feb0::1]'), null)
+	assert.equal(resolveTargetUrl('https:/api.example.com/v1/items'), 'https://api.example.com/v1/items')
+	assert.equal(resolveTargetUrl('/v1/items', 'https://api.example.com/base/'), 'https://api.example.com/base/v1/items')
+	assert.equal(resolveTargetUrl('v1/items', null), 'v1/items')
+	assert.equal(hasPathTraversal('/v2/tenant-a/%2e%2e/tenant-b'), true)
+	assert.equal(hasPathTraversal('/v2/commits/v1.0..v2.0?q=..'), false)
+	const scopedProv = createProvider({ id: 'scoped_test', baseUrl: 'https://api.custom.dev/v2/tenant-a' })
+	assert.equal(scopedProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a/items').allowed, true)
+	assert.equal(scopedProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a/commits/v1..v2').allowed, true)
+	assert.equal(scopedProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a/%2e%2e/tenant-b').allowed, false)
+	assert.equal(scopedProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a/../tenant-b').allowed, false)
+	const appScopedProv = createProvider('app_scoped_test')
+	const appTokenScoped = { credentials: { baseUrl: 'https://api.custom.dev/v2/tenant-a' } }
+	assert.equal(appScopedProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a/%2e%2e/tenant-b', appTokenScoped).allowed, false)
 })
 
 test('summarizeScopes formats provider service scope combinations concisely', () => {
@@ -3869,16 +3891,27 @@ test('provider_api fail-loud on unlinked session or missing appId', async () => 
 		userId: user.id,
 		provider: 'self'
 	})
+	const adminSessionNoApps = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		admin: 1
+	})
 	const noAppRes = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/drive/v3/files'
 	}, sessionNoApps.token)
 	assert.equal(noAppRes.isError, true)
-	assert.match(noAppRes.content[0].text, /No Google app linked to session/)
+	assert.match(noAppRes.content[0].text, /No Google app linked to session\. Ask an admin to link one\./)
+	assert.doesNotMatch(noAppRes.content[0].text, /\/providers\/google\/connect/)
+	const adminNoAppRes = await executeTool('google_api', {
+		url: 'https://www.googleapis.com/drive/v3/files'
+	}, adminSessionNoApps.token)
+	assert.equal(adminNoAppRes.isError, true)
+	assert.match(adminNoAppRes.content[0].text, /No Google app linked to session\. Use connect_app or link_app to attach one\./)
 	const noStripeRes = await executeTool('stripe_api', {
 		url: '/v1/customers'
 	}, sessionNoApps.token)
 	assert.equal(noStripeRes.isError, true)
-	assert.match(noStripeRes.content[0].text, /No Stripe app linked to session/)
+	assert.match(noStripeRes.content[0].text, /No Stripe app linked to session\. Ask an admin to link one\./)
 	const { session } = createTestSession({ account: 'linked-fail@example.com' })
 	const invalidAppRes = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/drive/v3/files',
