@@ -29,7 +29,7 @@ const { isAllowedRedirectUri, deriveClientName, getBaseUrl } = await import('../
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
 const { parseSsoDomains, shouldClaimUnscoped } = await import('../sso.js')
-const { validateBaseUrl, resolveTargetUrl, hasPathTraversal } = await import('../util.js')
+const { validateBaseUrl, resolveTargetUrl, hasPathTraversal, isXml } = await import('../util.js')
 
 function createTestSession (opts = {}) {
 	const {
@@ -1831,6 +1831,46 @@ test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON
 		method: 'POST',
 		body: '<x>=1&currency=btc'
 	}).allowed, false, 'Form-urlencoded string starting with < without explicit contentType must still match body deny rules')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/form', body: { '<foo>': 'bar>' } }
+	], {
+		url: 'https://api.stripe.com/v1/form',
+		method: 'POST',
+		body: '<foo>=bar>'
+	}).allowed, true, 'Form-urlencoded <foo>=bar> without contentType must not be misclassified as XML')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/form', body: { '<a': '1', b: '2>' } }
+	], {
+		url: 'https://api.stripe.com/v1/form',
+		method: 'POST',
+		body: '<a=1&b=2>'
+	}).allowed, true, 'Form-urlencoded <a=1&b=2> without contentType must not be misclassified as XML')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/form', body: { '<a>': '1', b: '<a>2</a>' } }
+	], {
+		url: 'https://api.stripe.com/v1/form',
+		method: 'POST',
+		body: '<a>=1&b=<a>2</a>'
+	}).allowed, true, 'Unbalanced <a>=1&b=<a>2</a> form body must not be misclassified as XML')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/xml', body: { '<Ping': '*' } }
+	], {
+		url: 'https://api.example.com/xml',
+		method: 'POST',
+		body: '<?xml version="1.0"?><!-- comment --><Ping attr="1"/>'
+	}).allowed, false, 'Genuine self-closing XML with declaration and comment must not be parsed as form-urlencoded')
+	assert.equal(isXml('<!DOCTYPE note><note>a=1</note>'), true)
+	assert.equal(isXml('<!DOCTYPE note SYSTEM "https://example.com/a>b.dtd"><note/>'), true)
+	assert.equal(isXml('<?xml-stylesheet type="text/xsl" href="style.xsl"?><root/>'), true)
+	assert.equal(isXml('<?xml version="1.0"?><?xml-stylesheet type="text/xsl" href="style.xsl"?><!DOCTYPE note [<!ELEMENT note (#PCDATA)>]><note>a=1</note>'), true)
+	assert.equal(isXml('<?xml version="1.0"?>'), false, 'Bare XML declaration without root element must return false')
+	assert.equal(isXml('<!DOCTYPE a=1&b=2>'), false, 'Bare DOCTYPE without root element must return false')
+	assert.equal(isXml('<foo>=bar>'), false)
+	assert.equal(isXml('<a=1&b=2>'), false)
+	assert.equal(isXml('<a>=1&b=<a>2</a>'), false)
+	const redosStart = performance.now()
+	assert.equal(isXml(`<a ${' '.repeat(5000)}b="c"`), false)
+	assert.ok(performance.now() - redosStart < 5, 'isXml must finish in linear time on long unclosed tags')
 	assert.equal(evaluatePolicy([
 		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null] } }
 	], {
@@ -5484,6 +5524,505 @@ test('redactLogArgs scrubs credentials and auth headers without mutating input',
 	assert.deepEqual(redacted.body, { amount: 500 })
 	assert.equal(raw.apiKey, 'sk_live_secret_123', 'Original args must not be mutated')
 	assert.equal(raw.headers.Authorization, 'Bearer secret', 'Original headers must not be mutated')
+})
+
+test('pass 1 security & validation fixes', async () => {
+	const addr = server.address()
+	assert.equal(hasPathTraversal('https://www.googleapis.com/drive/v3\\..\\..\\oauth2/v2/userinfo'), true)
+	assert.equal(hasPathTraversal('/v2/tenant-a\\..\\tenant-b'), true)
+	assert.equal(hasPathTraversal('..\\secret'), true)
+	assert.equal(hasPathTraversal('v1\\..'), true)
+	assert.equal(isGoogleAllowedUrl('https://www.googleapis.com/drive/v3\\..\\..\\oauth2/v2/userinfo').allowed, false)
+	const scopedProv = createProvider({ id: 'scoped_backslash', baseUrl: 'https://api.custom.dev/v2/tenant-a' })
+	assert.equal(scopedProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a\\..\\tenant-b').allowed, false)
+	assert.equal(evaluatePolicy([{ action: 'allow' }], {
+		url: 'https://www.googleapis.com/drive/v3\\..\\..\\oauth2/v2/userinfo'
+	}).allowed, false)
+	assert.equal(getBaseUrl({ headers: { host: 'localhost.evil.com' } }), 'https://localhost.evil.com')
+	assert.equal(getBaseUrl({ headers: { host: '127.0.0.1.evil.com' } }), 'https://127.0.0.1.evil.com')
+	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'jump.acme.com:443', 'x-forwarded-proto': 'https' } }), 'https://jump.acme.com')
+	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com:80', 'x-forwarded-proto': 'http' } }), 'http://jump.acme.com')
+	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com:80', 'x-forwarded-proto': 'https' } }), 'https://jump.acme.com:80')
+	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com:' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ headers: { host: 'a.com:0' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ headers: { host: 'localhost:80' } }), 'http://localhost')
+	assert.equal(getBaseUrl({ headers: { host: '[::1]:8080' } }), 'http://[::1]:8080')
+	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com?foo=bar' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com#frag' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ headers: { host: '@jump.acme.com' } }), 'http://localhost:8080')
+	const user = db.logins.resolveUser('google', 'pass1-fixes@example.com')
+	const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
+	const oauthApp = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Nullable Test App',
+		credentials: { accessToken: 'ya29.init', refreshToken: '1//init' },
+		expiresAt: Date.now() + 3600000,
+		scopes: 'scope.a scope.b'
+	})
+	const untouchedUpdate = db.tokens.updateCredentials(oauthApp.id, {
+		credentials: { accessToken: 'ya29.step1', refreshToken: '1//init' }
+	})
+	assert.ok(untouchedUpdate.expiresAt > Date.now(), 'Omitted expiresAt remains untouched')
+	assert.equal(untouchedUpdate.scopes, 'scope.a scope.b', 'Omitted scopes remains untouched')
+	assert.equal(untouchedUpdate.name, 'Nullable Test App', 'Omitted name remains untouched')
+	const clearedUpdate = db.tokens.updateCredentials(oauthApp.id, {
+		credentials: { accessToken: 'ya29.step2', refreshToken: '1//init' },
+		expiresAt: null,
+		scopes: null
+	})
+	assert.equal(clearedUpdate.expiresAt, null, 'Explicit expiresAt: null clears stale expiration')
+	assert.equal(clearedUpdate.scopes, null, 'Explicit scopes: null clears stale scopes')
+	assert.equal(clearedUpdate.name, 'Nullable Test App')
+	const prevGhId = process.env.GITHUB_CLIENT_ID
+	const prevGhSecret = process.env.GITHUB_CLIENT_SECRET
+	try {
+		process.env.GITHUB_CLIENT_ID = 'gh-only-id'
+		delete process.env.GITHUB_CLIENT_SECRET
+		assert.equal(listAuthProviders().some(p => p.id === 'github'), false, 'Provider without CLIENT_SECRET must not be advertised')
+		assert.throws(() => requireAuthProvider('github'), /Invalid or unsupported OAuth provider: github/)
+		const missingSecretConnectRes = await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'github'
+		}, adminSession.token)
+		assert.equal(missingSecretConnectRes.isError, true, 'connect_app must fail loud when CLIENT_SECRET is missing')
+		assert.match(missingSecretConnectRes.content[0].text, /Invalid or unsupported OAuth provider: github/)
+		const ghSetupWithoutSecret = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSession.id, provider: 'github' })
+		const stateCountBefore = db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE type = 'oauth_state'").get().count
+		const missingSecretConnectPageRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/connect?code=${ghSetupWithoutSecret}`)
+		assert.equal(missingSecretConnectPageRes.status, 500, 'GET /providers/:provider/connect must fail loud upfront when CLIENT_SECRET is missing')
+		assert.match(await missingSecretConnectPageRes.text(), /GITHUB_CLIENT_SECRET environment variable is missing/)
+		const missingSecretConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: ghSetupWithoutSecret }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(missingSecretConsentRes.status, 500, 'POST /providers/:provider/consent must fail loud upfront when CLIENT_SECRET is missing')
+		assert.match(await missingSecretConsentRes.text(), /GITHUB_CLIENT_SECRET environment variable is missing/)
+		assert.ok(db.tokens.getState(ghSetupWithoutSecret), 'Upfront CLIENT_SECRET failure must not consume single-use setupCode')
+		assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE type = 'oauth_state'").get().count, stateCountBefore, 'Upfront CLIENT_SECRET failure must not leak orphaned oauth_state rows')
+		const linkSetupWithoutSecret = db.tokens.createState({ mode: 'setup_link', sessionId: adminSession.id, provider: 'github' })
+		const missingSecretAuthConsentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: linkSetupWithoutSecret, provider: 'github' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(missingSecretAuthConsentRes.status, 400, 'POST /oauth/authorize/consent must reject unconfigured provider with 400')
+		assert.ok(db.tokens.getState(linkSetupWithoutSecret), 'Failed requireAuthProvider on /oauth/authorize/consent must not burn setupCode')
+		process.env.GITHUB_CLIENT_SECRET = 'gh-secret'
+		assert.equal(listAuthProviders().some(p => p.id === 'github'), true)
+		const recoveredConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: ghSetupWithoutSecret }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(recoveredConsentRes.status, 302, 'Unconsumed setupCode remains valid once env is restored')
+		const recoveredAuthConsentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: linkSetupWithoutSecret, provider: 'github' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(recoveredAuthConsentRes.status, 302, 'Unconsumed setup_link code remains valid once env is restored')
+		assert.equal(db.tokens.getState(linkSetupWithoutSecret), null, 'setup_link code is consumed once consent succeeds')
+	} finally {
+		if (prevGhId === undefined) delete process.env.GITHUB_CLIENT_ID
+		else process.env.GITHUB_CLIENT_ID = prevGhId
+		if (prevGhSecret === undefined) delete process.env.GITHUB_CLIENT_SECRET
+		else process.env.GITHUB_CLIENT_SECRET = prevGhSecret
+	}
+	const stripeApp = db.tokens.create({
+		userId: user.id,
+		provider: 'stripe',
+		type: 'api_key',
+		name: 'Stripe Existing',
+		credentials: { apiKey: 'sk_existing', baseUrl: 'https://api.stripe.com' }
+	})
+	const ghPatApp = db.tokens.create({
+		userId: user.id,
+		provider: 'github',
+		type: 'api_key',
+		name: 'GitHub PAT Existing',
+		credentials: { apiKey: 'ghp_existing', baseUrl: 'https://api.github.com' }
+	})
+	const appCountBefore = db.tokens.listByUserId(user.id).filter(t => t.provider !== 'self').length
+	const mismatchProvConnect = await executeTool('admin', {
+		action: 'connect_app',
+		appId: oauthApp.id,
+		provider: 'github'
+	}, adminSession.token)
+	assert.equal(mismatchProvConnect.isError, true)
+	assert.match(mismatchProvConnect.content[0].text, /belongs to provider "google", not "github"/)
+	const apiKeyReauthAttempt = await executeTool('admin', {
+		action: 'connect_app',
+		appId: stripeApp.id
+	}, adminSession.token)
+	assert.equal(apiKeyReauthAttempt.isError, true)
+	assert.match(apiKeyReauthAttempt.content[0].text, /use update_app/)
+	const ghPatReauthAttempt = await executeTool('admin', {
+		action: 'connect_app',
+		appId: ghPatApp.id
+	}, adminSession.token)
+	assert.equal(ghPatReauthAttempt.isError, true)
+	assert.match(ghPatReauthAttempt.content[0].text, /use update_app/)
+	const oauthWithKeyAttempt = await executeTool('admin', {
+		action: 'connect_app',
+		appId: oauthApp.id,
+		apiKey: 'should-fail'
+	}, adminSession.token)
+	assert.equal(oauthWithKeyAttempt.isError, true)
+	assert.match(oauthWithKeyAttempt.content[0].text, /use update_app/)
+	const missingKeyStripeAttempt = await executeTool('admin', {
+		action: 'connect_app',
+		provider: 'stripe',
+		baseUrl: 'https://api.stripe.com'
+	}, adminSession.token)
+	assert.equal(missingKeyStripeAttempt.isError, true)
+	assert.match(missingKeyStripeAttempt.content[0].text, /apiKey is required/)
+	const rawCredsRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({
+			provider: 'google',
+			credentials: { accessToken: 'ya29.injected' }
+		})
+	})
+	assert.equal(rawCredsRes.status, 400)
+	assert.equal(db.tokens.listByUserId(user.id).filter(t => t.provider !== 'self').length, appCountBefore, 'Rejected connect_app calls must not create orphan app rows')
+	assert.equal(typeof db.users.userAccountSql, 'function')
+	for (const reservedSubpath of ['/api/health/extra', '/api/whoami/extra', '/api/WHOAMI/extra', '/api/links/123', '/api/shares/123', '/api/logs/123']) {
+		const subRes = await fetch(`http://127.0.0.1:${addr.port}${reservedSubpath}`, {
+			headers: { authorization: `Bearer ${adminSession.token}` }
+		})
+		assert.equal(subRes.status, 404, `${reservedSubpath} must return 404 instead of treating route segment as upstream provider`)
+		const subData = await subRes.json()
+		assert.equal(subData.error, 'not found')
+	}
+	assert.equal(db.logs.listByUserId(user.id, { provider: 'whoami' }).length, 0, 'Reserved /api/* subpaths must not log fake provider proxy entries')
+	for (const nonObjectBody of ['null', '123', '"hello"', '[]', '{"jsonrpc":"2.0","id":42}']) {
+		const mcpBadRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				authorization: `Bearer ${adminSession.token}`
+			},
+			body: nonObjectBody
+		})
+		assert.equal(mcpBadRes.status, 200, `Non-object/invalid JSON-RPC body ${nonObjectBody} must not return 202`)
+		const mcpBadData = await mcpBadRes.json()
+		assert.equal(mcpBadData.jsonrpc, '2.0')
+		assert.equal(mcpBadData.error?.code, -32600)
+	}
+	const protoMethodRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${adminSession.token}`
+		},
+		body: JSON.stringify({ jsonrpc: '2.0', id: 43, method: 'toString', params: {} })
+	})
+	assert.equal(protoMethodRes.status, 200)
+	assert.equal((await protoMethodRes.json()).error?.code, -32601, 'Object.prototype keys must not resolve as RPC methods')
+	const targetSess = db.tokens.create({ userId: user.id, provider: 'self', name: 'Bool Target', admin: 1 })
+	const demoteStringFalse = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${targetSess.id}`, {
+		method: 'PATCH',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ admin: 'false' })
+	})
+	assert.equal(demoteStringFalse.status, 200)
+	assert.equal((await demoteStringFalse.json()).session.admin, false, 'admin: "false" must demote rather than escalate via Boolean("false")')
+	assert.equal(db.tokens.get(targetSess.id).admin, false)
+	await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${targetSess.id}`, {
+		method: 'PATCH',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ admin: 'true' })
+	})
+	assert.equal(db.tokens.get(targetSess.id).admin, true)
+	const demoteZeroStr = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${targetSess.id}`, {
+		method: 'PATCH',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ admin: '0' })
+	})
+	assert.equal(demoteZeroStr.status, 200)
+	assert.equal((await demoteZeroStr.json()).session.admin, false, 'admin: "0" must evaluate to false')
+	const invalidAdminUpdate = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${targetSess.id}`, {
+		method: 'PATCH',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ admin: 'not-a-bool' })
+	})
+	assert.equal(invalidAdminUpdate.status, 400)
+	const createStrFalseRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ name: 'NonAdmin From String', admin: 'false' })
+	})
+	assert.equal(createStrFalseRes.status, 201)
+	assert.equal((await createStrFalseRes.json()).session.admin, false)
+	const boundCodeOmitted = db.tokens.createAuthCode({
+		userId: user.id,
+		clientId: 'client_bound_strict',
+		clientRedirectUri: 'http://localhost:8080/cb'
+	})
+	const omittedClientRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			grant_type: 'authorization_code',
+			code: boundCodeOmitted,
+			redirect_uri: 'http://localhost:8080/cb'
+		})
+	})
+	assert.equal(omittedClientRes.status, 400, 'Bound auth code must reject omitted client_id on /oauth/token')
+	const omittedClientData = await omittedClientRes.json()
+	assert.equal(omittedClientData.error, 'invalid_grant')
+	assert.equal(omittedClientData.error_description, 'client_id mismatch')
+	const invalidMethodRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${adminSession.token}`
+		},
+		body: JSON.stringify({ jsonrpc: '2.0', id: 42, method: 123 })
+	})
+	assert.equal(invalidMethodRes.status, 200)
+	const invalidMethodData = await invalidMethodRes.json()
+	assert.equal(invalidMethodData.id, 42, 'Invalid non-string method must preserve JSON-RPC id')
+	assert.equal(invalidMethodData.error?.code, -32600)
+	const zeroIdInvalidMethodRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${adminSession.token}`
+		},
+		body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: '' })
+	})
+	assert.equal(zeroIdInvalidMethodRes.status, 200)
+	const zeroIdInvalidMethodData = await zeroIdInvalidMethodRes.json()
+	assert.equal(zeroIdInvalidMethodData.id, 0, 'Empty method must preserve falsy JSON-RPC id: 0')
+	assert.equal(zeroIdInvalidMethodData.error?.code, -32600)
+	const revUser = db.logins.resolveUser('google', 'revoke-bool-test@example.com')
+	const revAdmin = db.tokens.create({ userId: revUser.id, provider: 'self', admin: 1 })
+	const revSibling1 = db.tokens.create({ userId: revUser.id, provider: 'self', name: 'Sibling 1' })
+	const revSibling2 = db.tokens.create({ userId: revUser.id, provider: 'self', name: 'Sibling 2' })
+	const mcpRevokeFalseRes = await executeTool('admin', {
+		action: 'revoke',
+		allOthers: 'false'
+	}, revSibling1.token)
+	assert.equal(mcpRevokeFalseRes.isError, undefined)
+	const mcpRevokeFalseData = JSON.parse(mcpRevokeFalseRes.content[0].text)
+	assert.equal(mcpRevokeFalseData.isCurrent, true, 'allOthers: "false" must revoke current session only, not siblings')
+	assert.equal(db.tokens.get(revSibling1.id), null)
+	assert.ok(db.tokens.get(revSibling2.id), 'Sibling 2 must remain intact when allOthers is "false"')
+	const invalidAllOthersRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions?allOthers=invalid`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${revAdmin.token}` }
+	})
+	assert.equal(invalidAllOthersRes.status, 400)
+	const numericAllOthersRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions?allOthers=1`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${revAdmin.token}` }
+	})
+	assert.equal(numericAllOthersRes.status, 200)
+	const numericAllOthersData = await numericAllOthersRes.json()
+	assert.equal(numericAllOthersData.revoked, true)
+	assert.equal(numericAllOthersData.count, 1)
+	assert.equal(db.tokens.get(revSibling2.id), null, 'DELETE /api/sessions?allOthers=1 must revoke all other sessions')
+	const tempApp = db.tokens.create({
+		userId: revUser.id,
+		provider: 'stripe',
+		type: 'api_key',
+		name: 'Revoke Bool Stripe',
+		credentials: { apiKey: 'sk_rev_bool', baseUrl: 'https://api.stripe.com' }
+	})
+	const invalidRevokeAppRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${tempApp.id}?revoke=invalid`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${revAdmin.token}` }
+	})
+	assert.equal(invalidRevokeAppRes.status, 400)
+	assert.ok(db.tokens.get(tempApp.id), 'Invalid ?revoke=invalid must not delete app')
+	const caseFalseRevokeAppRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${tempApp.id}?revoke=FALSE`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${revAdmin.token}` }
+	})
+	assert.equal(caseFalseRevokeAppRes.status, 200)
+	assert.equal(db.tokens.get(tempApp.id), null)
+	const invalidAllowedRestRes = await fetch(`http://127.0.0.1:${addr.port}/api/logs?allowed=invalid`, {
+		headers: { authorization: `Bearer ${revAdmin.token}` }
+	})
+	assert.equal(invalidAllowedRestRes.status, 400)
+	assert.match((await invalidAllowedRestRes.json()).error, /allowed must be a boolean/)
+	const invalidAllowedMcpRes = await executeTool('admin', {
+		action: 'list_logs',
+		allowed: 'invalid'
+	}, revAdmin.token)
+	assert.equal(invalidAllowedMcpRes.isError, true)
+	assert.match(invalidAllowedMcpRes.content[0].text, /allowed must be a boolean/)
+	assert.throws(() => db.logs.listByUserId(revUser.id, { allowed: 'invalid' }), /allowed must be a boolean/)
+	const logFilterUser = db.users.create()
+	db.logs.create({ userId: logFilterUser.id, provider: 'stripe', method: 'GET', url: 'https://api.stripe.com/v1/ok', allowed: true, status: 200 })
+	db.logs.create({ userId: logFilterUser.id, provider: 'stripe', method: 'DELETE', url: 'https://api.stripe.com/v1/no', allowed: false, error: 'Policy violation' })
+	const allowedTrueLogs = db.logs.listByUserId(logFilterUser.id, { allowed: 'true' })
+	assert.equal(allowedTrueLogs.length, 1)
+	assert.equal(allowedTrueLogs[0].allowed, true)
+	const allowedFalseLogs = db.logs.listByUserId(logFilterUser.id, { allowed: 'false' })
+	assert.equal(allowedFalseLogs.length, 1)
+	assert.equal(allowedFalseLogs[0].allowed, false)
+	for (const badProvider of ['', '   ', 123, true, {}]) {
+		const badProvRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${adminSession.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ provider: badProvider })
+		})
+		assert.equal(badProvRes.status, 400, `connectApp must reject explicit non-string/blank provider ${JSON.stringify(badProvider)} with 400`)
+		assert.match((await badProvRes.json()).error, /provider must be a non-empty string/)
+	}
+	const blankMetaRes = await executeTool('admin', {
+		action: 'connect_app',
+		provider: 'stripe',
+		name: '   ',
+		account: '   ',
+		apiKey: 'sk_blank_meta',
+		baseUrl: 'https://api.stripe.com'
+	}, adminSession.token)
+	assert.equal(blankMetaRes.isError, undefined)
+	const blankMetaData = JSON.parse(blankMetaRes.content[0].text)
+	assert.equal(blankMetaData.app.name, 'Stripe', 'Whitespace-only name falls back to providerDef.name')
+	assert.equal(blankMetaData.app.account, null, 'Whitespace-only account is ignored instead of stored as empty string')
+	assert.equal('account' in db.tokens.get(blankMetaData.app.id).credentials, false)
+	const trimmedMetaRes = await executeTool('admin', {
+		action: 'connect_app',
+		provider: '  Stripe  ',
+		name: '  Trimmed Stripe  ',
+		account: '  acct_trimmed  ',
+		apiKey: '  sk_trimmed  ',
+		baseUrl: 'https://api.stripe.com'
+	}, adminSession.token)
+	assert.equal(trimmedMetaRes.isError, undefined)
+	const trimmedMetaData = JSON.parse(trimmedMetaRes.content[0].text)
+	assert.equal(trimmedMetaData.app.provider, 'stripe')
+	assert.equal(trimmedMetaData.app.name, 'Trimmed Stripe')
+	assert.equal(trimmedMetaData.app.account, 'acct_trimmed')
+	for (const badAppId of ['', '   ', 123, null]) {
+		const badAppIdRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${adminSession.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ appId: badAppId })
+		})
+		assert.equal(badAppIdRes.status, 400, `connectApp must reject explicit invalid appId ${JSON.stringify(badAppId)} with 400`)
+		assert.match((await badAppIdRes.json()).error, /appId must be a non-empty string/)
+	}
+	for (const badVal of [123, true, {}]) {
+		const badNameRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${adminSession.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ provider: 'stripe', name: badVal, apiKey: 'sk_bad_name', baseUrl: 'https://api.stripe.com' })
+		})
+		assert.equal(badNameRes.status, 400, `connectApp must reject non-string name ${JSON.stringify(badVal)} with 400`)
+		assert.match((await badNameRes.json()).error, /name must be a string/)
+		const badAccountRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${adminSession.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ provider: 'stripe', account: badVal, apiKey: 'sk_bad_acct', baseUrl: 'https://api.stripe.com' })
+		})
+		assert.equal(badAccountRes.status, 400, `connectApp must reject non-string account ${JSON.stringify(badVal)} with 400`)
+		assert.match((await badAccountRes.json()).error, /account must be a string/)
+	}
+	const selfProvRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ provider: 'self', apiKey: 'sk_self', baseUrl: 'https://api.stripe.com' })
+	})
+	assert.equal(selfProvRes.status, 400)
+	assert.match((await selfProvRes.json()).error, /provider cannot be "self"/)
+	for (const badBase of ['', false, null]) {
+		const ghBadBaseRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${adminSession.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ provider: 'github', apiKey: 'ghp_123', baseUrl: badBase })
+		})
+		assert.equal(ghBadBaseRes.status, 400, `connectApp must reject explicit falsy baseUrl ${JSON.stringify(badBase)} on preset provider`)
+		assert.match((await ghBadBaseRes.json()).error, /Valid https:\/\/ baseUrl is required/)
+	}
+	const updApp = db.tokens.create({
+		userId: user.id,
+		provider: 'stripe',
+		type: 'api_key',
+		name: 'Update Parity Stripe',
+		credentials: { apiKey: 'sk_keep_intact', baseUrl: 'https://api.stripe.com' }
+	})
+	for (const badKey of ['', '   ', null, 123]) {
+		const badUpdateKeyRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${updApp.id}`, {
+			method: 'PATCH',
+			headers: {
+				authorization: `Bearer ${adminSession.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ apiKey: badKey })
+		})
+		assert.equal(badUpdateKeyRes.status, 400, `updateApp must reject invalid apiKey ${JSON.stringify(badKey)} with 400`)
+		assert.match((await badUpdateKeyRes.json()).error, /apiKey must be a non-empty string/)
+		assert.equal(db.tokens.get(updApp.id).credentials.apiKey, 'sk_keep_intact')
+	}
+	for (const badId of ['', '   ', null, 123]) {
+		const badUpdIdRes = await executeTool('admin', {
+			action: 'update_app',
+			appId: badId,
+			name: 'Should Fail'
+		}, adminSession.token)
+		assert.equal(badUpdIdRes.isError, true, `updateApp must reject invalid appId ${JSON.stringify(badId)} with 400`)
+		assert.match(badUpdIdRes.content[0].text, /appId must be a non-empty string/)
+	}
+	const clearedNameUpdRes = await executeTool('admin', {
+		action: 'update_app',
+		appId: `  ${updApp.id}  `,
+		name: '   ',
+		account: '  acct_single_write  '
+	}, adminSession.token)
+	assert.equal(clearedNameUpdRes.isError, undefined)
+	const clearedNameUpdData = JSON.parse(clearedNameUpdRes.content[0].text)
+	assert.equal(clearedNameUpdData.app.name, null, 'Whitespace-only name clears name to null in single updateCredentials write')
+	assert.equal(clearedNameUpdData.app.account, 'acct_single_write')
+	assert.equal(db.tokens.get(updApp.id).name, null)
 })
 
 test('teardown server', (t, done) => {
