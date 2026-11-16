@@ -1,4 +1,4 @@
-import { resolveTargetUrl, hasPathTraversal } from './util.js'
+import { resolveTargetUrl, hasPathTraversal, isXml } from './util.js'
 
 export {
 	evaluatePolicy,
@@ -42,7 +42,8 @@ function parseBodyObject (body, contentType = '') {
 		if (ct && ct !== 'application/json' && !ct.endsWith('+json')) {
 			return null
 		}
-		if (/^<[a-zA-Z?_!][\s\S]*>$/.test(trimmed) || trimmed.startsWith('[') || trimmed.startsWith('{')) {
+		if (isXml(trimmed)) return null
+		if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
 			try {
 				const parsed = JSON.parse(trimmed)
 				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed

@@ -355,16 +355,37 @@ async function handleMcp (req, res, token) {
 		err.status = 405
 		throw err
 	}
+	const request = await getBody(req)
+	let parsed
+	try {
+		parsed = JSON.parse(request)
+	} catch (err) {
+		console.warn(`[mcp] JSON-RPC parse error: ${err.message}`)
+		sendJson(res, {
+			jsonrpc: '2.0',
+			id: null,
+			error: { code: -32700, message: 'parse error' }
+		})
+		return
+	}
+	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+		sendJson(res, {
+			jsonrpc: '2.0',
+			id: null,
+			error: { code: -32600, message: 'Invalid Request' }
+		})
+		return
+	}
+	if (typeof parsed.method !== 'string' || !parsed.method) {
+		sendJson(res, {
+			jsonrpc: '2.0',
+			id: 'id' in parsed ? parsed.id : null,
+			error: { code: -32600, message: 'Invalid Request' }
+		})
+		return
+	}
 	const rpc = new RpcEngine({
 		objectMode: true,
-		deserialize: data => {
-			try {
-				return JSON.parse(data)
-			} catch (err) {
-				console.warn(`[mcp] JSON-RPC parse error: ${err.message}`)
-				throw err
-			}
-		},
 		serialize: data => {
 			data = typeof data === 'object' && !data?.jsonrpc
 				? { ...data, jsonrpc: '2.0' }
@@ -382,14 +403,24 @@ async function handleMcp (req, res, token) {
 				res.end(JSON.stringify({ status: 'accepted' }))
 			}
 		},
-		methods: {
-			...rpcMethods,
+		methods: Object.assign(Object.create(null), rpcMethods, {
 			'tools/list': params => rpcMethods['tools/list'](params, token),
 			'tools/call': params => rpcMethods['tools/call'](params, token, base)
+		})
+	})
+	rpc.addEventListener('error', evt => {
+		if (!res.writableEnded) {
+			sendJson(res, {
+				jsonrpc: '2.0',
+				id: 'id' in parsed ? parsed.id : null,
+				error: {
+					code: evt.code ?? -32600,
+					message: evt.message || 'Invalid Request'
+				}
+			})
 		}
 	})
-	const request = await getBody(req)
-	await rpc.receive(request)
+	await rpc.receive(parsed)
 	if (!res.writableEnded) {
 		rpc.send()
 	}

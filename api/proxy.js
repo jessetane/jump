@@ -1,6 +1,7 @@
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy } from '../policy.js'
+import { isXml } from '../util.js'
 
 export {
 	request,
@@ -94,7 +95,7 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 			}
 		} else {
 			reqBody = String(body)
-			if (!reqHeaders['content-type'] && /^<[a-zA-Z?_!][\s\S]*>$/.test(reqBody.trim())) {
+			if (!reqHeaders['content-type'] && isXml(reqBody)) {
 				reqHeaders['content-type'] = 'application/xml'
 			}
 		}

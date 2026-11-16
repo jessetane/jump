@@ -1,6 +1,6 @@
 import * as api from './api/index.js'
 import { getBaseUrl } from './oauth.js'
-import { getBody, sendJson } from './util.js'
+import { getBody, sendJson, isXml } from './util.js'
 
 export {
 	handleRest
@@ -79,7 +79,7 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 	}
 	if (typeof result === 'string') {
 		res.statusCode = 200
-		res.setHeader('content-type', /^<[a-zA-Z?_!][\s\S]*>$/.test(result.trim()) ? 'application/xml; charset=utf-8' : 'text/plain; charset=utf-8')
+		res.setHeader('content-type', isXml(result) ? 'application/xml; charset=utf-8' : 'text/plain; charset=utf-8')
 		res.end(result)
 		return
 	}
@@ -131,7 +131,7 @@ const routes = {
 			sendJson(res, result, 201)
 		},
 		async DELETE (req, res, { token, query }) {
-			const result = await api.auth.revoke(token, { allOthers: query.allOthers === 'true' })
+			const result = await api.auth.revoke(token, { allOthers: query.allOthers })
 			sendJson(res, result)
 		}
 	},
@@ -200,6 +200,8 @@ const routes = {
 	}
 }
 
+const RESERVED_API_PROVIDERS = new Set(Object.keys(routes).map(r => r.slice('/api/'.length)))
+
 function decodePathParam (raw) {
 	try {
 		return decodeURIComponent(raw)
@@ -254,8 +256,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 			return
 		}
 		if (req.method === 'DELETE') {
-			const revoke = query?.revoke !== 'false' && query?.revoke !== '0'
-			const result = await api.auth.disconnectApp(token, { appId, revoke, appUrl })
+			const result = await api.auth.disconnectApp(token, { appId, revoke: query?.revoke, appUrl })
 			sendJson(res, result)
 			return
 		}
@@ -277,8 +278,13 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 	const rawPathname = url?.pathname || pathname
 	const restMatch = rawPathname.match(/^\/api\/([a-z0-9_-]+)\/(.+)$/i)
 	if (restMatch) {
-		const [, provider, targetPath] = restMatch
-		await handleProviderProxy(req, res, provider.toLowerCase(), targetPath, url, token)
+		const provider = restMatch[1].toLowerCase()
+		if (RESERVED_API_PROVIDERS.has(provider)) {
+			const err = new Error('not found')
+			err.status = 404
+			throw err
+		}
+		await handleProviderProxy(req, res, provider, restMatch[2], url, token)
 		return
 	}
 	const err = new Error('not found')

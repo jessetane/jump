@@ -2,7 +2,7 @@ import * as db from '../db/index.js'
 import { getProvider, requireAuthProvider } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
-import { validateBaseUrl, parseAccountSpec } from '../util.js'
+import { validateBaseUrl, parseAccountSpec, requireBoolean } from '../util.js'
 
 export {
 	whoami,
@@ -103,10 +103,13 @@ function requireAdmin (token, opts = {}, message = 'Access denied: app administr
 }
 
 function requireApp (userId, appId, { allowShare = true, requireId = false } = {}) {
-	if (requireId && !appId) {
+	if (requireId && appId === undefined) {
 		const error = new Error('appId is required')
 		error.status = 400
 		throw error
+	}
+	if (appId !== undefined) {
+		appId = requireNonEmptyString(appId, 'appId')
 	}
 	const targetApp = db.tokens.get(appId)
 	if (!targetApp || targetApp.userId !== userId || !db.tokens.isUpstreamApp(targetApp, { allowShare })) {
@@ -163,8 +166,9 @@ async function get (token, sessionId, opts = {}) {
 }
 
 async function createSession (token, opts = {}) {
-	const { name = 'New Session', admin = false, linkAppIds = [], policy = null } = opts
+	const { name = 'New Session', admin, linkAppIds = [], policy = null } = opts
 	const { session } = requireAdmin(token, opts, 'Access denied: session administration requires admin privileges')
+	const isAdmin = requireBoolean(admin, 'admin', false)
 	const policyCheck = validatePolicy(policy)
 	if (!policyCheck.valid) {
 		const error = new Error(policyCheck.error)
@@ -180,7 +184,7 @@ async function createSession (token, opts = {}) {
 		provider: 'self',
 		type: 'bearer',
 		name,
-		admin: admin ? 1 : 0
+		admin: isAdmin ? 1 : 0
 	})
 	for (const app of appsToLink) {
 		db.links.create({
@@ -210,7 +214,8 @@ async function revoke (token, { sessionId, allOthers } = {}) {
 			message: 'No active session found for the provided token.'
 		}
 	}
-	if (allOthers) {
+	const shouldRevokeAllOthers = requireBoolean(allOthers, 'allOthers', false)
+	if (shouldRevokeAllOthers) {
 		if (!session.admin) {
 			const error = new Error('Access denied: revoking other sessions requires admin privileges')
 			error.status = 403
@@ -298,23 +303,88 @@ async function listApps (token, opts = {}) {
 	return { apps }
 }
 
+function optionalString (val, label) {
+	if (val === undefined || val === null) return null
+	if (typeof val !== 'string') {
+		const error = new Error(`${label} must be a string`)
+		error.status = 400
+		throw error
+	}
+	return val.trim() || null
+}
+
+function requireNonEmptyString (val, label) {
+	if (typeof val !== 'string' || !val.trim()) {
+		const error = new Error(`${label} must be a non-empty string`)
+		error.status = 400
+		throw error
+	}
+	return val.trim()
+}
+
+function requireValidBaseUrl (rawBase) {
+	const normalized = rawBase ? validateBaseUrl(rawBase) : null
+	if (!normalized) {
+		const error = new Error('Valid https:// baseUrl is required for api_key apps')
+		error.status = 400
+		throw error
+	}
+	return normalized
+}
+
 async function connectApp (token, opts = {}) {
 	let { provider, name, apiKey, account, baseUrl, credentials, appId } = opts
-	apiKey = typeof apiKey === 'string' ? apiKey.trim() : apiKey
 	const { session, appUrl } = requireAdmin(token, opts)
-	if (appId) {
-		const existing = requireApp(session.userId, appId, { allowShare: false })
-		if (!provider) provider = existing.provider
+	if (credentials !== undefined) {
+		const error = new Error('Pass apiKey, account, and baseUrl instead of credentials')
+		error.status = 400
+		throw error
 	}
-	provider = (provider || 'google').toLowerCase()
+	if (apiKey !== undefined) {
+		apiKey = requireNonEmptyString(apiKey, 'apiKey')
+	}
+	if (provider === undefined || provider === null) {
+		provider = null
+	} else {
+		provider = requireNonEmptyString(provider, 'provider').toLowerCase()
+	}
+	const cleanName = optionalString(name, 'name')
+	const cleanAccount = optionalString(account, 'account')
+	if (appId !== undefined) {
+		const existing = requireApp(session.userId, appId, { allowShare: false, requireId: true })
+		appId = existing.id
+		if (provider && provider !== existing.provider) {
+			const error = new Error(`App ${appId} belongs to provider "${existing.provider}", not "${provider}"`)
+			error.status = 400
+			throw error
+		}
+		if (existing.type !== 'oauth') {
+			const error = new Error(`Cannot re-authenticate ${existing.type} app via connect_app; use update_app instead`)
+			error.status = 400
+			throw error
+		}
+		if (apiKey !== undefined || account !== undefined || baseUrl !== undefined) {
+			const error = new Error('Cannot pass apiKey, account, or baseUrl with appId in connect_app; use update_app instead')
+			error.status = 400
+			throw error
+		}
+		provider = existing.provider
+	}
+	provider = provider || 'google'
+	if (provider === 'self') {
+		const error = new Error('provider cannot be "self"')
+		error.status = 400
+		throw error
+	}
 	const providerDef = getProvider(provider)
-	if (providerDef?.type === 'oauth' && !apiKey && !credentials) {
+	if (providerDef?.type === 'oauth' && !apiKey) {
+		requireAuthProvider(providerDef.id)
 		const setupCode = db.tokens.createState({
 			mode: 'setup_connect',
 			sessionId: session.id,
 			provider: providerDef.id,
 			reauthAppId: appId || null,
-			sessionName: typeof name === 'string' && name.trim() ? name.trim() : null,
+			sessionName: cleanName,
 			ttl: 10 * 60 * 1000
 		})
 		return {
@@ -322,34 +392,23 @@ async function connectApp (token, opts = {}) {
 			connectUrl: `${appUrl}/providers/${providerDef.id}/connect?code=${encodeURIComponent(setupCode)}`
 		}
 	}
-	const rawBase = baseUrl || credentials?.baseUrl || providerDef?.baseUrl || null
-	const normalizedBaseUrl = rawBase ? validateBaseUrl(rawBase) : null
-	if ((apiKey || providerDef?.type === 'api_key') && !normalizedBaseUrl) {
-		const error = new Error('Valid https:// baseUrl is required for api_key apps')
+	if (!apiKey) {
+		const error = new Error('apiKey is required for api_key apps')
 		error.status = 400
 		throw error
 	}
-	if (baseUrl !== undefined && !normalizedBaseUrl) {
-		const error = new Error('Valid https:// baseUrl is required for api_key apps')
-		error.status = 400
-		throw error
-	}
-	let creds = credentials ? { ...credentials } : null
-	if (creds && normalizedBaseUrl) {
-		creds.baseUrl = normalizedBaseUrl
-	}
-	if (!creds && (apiKey || account || normalizedBaseUrl)) {
-		creds = {
-			...(apiKey && { apiKey }),
-			...(account && { account: String(account).trim() }),
-			...(normalizedBaseUrl && { baseUrl: normalizedBaseUrl })
-		}
+	const rawBase = baseUrl !== undefined ? baseUrl : (providerDef?.baseUrl || null)
+	const normalizedBaseUrl = requireValidBaseUrl(rawBase)
+	const creds = {
+		apiKey,
+		baseUrl: normalizedBaseUrl,
+		...(cleanAccount && { account: cleanAccount })
 	}
 	const app = db.tokens.create({
 		userId: session.userId,
 		provider,
-		type: apiKey ? 'api_key' : 'oauth',
-		name: name || providerDef.name,
+		type: 'api_key',
+		name: cleanName || providerDef.name,
 		credentials: creds
 	})
 	return {
@@ -366,10 +425,10 @@ async function connectApp (token, opts = {}) {
 }
 
 async function disconnectApp (token, opts = {}) {
-	const { appId, revoke = true } = opts
+	const { appId, revoke } = opts
 	const { session } = requireAdmin(token, opts)
 	const targetApp = requireApp(session.userId, appId)
-	const shouldRevoke = revoke !== false && revoke !== 'false' && revoke !== 0
+	const shouldRevoke = requireBoolean(revoke, 'revoke', true)
 	if (shouldRevoke) {
 		const providerDef = getProvider(targetApp.provider)
 		if (providerDef?.revokeToken) {
@@ -473,28 +532,26 @@ async function updateApp (token, opts = {}) {
 		error.status = 400
 		throw error
 	}
-	let normalizedBaseUrl
-	if (baseUrl !== undefined) {
-		normalizedBaseUrl = validateBaseUrl(baseUrl)
-		if (!normalizedBaseUrl) {
-			const error = new Error('Valid https:// baseUrl is required for api_key apps')
-			error.status = 400
-			throw error
-		}
+	const cleanName = name !== undefined ? optionalString(name, 'name') : undefined
+	const cleanAccount = account !== undefined ? optionalString(account, 'account') : undefined
+	const cleanApiKey = apiKey !== undefined ? requireNonEmptyString(apiKey, 'apiKey') : undefined
+	const normalizedBaseUrl = baseUrl !== undefined ? requireValidBaseUrl(baseUrl) : undefined
+	let updated = targetApp
+	if (cleanName !== undefined || cleanAccount !== undefined || normalizedBaseUrl !== undefined || cleanApiKey !== undefined) {
+		const hasCredChanges = cleanAccount !== undefined || normalizedBaseUrl !== undefined || cleanApiKey !== undefined
+		const updatedCreds = hasCredChanges
+			? {
+				...(targetApp.credentials || {}),
+				...(cleanAccount !== undefined ? { account: cleanAccount } : {}),
+				...(normalizedBaseUrl !== undefined ? { baseUrl: normalizedBaseUrl } : {}),
+				...(cleanApiKey !== undefined ? { apiKey: cleanApiKey } : {})
+			}
+			: undefined
+		updated = db.tokens.updateCredentials(targetApp.id, {
+			...(cleanName !== undefined ? { name: cleanName } : {}),
+			...(updatedCreds !== undefined ? { credentials: updatedCreds } : {})
+		})
 	}
-	if (name !== undefined) {
-		db.tokens.updateName(appId, name)
-	}
-	if (account !== undefined || baseUrl !== undefined || apiKey !== undefined) {
-		const updatedCreds = {
-			...(targetApp.credentials || {}),
-			...(account !== undefined ? { account: account ? String(account).trim() : null } : {}),
-			...(baseUrl !== undefined ? { baseUrl: normalizedBaseUrl } : {}),
-			...(apiKey !== undefined ? { apiKey: apiKey ? String(apiKey).trim() : null } : {})
-		}
-		db.tokens.updateCredentials(appId, { credentials: updatedCreds })
-	}
-	const updated = db.tokens.get(appId)
 	return {
 		updated: true,
 		app: {
@@ -613,15 +670,17 @@ async function updateSession (token, opts = {}) {
 		error.status = 403
 		throw error
 	}
+	const parsedAdmin = requireBoolean(admin, 'admin')
+	const shouldRotate = requireBoolean(rotateToken, 'rotateToken', false)
 	requireTargetSession(session.userId, targetId)
 	if (name !== undefined) {
 		db.tokens.updateName(targetId, name)
 	}
-	if (admin !== undefined) {
-		db.tokens.setAdmin(targetId, Boolean(admin))
+	if (parsedAdmin !== undefined) {
+		db.tokens.setAdmin(targetId, parsedAdmin)
 	}
 	let newToken = null
-	if (rotateToken) {
+	if (shouldRotate) {
 		const rotated = db.tokens.rotateToken(targetId)
 		newToken = rotated?.token || null
 	}
