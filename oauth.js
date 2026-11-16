@@ -97,102 +97,7 @@ function renderCardPage (title, subtitle, bodyHtml) {
 		<meta charset=utf-8>
 		<meta name="viewport" content="width=device-width,initial-scale=1">
 		<title>${escapeHtml(title)}</title>
-		<style>
-			* {
-				box-sizing: border-box;
-			}
-
-			html {
-				height: 100%;
-			}
-
-			body {
-				margin: 0;
-				height: 100%;
-				font-family: sans-serif;
-			}
-
-			.column {
-				display: flex;
-				flex-direction: column;
-			}
-
-			.view {
-				margin: auto;
-				width: 100%;
-				padding: 24px;
-			}
-
-			@media (min-width: 520px) {
-				.view {
-					max-width: 480px;
-				}
-			}
-
-			h1 {
-				font-size: 1.5rem;
-				text-align: center;
-				margin-top: 0.85rem;
-				margin-bottom: 0.85rem;
-			}
-
-			.subtitle {
-				color: #555;
-				font-size: 0.95rem;
-				line-height: 1.4;
-				text-align: center;
-				margin: 0 0 1.25rem;
-			}
-
-			.app-list {
-				margin-bottom: 1.5rem;
-				text-align: left;
-			}
-
-			.app-list-title {
-				font-size: 0.9rem;
-				font-weight: bold;
-				color: #333;
-				margin-bottom: 0.5rem;
-			}
-
-			.app-item {
-				display: flex;
-				align-items: center;
-				gap: 8px;
-				padding: 8px 6px;
-				border-bottom: 1px solid #eee;
-				font-size: 0.9rem;
-				cursor: pointer;
-				color: #333;
-			}
-
-			.app-item:hover {
-				background: #fafafa;
-			}
-
-			.app-meta {
-				color: #777;
-				font-size: 0.8rem;
-				margin-left: auto;
-			}
-
-			button[type=submit] {
-				width: 100%;
-				padding: 11px 16px;
-				background: #000;
-				color: #fff;
-				border: none;
-				border-radius: 6px;
-				font-size: 1rem;
-				cursor: pointer;
-				margin-bottom: 1.5rem;
-			}
-
-			button[type=submit]:hover {
-				opacity: 0.85;
-			}
-		</style>
+		<link rel="stylesheet" href="/style.css">
 	</head>
 	<body class=column>
 		<div class="view column">
@@ -1055,15 +960,25 @@ async function handleCallback (req, res, query) {
 	))
 }
 
-function parseTokenParams (rawBody) {
-	if (!rawBody) return {}
+function parseTokenParams (rawBody, req) {
+	if (!rawBody || !rawBody.trim()) return {}
+	const contentType = String(req?.headers?.['content-type'] || '').split(';')[0].trim().toLowerCase()
 	const trimmed = rawBody.trim()
-	if (trimmed.startsWith('{')) {
+	if (contentType === 'application/json' || contentType.endsWith('+json') || trimmed.startsWith('{')) {
+		let parsed
 		try {
-			return JSON.parse(trimmed)
+			parsed = JSON.parse(trimmed)
 		} catch {
-			return {}
+			const err = new Error('Invalid JSON body')
+			err.status = 400
+			throw err
 		}
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+			const err = new Error('Invalid JSON body')
+			err.status = 400
+			throw err
+		}
+		return parsed
 	}
 	return Object.fromEntries(new URLSearchParams(rawBody))
 }
@@ -1075,7 +990,13 @@ async function handleToken (req, res) {
 		return
 	}
 	const rawBody = await getBody(req)
-	const params = parseTokenParams(rawBody)
+	let params
+	try {
+		params = parseTokenParams(rawBody, req)
+	} catch (err) {
+		sendJson(res, { error: 'invalid_request', error_description: err.message }, err.status || 400)
+		return
+	}
 	const grantType = params.grant_type || 'authorization_code'
 	if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
 		sendJson(res, { error: 'unsupported_grant_type', error_description: `Unsupported grant_type: ${grantType}` }, 400)
@@ -1188,7 +1109,13 @@ async function handleRevoke (req, res) {
 		return
 	}
 	const rawBody = await getBody(req)
-	const params = parseTokenParams(rawBody)
+	let params
+	try {
+		params = parseTokenParams(rawBody, req)
+	} catch (err) {
+		sendJson(res, { error: 'invalid_request', error_description: err.message }, err.status || 400)
+		return
+	}
 	const token = typeof params.token === 'string' ? params.token.trim() : ''
 	if (!token) {
 		sendJson(res, { error: 'invalid_request', error_description: 'Missing token parameter' }, 400)

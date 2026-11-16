@@ -100,14 +100,7 @@ function isUpstreamApp (tok, { allowShare = false } = {}) {
 
 function formatToken (row) {
 	if (!row) return null
-	let credentials = null
-	if (row.credentials) {
-		try {
-			credentials = JSON.parse(row.credentials)
-		} catch {
-			credentials = row.credentials
-		}
-	}
+	const credentials = row.credentials ? JSON.parse(row.credentials) : null
 	const isShare = row.type === 'share'
 	const resolvedAccount = isShare ? (row.name || row.account || null) : (row.user_id ? (row.account || null) : null)
 	return {
