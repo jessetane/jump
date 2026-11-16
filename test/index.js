@@ -1042,35 +1042,56 @@ test('google provider connect screen and consent flow', async () => {
 	const addr = server.address()
 	const { session } = createTestSession({ account: 'connect-flow@example.com', admin: true })
 	const { session: workerSession, app: nonSelfToken } = createTestSession({ account: 'nonself-consent@example.com', admin: false })
-	const connectRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?session_id=${session.id}`)
+	const rawSessionConnectRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?session_id=${session.id}`)
+	assert.equal(rawSessionConnectRes.status, 403, 'GET /providers/:provider/connect rejects raw session_id parameter')
+	const setupCode = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'google' })
+	const connectRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?code=${setupCode}`)
 	assert.equal(connectRes.status, 200)
 	const connectHtml = await connectRes.text()
 	assert.match(connectHtml, /Configure API services access/)
 	assert.match(connectHtml, /Sign in with Google/)
 	assert.match(connectHtml, /action="\/providers\/google\/consent"/)
-	const invalidSessionConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+	assert.equal(connectHtml.includes(session.id), false, 'Connect HTML never embeds raw session_id')
+	const rawSessionConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ session_id: 'non-existent-session' }).toString(),
+		body: new URLSearchParams({ session_id: session.id }).toString(),
 		redirect: 'manual'
 	})
-	assert.equal(invalidSessionConsentRes.status, 403)
+	assert.equal(rawSessionConsentRes.status, 403, 'POST /providers/:provider/consent rejects raw session_id parameter')
+	const invalidCodeConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ code: 'non-existent-code' }).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(invalidCodeConsentRes.status, 403)
+	const nonSelfSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: nonSelfToken.id, provider: 'google' })
 	const nonSelfConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ session_id: nonSelfToken.id }).toString(),
+		body: new URLSearchParams({ code: nonSelfSetup }).toString(),
 		redirect: 'manual'
 	})
 	assert.equal(nonSelfConsentRes.status, 403)
+	const nonAdminSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: workerSession.id, provider: 'google' })
 	const nonAdminInitialConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ session_id: workerSession.id }).toString(),
+		body: new URLSearchParams({ code: nonAdminSetup }).toString(),
 		redirect: 'manual'
 	})
 	assert.equal(nonAdminInitialConsentRes.status, 403)
+	const wrongModeSetup = db.tokens.createState({ mode: 'setup_link', sessionId: session.id, provider: 'google' })
+	const wrongModeConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ code: wrongModeSetup }).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(wrongModeConsentRes.status, 403, 'setup_link code must be rejected on /providers/:provider/consent')
 	const consentBody = new URLSearchParams({
-		session_id: session.id,
+		code: setupCode,
 		app_name: 'Custom Work Google'
 	})
 	consentBody.append('services', 'drive')
@@ -1083,6 +1104,13 @@ test('google provider connect screen and consent flow', async () => {
 		redirect: 'manual'
 	})
 	assert.equal(consentRes.status, 302)
+	const replayConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: consentBody.toString(),
+		redirect: 'manual'
+	})
+	assert.equal(replayConsentRes.status, 403, 'setup_connect code is single-use and rejected on replay')
 	const location = consentRes.headers.get('location')
 	const targetUrl = new URL(location)
 	assert.equal(targetUrl.hostname, 'accounts.google.com')
@@ -1092,9 +1120,11 @@ test('google provider connect screen and consent flow', async () => {
 	const stateParam = targetUrl.searchParams.get('state')
 	assert.ok(stateParam)
 	const stateRow = db.tokens.consumeState(stateParam)
+	assert.equal(stateRow.mode, 'connect')
 	assert.equal(stateRow.sessionId, session.id)
 	assert.equal(stateRow.sessionName, 'Custom Work Google')
 	assert.equal(stateRow.provider, 'google')
+	assert.equal(db.tokens.consumeState(stateParam), null, 'consumeState atomically deletes state on first consumption')
 })
 
 test('provider connect page with repeated query parameters', async () => {
@@ -2286,8 +2316,11 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	const namedOauthData = JSON.parse(namedOauthRes.content[0].text)
 	assert.equal(namedOauthData.actionRequired, 'oauth_flow')
 	const namedConnectUrl = new URL(namedOauthData.connectUrl)
-	assert.equal(namedConnectUrl.searchParams.get('session_id'), adminSession.id)
-	assert.equal(namedConnectUrl.searchParams.get('name'), 'Work Google')
+	assert.equal(namedConnectUrl.searchParams.get('session_id'), null, 'connectUrl never embeds raw session_id')
+	const namedSetupState = db.tokens.getState(namedConnectUrl.searchParams.get('code'))
+	assert.equal(namedSetupState.mode, 'setup_connect')
+	assert.equal(namedSetupState.sessionId, adminSession.id)
+	assert.equal(namedSetupState.sessionName, 'Work Google')
 	const reauthRes = await executeTool('admin', {
 		action: 'connect_app',
 		appId: googleApp.id
@@ -2295,7 +2328,11 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(reauthRes.isError, undefined)
 	const reauthData = JSON.parse(reauthRes.content[0].text)
 	assert.equal(reauthData.actionRequired, 'oauth_flow')
-	assert.ok(reauthData.connectUrl.includes(`reauth_app_id=${googleApp.id}`))
+	const reauthConnectUrl = new URL(reauthData.connectUrl)
+	assert.equal(reauthConnectUrl.searchParams.get('session_id'), null)
+	const reauthSetupState = db.tokens.getState(reauthConnectUrl.searchParams.get('code'))
+	assert.equal(reauthSetupState.mode, 'setup_connect')
+	assert.equal(reauthSetupState.reauthAppId, googleApp.id)
 	const appsRes = await executeTool('admin', { action: 'list_apps' }, adminSession.token)
 	assert.equal(appsRes.isError, undefined)
 	const appsData = JSON.parse(appsRes.content[0].text)
@@ -2431,12 +2468,12 @@ test('in-place upstream re-auth flow enforces admin, ownership, and account cont
 	})
 	db.links.create({ sessionId: session.id, appId: app.id })
 	db.links.create({ sessionId: adminSession.id, appId: app.id })
+	const crossUserSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: attackerAdmin.id, provider: 'google', reauthAppId: app.id })
 	const crossUserConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
-			session_id: attackerAdmin.id,
-			reauth_app_id: app.id
+			code: crossUserSetup
 		}).toString(),
 		redirect: 'manual'
 	})
@@ -2450,17 +2487,18 @@ test('in-place upstream re-auth flow enforces admin, ownership, and account cont
 		redirect: 'manual'
 	})
 	assert.equal(noSessionConsentRes.status, 403)
+	const nonAdminReauthSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'google', reauthAppId: app.id })
 	const nonAdminConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
-			session_id: session.id,
-			reauth_app_id: app.id
+			code: nonAdminReauthSetup
 		}).toString(),
 		redirect: 'manual'
 	})
 	assert.equal(nonAdminConsentRes.status, 403, 'Non-admin session must not initiate reauth_app_id consent')
-	const connectHtmlRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?session_id=${adminSession.id}&reauth_app_id=${app.id}`)
+	const validReauthSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSession.id, provider: 'google', reauthAppId: app.id })
+	const connectHtmlRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?code=${validReauthSetup}`)
 	assert.equal(connectHtmlRes.status, 200)
 	const connectHtml = await connectHtmlRes.text()
 	assert.match(connectHtml, /"services":"drive,calendar"/, 'GET /providers/:provider/connect pre-populates granted services for reauth_app_id')
@@ -2469,8 +2507,7 @@ test('in-place upstream re-auth flow enforces admin, ownership, and account cont
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
-			session_id: adminSession.id,
-			reauth_app_id: app.id,
+			code: validReauthSetup,
 			services: 'drive,calendar',
 			write: 'calendar'
 		}).toString(),
@@ -2486,12 +2523,12 @@ test('in-place upstream re-auth flow enforces admin, ownership, and account cont
 		name: 'API Key App',
 		credentials: { apiKey: 'key_123', baseUrl: 'https://www.googleapis.com' }
 	})
+	const apiKeyReauthSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSession.id, provider: 'google', reauthAppId: apiKeyApp.id })
 	const apiKeyReauthConsent = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
-			session_id: adminSession.id,
-			reauth_app_id: apiKeyApp.id
+			code: apiKeyReauthSetup
 		}).toString(),
 		redirect: 'manual'
 	})
@@ -2519,7 +2556,14 @@ test('in-place upstream re-auth flow enforces admin, ownership, and account cont
 		assert.doesNotMatch(nonAdminProxyErr.content[0].text, /reauth_app_id/, 'Non-admin proxy refresh failure must not leak reauth URL')
 		const adminProxyErr = await executeTool('google_api', { url: 'https://www.googleapis.com/drive/v3/files' }, adminSession.token, `http://127.0.0.1:${addr.port}`)
 		assert.equal(adminProxyErr.isError, true)
-		assert.match(adminProxyErr.content[0].text, new RegExp(`reauth_app_id=${app.id}`), 'Admin proxy refresh failure includes clickable reauth URL')
+		const reauthUrlMatch = adminProxyErr.content[0].text.match(/Re-authenticate:\s*(http\S+)/)
+		assert.ok(reauthUrlMatch, 'Admin proxy refresh failure includes clickable reauth URL')
+		const parsedProxyReauth = new URL(reauthUrlMatch[1])
+		assert.equal(parsedProxyReauth.searchParams.get('session_id'), null, 'Proxy reauth URL never leaks raw session_id')
+		const proxySetupState = db.tokens.getState(parsedProxyReauth.searchParams.get('code'))
+		assert.equal(proxySetupState?.mode, 'setup_connect')
+		assert.equal(proxySetupState?.reauthAppId, app.id)
+		assert.equal(proxySetupState?.sessionId, adminSession.id)
 		const nonAdminCbState = db.tokens.createState({ sessionId: session.id, reauthAppId: app.id, provider: 'google' })
 		const nonAdminCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${nonAdminCbState}`)
 		assert.equal(nonAdminCbRes.status, 403, 'Callback rejects non-admin session on reauth_app_id')
@@ -2713,20 +2757,22 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	})
 	assert.ok(db.tokens.create({ userId: user.id, provider: 'self', token: null }).token, 'db.tokens.create must always mint a non-null token for self bearer sessions')
 	for (const invalidSid of [expiredAdminSession.id, nonBearerAdminCode]) {
+		const expLinkSetup = db.tokens.createState({ mode: 'setup_link', sessionId: invalidSid, provider: 'github' })
 		const expConsent = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({ session_id: invalidSid, provider: 'github' }).toString(),
+			body: new URLSearchParams({ code: expLinkSetup, provider: 'github' }).toString(),
 			redirect: 'manual'
 		})
-		assert.equal(expConsent.status, 403, 'Inactive/expired session_id must be rejected on /oauth/authorize/consent')
+		assert.equal(expConsent.status, 403, 'Inactive/expired session bound to setup_link code must be rejected on /oauth/authorize/consent')
+		const expConnectSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: invalidSid, provider: 'google' })
 		const expProvConsent = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({ session_id: invalidSid }).toString(),
+			body: new URLSearchParams({ code: expConnectSetup }).toString(),
 			redirect: 'manual'
 		})
-		assert.equal(expProvConsent.status, 403, 'Inactive/expired session_id must be rejected on /providers/:provider/consent')
+		assert.equal(expProvConsent.status, 403, 'Inactive/expired session bound to setup_connect code must be rejected on /providers/:provider/consent')
 	}
 	const shay = db.logins.resolveUser('google', 'shay@example.com')
 	const shayAdmin = db.tokens.create({ userId: shay.id, provider: 'self', admin: 1 })
@@ -2976,22 +3022,52 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	assert.equal(providerFlowRes.isError, undefined)
 	const providerFlowData = JSON.parse(providerFlowRes.content[0].text)
 	assert.equal(providerFlowData.actionRequired, 'oauth_flow')
-	assert.ok(providerFlowData.connectUrl.includes(`session_id=${adminSession.id}`))
-	assert.ok(providerFlowData.connectUrl.includes('provider=github'))
+	const linkConnectUrl = new URL(providerFlowData.connectUrl)
+	assert.equal(linkConnectUrl.searchParams.get('session_id'), null, 'link_login connectUrl never embeds raw session_id')
+	const linkSetupCode = linkConnectUrl.searchParams.get('code')
+	assert.ok(linkSetupCode)
+	const rawSessionAuthPage = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?session_id=${adminSession.id}&provider=github`)
+	assert.equal(rawSessionAuthPage.status, 403, 'GET /oauth/authorize rejects raw session_id parameter')
+	const rawSessionAuthPost = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ session_id: adminSession.id, provider: 'github' }).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(rawSessionAuthPost.status, 403, 'POST /oauth/authorize/consent rejects raw session_id parameter')
 	const authPageRes = await fetch(providerFlowData.connectUrl)
 	assert.equal(authPageRes.status, 200)
 	const authPageHtml = await authPageRes.text()
 	assert.match(authPageHtml, /Link sign-in provider/)
+	assert.match(authPageHtml, /"linkMode":true/)
+	assert.equal(authPageHtml.includes(adminSession.id), false, 'Link authorize HTML never embeds raw session_id')
+	const setupCallbackReplay = await fetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${linkSetupCode}`)
+	assert.equal(setupCallbackReplay.status, 403, 'setup_link code cannot be used directly at /oauth/callback')
+	const freshLinkRes = await executeTool('admin', {
+		action: 'link_login',
+		provider: 'github'
+	}, adminSession.token, `http://127.0.0.1:${addr.port}`)
+	const freshLinkCode = new URL(JSON.parse(freshLinkRes.content[0].text).connectUrl).searchParams.get('code')
 	const consentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({
-			session_id: adminSession.id,
+			code: freshLinkCode,
 			provider: 'github'
 		}).toString(),
 		redirect: 'manual'
 	})
 	assert.equal(consentRes.status, 302)
+	const replayLinkConsent = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({
+			code: freshLinkCode,
+			provider: 'github'
+		}).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(replayLinkConsent.status, 403, 'setup_link code is single-use and rejected on replay')
 	const authStateToken = new URL(consentRes.headers.get('location')).searchParams.get('state')
 	assert.ok(authStateToken)
 	let ghMockLogin = 'jessetane'
@@ -3426,10 +3502,13 @@ test('SSO_DOMAINS pinning, login isolation, strict outbound sharing, and verifie
 		}, corpAdmin.token)
 		assert.equal(linkOtherFromPinned.isError, true, 'link_login rejects linking another provider onto a user holding a pinned domain login')
 		assert.match(linkOtherFromPinned.content[0].text, /SSO domain "corp\.com"/)
+		const preLinkSetup = db.tokens.createState({ mode: 'setup_link', sessionId: corpAdmin.id, provider: 'github' })
+		const getOtherFromPinned = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?code=${preLinkSetup}`)
+		assert.equal(getOtherFromPinned.status, 403, 'GET /oauth/authorize rejects setup_link code targeting another provider onto a pinned domain user')
 		const consentOtherFromPinned = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({ session_id: corpAdmin.id, provider: 'github' }).toString(),
+			body: new URLSearchParams({ code: preLinkSetup, provider: 'github' }).toString(),
 			redirect: 'manual'
 		})
 		assert.equal(consentOtherFromPinned.status, 403, 'handleAuthorizeConsent rejects linking another provider onto a pinned domain user')
@@ -4392,7 +4471,8 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 	})
 	assert.equal(noParamsConsentRes.status, 403)
 	assert.match(await noParamsConsentRes.text(), /admin session required/)
-	const connectPageRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/connect?session_id=${adminSession.id}&services=repo,gist,notifications&write=repo,gist`)
+	const ghSetupCode = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSession.id, provider: 'github' })
+	const connectPageRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/connect?code=${ghSetupCode}&services=repo,gist,notifications&write=repo,gist`)
 	assert.equal(connectPageRes.status, 200)
 	const connectHtml = await connectPageRes.text()
 	assert.match(connectHtml, /"provider":\{"id":"github","name":"GitHub"\}/)
@@ -4403,15 +4483,16 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 	const missingEnvConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/github/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ session_id: adminSession.id }).toString(),
+		body: new URLSearchParams({ code: ghSetupCode }).toString(),
 		redirect: 'manual'
 	})
 	assert.equal(missingEnvConsentRes.status, 500)
 	assert.match(await missingEnvConsentRes.text(), /GITHUB_CLIENT_ID environment variable is missing/)
 	process.env.GITHUB_CLIENT_ID = 'gh-test-client-id'
 	process.env.GITHUB_CLIENT_SECRET = 'gh-test-client-secret'
+	const ghValidSetupCode = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSession.id, provider: 'github' })
 	const consentBody = new URLSearchParams({
-		session_id: adminSession.id,
+		code: ghValidSetupCode,
 		app_name: 'My GitHub'
 	})
 	consentBody.append('services', 'REPO,GIST,NOTIFICATIONS')
@@ -4560,6 +4641,16 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	const freshMaster = db.sqlite.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE tbl_name = 'users' ORDER BY type, name").all()
 	const origGoogleId = process.env.GOOGLE_CLIENT_ID
 	const origGithubId = process.env.GITHUB_CLIENT_ID
+	const gatedAdminUser = db.users.create()
+	const gatedAdminSession = db.tokens.create({ userId: gatedAdminUser.id, provider: 'self', admin: 1 })
+	const gatedLocalConsent = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ token: gatedAdminSession.token, session_name: 'Blocked Local Token' }).toString(),
+		redirect: 'manual'
+	})
+	assert.equal(gatedLocalConsent.status, 403, 'POST /oauth/authorize/consent rejects localToken when OAuth providers are configured')
+	assert.match(await gatedLocalConsent.text(), /local token sign-in is disabled/)
 	try {
 		delete process.env.GOOGLE_CLIENT_ID
 		delete process.env.GITHUB_CLIENT_ID
