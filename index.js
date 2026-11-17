@@ -18,6 +18,15 @@ const host = process.env.HOST || '::1'
 const port = process.env.PORT || '8080'
 const corsOrigin = process.env.CORS_ORIGIN || '*'
 
+const CORS_OAUTH_PATHS = new Set(['/oauth/token', '/oauth/register', '/oauth/revoke'])
+
+function isCorsRoute (pathname, method) {
+	if (pathname === '/') return method === 'POST' || method === 'OPTIONS'
+	if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return true
+	if (pathname.startsWith('/api/') || pathname.startsWith('/.well-known/')) return true
+	return CORS_OAUTH_PATHS.has(pathname)
+}
+
 function resolveToken (req) {
 	const auth = req.headers.authorization || ''
 	return auth.replace(/^Bearer\s+/i, '').trim() || req.headers['x-api-key'] || null
@@ -31,17 +40,19 @@ const server = http.createServer(async (req, res) => {
 			console.log(`[${res.statusCode}] ${req.method} ${req.url} (${duration}ms)`)
 		}
 	})
-	res.setHeader('access-control-allow-origin', corsOrigin)
-	res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-	res.setHeader('access-control-allow-headers', 'authorization, content-type, mcp-session-id, mcp-protocol-version, last-event-id, x-api-key, accept')
-	res.setHeader('access-control-expose-headers', 'WWW-Authenticate, Mcp-Session-Id, MCP-Protocol-Version')
-	if (req.method === 'OPTIONS') {
-		res.statusCode = 204
-		res.end()
-		return
-	}
 	const url = new URL(req.url, 'http://localhost')
 	const pathname = url.pathname.replace(/\/+$/, '') || '/'
+	if (isCorsRoute(pathname, req.method)) {
+		res.setHeader('access-control-allow-origin', corsOrigin)
+		res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+		res.setHeader('access-control-allow-headers', 'authorization, content-type, mcp-session-id, mcp-protocol-version, last-event-id, x-api-key, accept')
+		res.setHeader('access-control-expose-headers', 'WWW-Authenticate, Mcp-Session-Id, MCP-Protocol-Version')
+		if (req.method === 'OPTIONS') {
+			res.statusCode = 204
+			res.end()
+			return
+		}
+	}
 	const query = Object.fromEntries(url.searchParams)
 	const token = resolveToken(req)
 	try {
@@ -50,8 +61,13 @@ const server = http.createServer(async (req, res) => {
 				await handleMcp(req, res, token)
 				return
 			}
-			sendHtml(res, INDEX_HTML.replaceAll('{{APP_URL}}', getBaseUrl(req)))
-			return
+			if (req.method === 'GET' || req.method === 'HEAD') {
+				sendHtml(res, INDEX_HTML.replaceAll('{{APP_URL}}', getBaseUrl(req)))
+				return
+			}
+			const err = new Error('Method Not Allowed')
+			err.status = 405
+			throw err
 		}
 		if (pathname === '/style.css' && (req.method === 'GET' || req.method === 'HEAD')) {
 			res.statusCode = 200
