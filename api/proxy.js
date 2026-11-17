@@ -1,7 +1,7 @@
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy } from '../policy.js'
-import { isXml } from '../util.js'
+import { serializeFormBody } from '../util.js'
 
 export {
 	request,
@@ -34,7 +34,7 @@ async function readResponseBody (res, maxBytes) {
 	return Buffer.concat(chunks)
 }
 
-async function executeUpstream ({ token, url, method = 'GET', body, headers = {}, onStatus }) {
+async function executeUpstream ({ token, url, method = 'GET', body, headers = {}, raw = false, onStatus }) {
 	const reqHeaders = {}
 	if (headers && typeof headers === 'object') {
 		for (const [k, v] of Object.entries(headers)) {
@@ -72,31 +72,22 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 	}
 	let reqBody
 	if (body !== undefined && body !== null) {
-		if (typeof body === 'object') {
+		if (ArrayBuffer.isView(body)) {
+			if (body.byteLength > 0) {
+				reqBody = Buffer.from(body.buffer, body.byteOffset, body.byteLength)
+			}
+		} else if (typeof body === 'object') {
 			const ct = (reqHeaders['content-type'] || '').split(';')[0].trim().toLowerCase()
 			if (ct === 'application/x-www-form-urlencoded') {
-				const params = new URLSearchParams()
-				for (const [k, v] of Object.entries(body)) {
-					if (v === undefined || v === null) continue
-					if (Array.isArray(v)) {
-						for (const item of v) {
-							if (item !== undefined && item !== null) {
-								params.append(k, typeof item === 'object' ? JSON.stringify(item) : String(item))
-							}
-						}
-					} else {
-						params.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v))
-					}
-				}
-				reqBody = params.toString()
+				reqBody = Buffer.from(serializeFormBody(body), 'utf8')
 			} else {
-				reqHeaders['content-type'] = reqHeaders['content-type'] || 'application/json'
-				reqBody = JSON.stringify(body)
+				reqHeaders['content-type'] ||= 'application/json'
+				reqBody = Buffer.from(JSON.stringify(body), 'utf8')
 			}
 		} else {
-			reqBody = String(body)
-			if (!reqHeaders['content-type'] && isXml(reqBody)) {
-				reqHeaders['content-type'] = 'application/xml'
+			const str = String(body)
+			if (str.length > 0) {
+				reqBody = Buffer.from(str, 'utf8')
 			}
 		}
 	}
@@ -121,10 +112,17 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 		throw err
 	}
 	const rawContentType = res.headers.get('content-type') || ''
+	const buf = await readResponseBody(res, maxFileSizeBytes)
+	if (raw) {
+		return {
+			status: res.status,
+			contentType: rawContentType || null,
+			body: buf
+		}
+	}
 	const contentType = rawContentType.split(';')[0].trim().toLowerCase()
 	const charsetMatch = rawContentType.match(/charset=([^;]+)/i)
 	const charset = charsetMatch ? charsetMatch[1].trim().replace(/^["']|["']$/g, '') : undefined
-	const buf = await readResponseBody(res, maxFileSizeBytes)
 	let result
 	if (contentType === 'application/json' || contentType.endsWith('+json')) {
 		const str = buf.toString('utf8')
@@ -159,7 +157,7 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 	return result
 }
 
-async function request ({ provider: providerName = 'google', url, method = 'GET', body, headers, appId, account, appUrl: rawAppUrl } = {}, token) {
+async function request ({ provider: providerName = 'google', url, method = 'GET', body, headers, appId, account, appUrl: rawAppUrl, raw = false } = {}, token) {
 	if (!url) {
 		const err = new Error('URL is required')
 		err.status = 400
@@ -244,7 +242,7 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 			err.status = 403
 			throw err
 		}
-		let contentType
+		let contentType = ''
 		if (headers && typeof headers === 'object') {
 			for (const [k, v] of Object.entries(headers)) {
 				if (k.toLowerCase() === 'content-type' && v !== undefined && v !== null) {
@@ -253,13 +251,14 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 				}
 			}
 		}
+		const objectFormat = contentType.split(';')[0].trim().toLowerCase() === 'application/x-www-form-urlencoded' ? 'form' : 'json'
 		const sharePolicy = targetLink.app?.type === 'share' ? targetLink.app.credentials?.policy : null
 		if (sharePolicy) {
 			const check = evaluatePolicy(sharePolicy, {
 				url: resolvedUrl,
 				method: normalizedMethod,
 				body,
-				contentType
+				objectFormat
 			})
 			if (!check.allowed) {
 				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by shared app policy'}`)
@@ -272,7 +271,7 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 				url: resolvedUrl,
 				method: normalizedMethod,
 				body,
-				contentType
+				objectFormat
 			})
 			if (!check.allowed) {
 				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by session policy'}`)
@@ -319,9 +318,13 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 			method: normalizedMethod,
 			body,
 			headers,
+			raw,
 			onStatus: s => { upstreamStatus = s }
 		})
-		recordLog(upstreamStatus, null)
+		const logError = raw && upstreamStatus >= 400
+			? (result.body.length > 0 ? result.body.subarray(0, 512).toString('utf8') : `HTTP ${upstreamStatus}`)
+			: null
+		recordLog(upstreamStatus, logError)
 		return result
 	} catch (err) {
 		recordLog(err.status || 502, err.message)

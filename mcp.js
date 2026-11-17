@@ -105,8 +105,13 @@ const adminTool = {
 							description: 'Optional map of URL query parameter names to expected glob patterns, arrays of patterns, or null (to match an absent parameter, e.g. ["none", null]).'
 						},
 						body: {
-							type: 'object',
-							description: 'Optional map of request body field paths (supporting dot-notation like "recipient.email") to expected glob patterns, arrays of patterns, or null (to match an absent/null field).'
+							type: ['object', 'string', 'array', 'null'],
+							description: 'Optional request body rule: field-map object (supporting dot-notation like "recipient.email" mapped to expected glob patterns, arrays of patterns, or null for absent/null fields), raw body glob pattern string (e.g. "*<DomainList>*"), array of raw body glob strings, or null to require an empty body.'
+						},
+						bodyType: {
+							type: 'string',
+							enum: ['json', 'form'],
+							description: 'Serialization format when "body" is a field-map object: "json" (default) or "form" (application/x-www-form-urlencoded).'
 						},
 						description: {
 							type: 'string',

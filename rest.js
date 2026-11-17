@@ -1,16 +1,24 @@
 import * as api from './api/index.js'
 import { getBaseUrl } from './oauth.js'
-import { getBody, sendJson, isXml } from './util.js'
+import { getRawBody, getBody, sendJson } from './util.js'
 
 export {
 	handleRest
 }
 
-function sendBinary (res, data, mimeType = 'application/octet-stream') {
-	res.statusCode = 200
-	res.setHeader('content-type', mimeType)
-	res.end(Buffer.from(data, 'base64'))
-}
+const STRIPPED_PROXY_HEADERS = new Set([
+	'host',
+	'connection',
+	'keep-alive',
+	'transfer-encoding',
+	'te',
+	'trailer',
+	'upgrade',
+	'content-length',
+	'authorization',
+	'x-api-key',
+	'cookie'
+])
 
 async function parseJsonBody (req) {
 	const rawBody = await getBody(req)
@@ -38,32 +46,20 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 	const qs = forwardParams.toString()
 	const search = qs ? `?${qs}` : ''
 	const targetUrl = `${targetPath}${search}`
+	const headers = {}
+	for (const [k, v] of Object.entries(req.headers)) {
+		const lower = k.toLowerCase()
+		if (STRIPPED_PROXY_HEADERS.has(lower) || v === undefined) continue
+		headers[lower] = Array.isArray(v) ? v.join(', ') : v
+	}
 	let body = undefined
-	const headers = req.headers['content-type'] ? { 'content-type': req.headers['content-type'] } : undefined
 	if (!['GET', 'HEAD'].includes(req.method)) {
-		const rawBody = await getBody(req)
-		if (rawBody && rawBody.trim()) {
-			const contentType = (req.headers['content-type'] || '').toLowerCase()
-			if (contentType.includes('application/json') || contentType.includes('+json')) {
-				try {
-					body = JSON.parse(rawBody)
-				} catch {
-					const err = new Error('Invalid JSON body')
-					err.status = 400
-					throw err
-				}
-			} else if (!contentType && (rawBody.trim().startsWith('{') || rawBody.trim().startsWith('['))) {
-				try {
-					body = JSON.parse(rawBody)
-				} catch {
-					body = rawBody
-				}
-			} else {
-				body = rawBody
-			}
+		const rawBody = await getRawBody(req)
+		if (rawBody.byteLength > 0) {
+			body = rawBody
 		}
 	}
-	const result = await api.proxy.request({
+	const upstream = await api.proxy.request({
 		provider,
 		url: targetUrl,
 		method: req.method,
@@ -71,19 +67,14 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 		headers,
 		appId,
 		account,
-		appUrl: getBaseUrl(req)
+		appUrl: getBaseUrl(req),
+		raw: true
 	}, token)
-	if (result?.binary) {
-		sendBinary(res, result.data, result.mimeType)
-		return
+	res.statusCode = upstream.status
+	if (upstream.contentType) {
+		res.setHeader('content-type', upstream.contentType)
 	}
-	if (typeof result === 'string') {
-		res.statusCode = 200
-		res.setHeader('content-type', isXml(result) ? 'application/xml; charset=utf-8' : 'text/plain; charset=utf-8')
-		res.end(result)
-		return
-	}
-	sendJson(res, result)
+	res.end(upstream.body)
 }
 
 const routes = {
