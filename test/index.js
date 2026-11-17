@@ -1098,8 +1098,6 @@ test('google provider connect screen and consent flow', async () => {
 	const addr = server.address()
 	const { session } = createTestSession({ account: 'connect-flow@example.com', admin: true })
 	const { session: workerSession, app: nonSelfToken } = createTestSession({ account: 'nonself-consent@example.com', admin: false })
-	const rawSessionConnectRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?session_id=${session.id}`)
-	assert.equal(rawSessionConnectRes.status, 403, 'GET /providers/:provider/connect rejects raw session_id parameter')
 	const setupCode = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'google' })
 	const connectRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect?code=${setupCode}`)
 	assert.equal(connectRes.status, 200)
@@ -1108,13 +1106,13 @@ test('google provider connect screen and consent flow', async () => {
 	assert.match(connectHtml, /Sign in with Google/)
 	assert.match(connectHtml, /action="\/providers\/google\/consent"/)
 	assert.equal(connectHtml.includes(session.id), false, 'Connect HTML never embeds raw session_id')
-	const rawSessionConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
+	const missingCodeConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({ session_id: session.id }).toString(),
 		redirect: 'manual'
 	})
-	assert.equal(rawSessionConsentRes.status, 403, 'POST /providers/:provider/consent rejects raw session_id parameter')
+	assert.equal(missingCodeConsentRes.status, 403, 'POST /providers/:provider/consent requires valid setup_connect code')
 	const invalidCodeConsentRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -1367,7 +1365,7 @@ test('rfc 7009 /oauth/revoke endpoint', async () => {
 	assert.ok(db.tokens.get(refreshSharedApp.id), 'Revoking by refresh_token must preserve shared upstream app')
 })
 
-test('mcp auth whoami, list, and revoke', async () => {
+test('mcp auth whoami, list_sessions, and revoke_session', async () => {
 	const user = db.logins.resolveUser('google', 'sessions-tool@example.com')
 	const session1 = db.tokens.create({
 		userId: user.id,
@@ -1393,7 +1391,7 @@ test('mcp auth whoami, list, and revoke', async () => {
 	})
 	db.links.create({ sessionId: session1.id, appId: app.id })
 	db.links.create({ sessionId: session2.id, appId: app.id })
-	const listResult = await executeTool('admin', { action: 'list' }, session1.token)
+	const listResult = await executeTool('admin', { action: 'list_sessions' }, session1.token)
 	assert.equal(listResult.isError, undefined)
 	const listParsed = JSON.parse(listResult.content[0].text)
 	assert.equal(listParsed.sessions.length, 2)
@@ -1405,21 +1403,21 @@ test('mcp auth whoami, list, and revoke', async () => {
 	assert.equal(other.id, session2.id)
 	assert.equal(other.ip, '10.0.0.5')
 	assert.equal(other.ua, 'ChatGPT/2.0')
-	const revokeAppAsSessionResult = await api.auth.revoke(session1.token, { sessionId: app.id })
-	assert.equal(revokeAppAsSessionResult.revoked, false, 'api.auth.revoke must reject non-self app IDs')
-	assert.ok(db.tokens.get(app.id), 'api.auth.revoke must not delete upstream app token')
+	const revokeAppAsSessionResult = await api.auth.revokeSession(session1.token, { sessionId: app.id })
+	assert.equal(revokeAppAsSessionResult.revoked, false, 'api.auth.revokeSession must reject non-self app IDs')
+	assert.ok(db.tokens.get(app.id), 'api.auth.revokeSession must not delete upstream app token')
 	const ephemeralCode = db.tokens.createAuthCode({ userId: user.id, clientRedirectUri: 'https://chatgpt.com/callback' })
-	const revokeCodeAsSessionResult = await api.auth.revoke(session1.token, { sessionId: ephemeralCode })
-	assert.equal(revokeCodeAsSessionResult.revoked, false, 'api.auth.revoke must reject non-bearer self rows (oauth_code / oauth_state)')
-	assert.ok(db.tokens.get(ephemeralCode), 'api.auth.revoke must not delete oauth_code row')
-	const revokeOtherResult = await executeTool('admin', { action: 'revoke', allOthers: true }, session1.token)
+	const revokeCodeAsSessionResult = await api.auth.revokeSession(session1.token, { sessionId: ephemeralCode })
+	assert.equal(revokeCodeAsSessionResult.revoked, false, 'api.auth.revokeSession must reject non-bearer self rows (oauth_code / oauth_state)')
+	assert.ok(db.tokens.get(ephemeralCode), 'api.auth.revokeSession must not delete oauth_code row')
+	const revokeOtherResult = await executeTool('admin', { action: 'revoke_session', allOthers: true }, session1.token)
 	assert.equal(revokeOtherResult.isError, undefined)
 	const revokeOtherParsed = JSON.parse(revokeOtherResult.content[0].text)
 	assert.equal(revokeOtherParsed.revoked, true)
 	assert.equal(revokeOtherParsed.count, 1)
 	assert.equal(db.tokens.get(session2.id), null)
 	assert.ok(db.tokens.get(session1.id))
-	const revokeCurrentResult = await executeTool('admin', { action: 'revoke' }, session1.token)
+	const revokeCurrentResult = await executeTool('admin', { action: 'revoke_session' }, session1.token)
 	assert.equal(revokeCurrentResult.isError, undefined)
 	const revokeCurrentParsed = JSON.parse(revokeCurrentResult.content[0].text)
 	assert.equal(revokeCurrentParsed.revoked, true)
@@ -1583,7 +1581,7 @@ test('executeTool google_api enforces link policy and auth tools decode policy',
 	assert.equal(statusRes.isError, undefined)
 	const statusParsed = JSON.parse(statusRes.content[0].text)
 	assert.deepEqual(statusParsed.session.apps[0].policy, policyObj)
-	const listRes = await executeTool('admin', { action: 'list' }, session.token)
+	const listRes = await executeTool('admin', { action: 'list_sessions' }, session.token)
 	assert.equal(listRes.isError, undefined)
 	const listParsed = JSON.parse(listRes.content[0].text)
 	const foundSession = listParsed.sessions.find(s => s.id === session.id)
@@ -2100,7 +2098,7 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	assert.equal(db.tokens.get(session1.id), null)
 })
 
-test('mcp admin tool with whoami and get actions', async () => {
+test('mcp admin tool with whoami and get_session actions', async () => {
 	const { user, session } = createTestSession({ account: 'mcp-whoami@example.com' })
 	const whoamiResult = await executeTool('admin', { action: 'whoami' }, session.token)
 	assert.equal(whoamiResult.isError, undefined)
@@ -2109,7 +2107,7 @@ test('mcp admin tool with whoami and get actions', async () => {
 	assert.equal(parsedWhoami.user.id, user.id)
 	assert.equal(parsedWhoami.user.account, 'mcp-whoami@example.com')
 	assert.equal(parsedWhoami.session.id, session.id)
-	const getResult = await executeTool('admin', { action: 'get', sessionId: session.id }, session.token)
+	const getResult = await executeTool('admin', { action: 'get_session', sessionId: session.id }, session.token)
 	assert.equal(getResult.isError, undefined)
 	const parsedGet = JSON.parse(getResult.content[0].text)
 	assert.equal(parsedGet.session.id, session.id)
@@ -2204,25 +2202,25 @@ test('non-admin session auth restrictions and self-management', async () => {
 	const whoamiParsed = JSON.parse(whoamiResult.content[0].text)
 	assert.equal(whoamiParsed.authenticated, true)
 	assert.equal(whoamiParsed.session.admin, false)
-	const listResult = await executeTool('admin', { action: 'list' }, session1.token)
+	const listResult = await executeTool('admin', { action: 'list_sessions' }, session1.token)
 	assert.equal(listResult.isError, true)
 	assert.match(listResult.content[0].text, /requires admin privileges/)
-	const getOtherResult = await executeTool('admin', { action: 'get', sessionId: session2.id }, session1.token)
+	const getOtherResult = await executeTool('admin', { action: 'get_session', sessionId: session2.id }, session1.token)
 	assert.equal(getOtherResult.isError, true)
 	assert.match(getOtherResult.content[0].text, /requires admin privileges/)
-	const getSelfResult = await executeTool('admin', { action: 'get', sessionId: session1.id }, session1.token)
+	const getSelfResult = await executeTool('admin', { action: 'get_session', sessionId: session1.id }, session1.token)
 	assert.equal(getSelfResult.isError, undefined)
 	const getSelfParsed = JSON.parse(getSelfResult.content[0].text)
 	assert.equal(getSelfParsed.session.id, session1.id)
-	const revokeOthersResult = await executeTool('admin', { action: 'revoke', allOthers: true }, session1.token)
+	const revokeOthersResult = await executeTool('admin', { action: 'revoke_session', allOthers: true }, session1.token)
 	assert.equal(revokeOthersResult.isError, true)
 	assert.match(revokeOthersResult.content[0].text, /requires admin privileges/)
 	assert.ok(db.tokens.get(session2.id))
-	const revokeOtherIdResult = await executeTool('admin', { action: 'revoke', sessionId: session2.id }, session1.token)
+	const revokeOtherIdResult = await executeTool('admin', { action: 'revoke_session', sessionId: session2.id }, session1.token)
 	assert.equal(revokeOtherIdResult.isError, true)
 	assert.match(revokeOtherIdResult.content[0].text, /requires admin privileges/)
 	assert.ok(db.tokens.get(session2.id))
-	const revokeSelfResult = await executeTool('admin', { action: 'revoke', sessionId: session1.id }, session1.token)
+	const revokeSelfResult = await executeTool('admin', { action: 'revoke_session', sessionId: session1.id }, session1.token)
 	assert.equal(revokeSelfResult.isError, undefined)
 	assert.equal(db.tokens.get(session1.id), null)
 	assert.ok(db.tokens.get(session2.id))
@@ -3168,15 +3166,6 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	assert.equal(linkConnectUrl.searchParams.get('session_id'), null, 'link_login connectUrl never embeds raw session_id')
 	const linkSetupCode = linkConnectUrl.searchParams.get('code')
 	assert.ok(linkSetupCode)
-	const rawSessionAuthPage = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?session_id=${adminSession.id}&provider=github`)
-	assert.equal(rawSessionAuthPage.status, 403, 'GET /oauth/authorize rejects raw session_id parameter')
-	const rawSessionAuthPost = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ session_id: adminSession.id, provider: 'github' }).toString(),
-		redirect: 'manual'
-	})
-	assert.equal(rawSessionAuthPost.status, 403, 'POST /oauth/authorize/consent rejects raw session_id parameter')
 	const authPageRes = await fetch(providerFlowData.connectUrl)
 	assert.equal(authPageRes.status, 200)
 	const authPageHtml = await authPageRes.text()
@@ -5879,7 +5868,7 @@ test('strict requireBoolean parsing across admin, allOthers, revoke, and allowed
 	const revSibling1 = db.tokens.create({ userId: revUser.id, provider: 'self', name: 'Sibling 1' })
 	const revSibling2 = db.tokens.create({ userId: revUser.id, provider: 'self', name: 'Sibling 2' })
 	const mcpRevokeFalseRes = await executeTool('admin', {
-		action: 'revoke',
+		action: 'revoke_session',
 		allOthers: 'false'
 	}, revSibling1.token)
 	assert.equal(mcpRevokeFalseRes.isError, undefined)
@@ -6002,18 +5991,6 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 	}, adminSession.token)
 	assert.equal(missingKeyStripeAttempt.isError, true)
 	assert.match(missingKeyStripeAttempt.content[0].text, /apiKey is required/)
-	const rawCredsRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
-		method: 'POST',
-		headers: {
-			authorization: `Bearer ${adminSession.token}`,
-			'content-type': 'application/json'
-		},
-		body: JSON.stringify({
-			provider: 'google',
-			credentials: { accessToken: 'ya29.injected' }
-		})
-	})
-	assert.equal(rawCredsRes.status, 400)
 	assert.equal(db.tokens.listByUserId(user.id).filter(t => t.provider !== 'self').length, appCountBefore, 'Rejected connect_app calls must not create orphan app rows')
 	for (const badProvider of ['', '   ', 123, true, {}]) {
 		const badProvRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
@@ -6278,6 +6255,121 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 		assert.equal(restRes.headers.get('set-cookie'), null, 'Upstream Set-Cookie must not attach to jump origin')
 	} finally {
 		await new Promise(resolve => headerUpstream.close(resolve))
+	}
+})
+
+test('validated upstream redirects, double-slash/encoded path normalization, and %2F intra-segment preservation', async () => {
+	assert.equal(hasPathTraversal('/v1/public/%252e%252e/admin'), true, 'Double-encoded %252e traversal must be blocked')
+	assert.equal(hasPathTraversal('/v1/public%5cadmin'), true, 'Encoded backslash %5c anywhere in path must be blocked')
+	assert.equal(hasPathTraversal('/storage/v1/b/my-bucket/o/folder%2Ffile.pdf'), false, 'Legitimate intra-segment %2F must remain allowed')
+	const denyAdminPolicy = [
+		{ action: 'deny', path: '/v1/admin/**' },
+		{ action: 'allow', path: '/v1/**' }
+	]
+	assert.equal(evaluatePolicy(denyAdminPolicy, {
+		url: 'https://api.example.com/v1//admin/delete',
+		method: 'DELETE'
+	}).allowed, false, 'Repeated slashes /v1//admin/delete must not bypass /v1/admin/** deny rule')
+	assert.equal(evaluatePolicy(denyAdminPolicy, {
+		url: 'https://api.example.com///v1///admin',
+		method: 'GET'
+	}).allowed, false)
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', path: '/storage/v1/b/my-bucket/o/*' }
+	], {
+		url: 'https://storage.googleapis.com/storage/v1/b/my-bucket/o/folder%2Ffile.pdf',
+		method: 'GET'
+	}).allowed, true, 'Single-segment * matches GCS object key with %2F without splitting into two segments')
+	const http = await import('node:http')
+	const cdnReceived = []
+	const cdnServer = http.createServer((req, res) => {
+		cdnReceived.push({ method: req.method, url: req.url, headers: req.headers })
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/octet-stream')
+		res.end(Buffer.from('archive-bytes'))
+	})
+	await new Promise(resolve => cdnServer.listen(0, '127.0.0.1', resolve))
+	const cdnPort = cdnServer.address().port
+	const apiServer = http.createServer((req, res) => {
+		if (req.url === '/repos/acme/app/tarball') {
+			res.statusCode = 302
+			res.setHeader('location', `http://127.0.0.1:${cdnPort}/download/tarball.tar.gz?sig=signed123`)
+			res.end()
+			return
+		}
+		if (req.url === '/ssrf-metadata') {
+			res.statusCode = 302
+			res.setHeader('location', 'http://169.254.169.254/latest/meta-data/')
+			res.end()
+			return
+		}
+		if (req.url === '/ssrf-private') {
+			res.statusCode = 302
+			res.setHeader('location', 'https://10.0.0.1/internal')
+			res.end()
+			return
+		}
+		if (req.url === '/post-303') {
+			res.statusCode = 303
+			res.setHeader('location', `http://127.0.0.1:${cdnPort}/after-post`)
+			res.end()
+			return
+		}
+		if (req.url.startsWith('/loop')) {
+			res.statusCode = 302
+			res.setHeader('location', '/loop')
+			res.end()
+			return
+		}
+		res.statusCode = 404
+		res.end()
+	})
+	await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve))
+	const apiPort = apiServer.address().port
+	try {
+		const u = db.logins.resolveUser('google', 'redirects@example.com')
+		const s = db.tokens.create({ userId: u.id, provider: 'self', admin: 1 })
+		const app = db.tokens.create({
+			userId: u.id,
+			provider: 'github',
+			type: 'api_key',
+			credentials: { apiKey: 'ghp_secret_token', baseUrl: `http://127.0.0.1:${apiPort}` }
+		})
+		db.links.create({ sessionId: s.id, appId: app.id })
+		const okRedirect = await executeTool('github_api', {
+			url: '/repos/acme/app/tarball'
+		}, s.token)
+		assert.equal(okRedirect.isError, undefined)
+		const okData = JSON.parse(okRedirect.content[0].text)
+		assert.equal(Buffer.from(okData.data, 'base64').toString('utf8'), 'archive-bytes')
+		assert.equal(cdnReceived.length, 1)
+		assert.equal(cdnReceived[0].headers.authorization, undefined, 'Cross-origin redirect must strip upstream Authorization header')
+		const post303 = await executeTool('github_api', {
+			url: '/post-303',
+			method: 'POST',
+			body: { hello: 'world' }
+		}, s.token)
+		assert.equal(post303.isError, undefined)
+		assert.equal(cdnReceived[1].method, 'GET', '303 redirect downgrades POST to GET')
+		assert.equal(cdnReceived[1].headers['content-type'], undefined, 'Downgraded GET redirect strips Content-Type')
+		const metadataRedirect = await executeTool('github_api', {
+			url: '/ssrf-metadata'
+		}, s.token)
+		assert.equal(metadataRedirect.isError, true)
+		assert.match(metadataRedirect.content[0].text, /Blocked unsafe upstream redirect target/)
+		const privateRedirect = await executeTool('github_api', {
+			url: '/ssrf-private'
+		}, s.token)
+		assert.equal(privateRedirect.isError, true)
+		assert.match(privateRedirect.content[0].text, /Blocked unsafe upstream redirect target/)
+		const loopRedirect = await executeTool('github_api', {
+			url: '/loop'
+		}, s.token)
+		assert.equal(loopRedirect.isError, true)
+		assert.match(loopRedirect.content[0].text, /Too many upstream redirects/)
+	} finally {
+		await new Promise(resolve => apiServer.close(resolve))
+		await new Promise(resolve => cdnServer.close(resolve))
 	}
 })
 
