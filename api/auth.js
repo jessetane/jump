@@ -68,15 +68,8 @@ function formatSession (s, currentSessionId) {
 		created: s.created,
 		updated: s.updated,
 		...(currentSessionId !== undefined ? { isCurrent: s.id === currentSessionId } : {}),
-		apps: links.map(l => ({
-			id: l.app?.id,
-			provider: l.app?.provider,
-			type: l.app?.type,
-			name: l.app?.name,
-			account: l.app?.credentials?.account || null,
-			scopes: l.app?.scopes,
-			expiresAt: l.app?.expiresAt,
-			...(l.app?.sharedBy ? { sharedBy: l.app.sharedBy } : {}),
+		apps: links.filter(l => l.app).map(l => ({
+			...formatApp(l.app),
 			policy: parsePolicy(l.policy)
 		}))
 	}

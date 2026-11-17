@@ -70,8 +70,8 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 		raw: true
 	}, token)
 	res.statusCode = upstream.status
-	if (upstream.contentType) {
-		res.setHeader('content-type', upstream.contentType)
+	for (const [k, v] of Object.entries(upstream.headers)) {
+		res.setHeader(k, v)
 	}
 	res.end(upstream.body)
 }
@@ -80,6 +80,9 @@ const routes = {
 	'/api/health': {
 		GET (req, res) {
 			sendText(res, 'ok\n')
+		},
+		HEAD (req, res) {
+			sendText(res, '')
 		}
 	},
 	'/api/whoami': {

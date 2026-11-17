@@ -8,6 +8,24 @@ export {
 	readResponseBody
 }
 
+const DEFAULT_TIMEOUT_MS = 60000
+const STRIPPED_RESPONSE_HEADERS = new Set([
+	'connection',
+	'keep-alive',
+	'transfer-encoding',
+	'te',
+	'trailer',
+	'upgrade',
+	'content-encoding',
+	'content-length',
+	'set-cookie',
+	'access-control-allow-origin',
+	'access-control-allow-methods',
+	'access-control-allow-headers',
+	'access-control-expose-headers',
+	'access-control-allow-credentials'
+])
+
 async function readResponseBody (res, maxBytes) {
 	if (!res.body) return Buffer.alloc(0)
 	const chunks = []
@@ -92,9 +110,11 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 		}
 	}
 	const reqMethod = method.toUpperCase()
+	const timeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS
 	const fetchOpts = {
 		method: reqMethod,
-		headers: reqHeaders
+		headers: reqHeaders,
+		signal: AbortSignal.timeout(timeoutMs)
 	}
 	if (reqMethod !== 'GET' && reqMethod !== 'HEAD' && reqBody !== undefined) {
 		fetchOpts.body = reqBody
@@ -114,9 +134,16 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 	const rawContentType = res.headers.get('content-type') || ''
 	const buf = await readResponseBody(res, maxFileSizeBytes)
 	if (raw) {
+		const resHeaders = {}
+		for (const [k, v] of res.headers.entries()) {
+			const lower = k.toLowerCase()
+			if (!STRIPPED_RESPONSE_HEADERS.has(lower)) {
+				resHeaders[lower] = v
+			}
+		}
 		return {
 			status: res.status,
-			contentType: rawContentType || null,
+			headers: resHeaders,
 			body: buf
 		}
 	}

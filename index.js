@@ -110,4 +110,12 @@ if (process.env.NODE_ENV !== 'test') {
 	server.listen(port, host, () => {
 		console.log(`jump listening on ${host}:${port}`)
 	})
+	const shutdown = () => {
+		server.close(() => {
+			db.sqlite.close()
+			process.exit(0)
+		})
+	}
+	process.on('SIGINT', shutdown)
+	process.on('SIGTERM', shutdown)
 }

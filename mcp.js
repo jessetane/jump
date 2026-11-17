@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import RpcEngine from 'rpc-engine'
 import * as api from './api/index.js'
 import * as db from './db/index.js'
@@ -9,6 +10,8 @@ export {
 	redactLogArgs,
 	handleMcp
 }
+
+const PKG_VERSION = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 
 const REDACTED_KEYS = new Set(['apiKey', 'credentials', 'token'])
 const REDACTED_HEADERS = /^(?:authorization|proxy-authorization|x-api-key|cookie)$/i
@@ -308,7 +311,7 @@ const rpcMethods = {
 		return {
 			protocolVersion,
 			capabilities: { tools: { listChanged: false } },
-			serverInfo: { name: 'jump', version: '1.0.0' }
+			serverInfo: { name: 'jump', version: PKG_VERSION }
 		}
 	},
 	'notifications/initialized': () => {

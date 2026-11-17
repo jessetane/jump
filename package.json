@@ -1,8 +1,14 @@
 {
 	"name": "jump",
-	"version": "0.0.1",
+	"version": "0.1.0",
 	"type": "module",
 	"description": "MCP jump host for upstream REST APIs",
+	"license": "MIT",
+	"author": "Jesse Tane <jesse.tane@gmail.com>",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/jessetane/jump.git"
+	},
 	"main": "index.js",
 	"bin": {
 		"jump": "./index.js"

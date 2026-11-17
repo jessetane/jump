@@ -214,7 +214,8 @@ function createProvider (config) {
 						'content-type': 'application/x-www-form-urlencoded',
 						'user-agent': 'jump'
 					},
-					body: params.toString()
+					body: params.toString(),
+					signal: AbortSignal.timeout(30000)
 				})
 				let tokenData
 				try {
@@ -228,7 +229,8 @@ function createProvider (config) {
 						authorization: `Bearer ${tokenData.access_token}`,
 						accept: 'application/json',
 						'user-agent': 'jump'
-					}
+					},
+					signal: AbortSignal.timeout(30000)
 				})
 				if (!userRes.ok) {
 					let data = await userRes.text()
@@ -299,7 +301,8 @@ function createProvider (config) {
 							'content-type': 'application/x-www-form-urlencoded',
 							'user-agent': 'jump'
 						},
-						body: params.toString()
+						body: params.toString(),
+						signal: AbortSignal.timeout(30000)
 					})
 					const data = await parseTokenResponse(res, `Failed to refresh ${label} token`)
 					const expiresAt = data.expires_in ? Date.now() + (data.expires_in * 1000) : null
