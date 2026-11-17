@@ -22,7 +22,12 @@ const providers = {
 	github
 }
 
+const DEFAULT_OAUTH_TIMEOUT_MS = 30000
 const inflightRefreshes = new Map()
+
+function oauthTimeout () {
+	return AbortSignal.timeout(Number(process.env.OAUTH_TIMEOUT_MS) || DEFAULT_OAUTH_TIMEOUT_MS)
+}
 
 function parseGrantedServices (scopesStr, services) {
 	if (!scopesStr || typeof scopesStr !== 'string' || !services) return []
@@ -215,7 +220,7 @@ function createProvider (config) {
 						'user-agent': 'jump'
 					},
 					body: params.toString(),
-					signal: AbortSignal.timeout(30000)
+					signal: oauthTimeout()
 				})
 				let tokenData
 				try {
@@ -230,7 +235,7 @@ function createProvider (config) {
 						accept: 'application/json',
 						'user-agent': 'jump'
 					},
-					signal: AbortSignal.timeout(30000)
+					signal: oauthTimeout()
 				})
 				if (!userRes.ok) {
 					let data = await userRes.text()
@@ -267,7 +272,7 @@ function createProvider (config) {
 				try {
 					const clientId = process.env[`${envPrefix}_CLIENT_ID`]
 					const clientSecret = process.env[`${envPrefix}_CLIENT_SECRET`]
-					await oauth.revoke({ token, clientId, clientSecret, signal: AbortSignal.timeout(15000) })
+					await oauth.revoke({ token, clientId, clientSecret, signal: oauthTimeout() })
 				} catch (err) {
 					console.warn(`Failed to revoke token with ${label} upstream:`, err.message)
 				}
@@ -302,7 +307,7 @@ function createProvider (config) {
 							'user-agent': 'jump'
 						},
 						body: params.toString(),
-						signal: AbortSignal.timeout(30000)
+						signal: oauthTimeout()
 					})
 					const data = await parseTokenResponse(res, `Failed to refresh ${label} token`)
 					const expiresAt = data.expires_in ? Date.now() + (data.expires_in * 1000) : null

@@ -6587,6 +6587,34 @@ test('upstream SSRF filter blocks IANA special-purpose IP literals and private/s
 	}
 })
 
+test('OAUTH_TIMEOUT_MS governs upstream OAuth token, userinfo, refresh, and revoke timeouts', async () => {
+	const origFetch = globalThis.fetch
+	const origTimeout = process.env.OAUTH_TIMEOUT_MS
+	process.env.OAUTH_TIMEOUT_MS = '25'
+	globalThis.fetch = (input, init) => new Promise((resolve, reject) => {
+		init?.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true })
+	})
+	try {
+		await assert.rejects(() => google.exchangeCode('slow-code', 'http://localhost/cb'), /aborted|timeout/i)
+		const owner = db.logins.resolveUser('google', 'oauth-timeout@example.com')
+		const staleApp = db.tokens.create({
+			userId: owner.id,
+			provider: 'google',
+			type: 'oauth',
+			credentials: { accessToken: 'ya29.old', refreshToken: '1//slow-refresh' },
+			expiresAt: Date.now() - 1000
+		})
+		await assert.rejects(() => google.getFreshToken(staleApp), /aborted|timeout/i)
+		const start = Date.now()
+		await google.revokeToken(staleApp)
+		assert.ok(Date.now() - start < 1000, 'revokeToken aborts promptly at OAUTH_TIMEOUT_MS')
+	} finally {
+		globalThis.fetch = origFetch
+		if (origTimeout === undefined) delete process.env.OAUTH_TIMEOUT_MS
+		else process.env.OAUTH_TIMEOUT_MS = origTimeout
+	}
+})
+
 test('teardown server', (t, done) => {
 	server.close(() => {
 		fs.rmSync(testDbPath, { force: true })
