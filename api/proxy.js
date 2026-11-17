@@ -42,42 +42,49 @@ async function readResponseBody (res, maxBytes) {
 	return Buffer.concat(chunks)
 }
 
-async function executeUpstream ({ token, url, method = 'GET', body, headers = {}, raw = false, onStatus }) {
-	const reqHeaders = {}
+function attachAuth (targetUrl, baseHeaders, token) {
+	const hopHeaders = { ...baseHeaders }
+	delete hopHeaders.authorization
+	delete hopHeaders.cookie
+	const cleanToken = typeof token === 'string' ? token.trim() : ''
+	if (!cleanToken) return { url: targetUrl, headers: hopHeaders }
+	if (cleanToken.startsWith('?')) {
+		const parsed = new URL(targetUrl)
+		const secretParams = new URLSearchParams(cleanToken.slice(1))
+		const secretKeysLower = new Set(Array.from(secretParams.keys(), k => k.toLowerCase()))
+		for (const existingKey of Array.from(parsed.searchParams.keys())) {
+			if (secretKeysLower.has(existingKey.toLowerCase())) {
+				parsed.searchParams.delete(existingKey)
+			}
+		}
+		for (const [k, v] of secretParams.entries()) {
+			parsed.searchParams.append(k, v)
+		}
+		return { url: parsed.toString(), headers: hopHeaders }
+	}
+	if (/^(?:Bearer|Basic)\s+/i.test(cleanToken)) {
+		const isBasic = /^basic/i.test(cleanToken)
+		hopHeaders.authorization = `${isBasic ? 'Basic' : 'Bearer'} ${cleanToken.replace(/^(?:Bearer|Basic)\s+/i, '').trim()}`
+	} else if (cleanToken.includes(':')) {
+		hopHeaders.authorization = `Basic ${Buffer.from(cleanToken).toString('base64')}`
+	} else {
+		hopHeaders.authorization = `Bearer ${cleanToken}`
+	}
+	return { url: targetUrl, headers: hopHeaders }
+}
+
+async function executeUpstream ({ token, url, method = 'GET', body, headers = {}, raw = false, onStatus, onSameOriginRedirect }) {
+	const baseHeaders = {}
 	if (headers && typeof headers === 'object') {
 		for (const [k, v] of Object.entries(headers)) {
 			if (v !== undefined && v !== null) {
-				reqHeaders[k.toLowerCase()] = String(v)
+				baseHeaders[k.toLowerCase()] = String(v)
 			}
 		}
 	}
-	reqHeaders['user-agent'] ||= 'jump'
-	let fetchUrl = url
-	const cleanToken = typeof token === 'string' ? token.trim() : ''
-	if (cleanToken) {
-		if (cleanToken.startsWith('?')) {
-			delete reqHeaders.authorization
-			const parsed = new URL(url)
-			const secretParams = new URLSearchParams(cleanToken.slice(1))
-			const secretKeysLower = new Set(Array.from(secretParams.keys(), k => k.toLowerCase()))
-			for (const existingKey of Array.from(parsed.searchParams.keys())) {
-				if (secretKeysLower.has(existingKey.toLowerCase())) {
-					parsed.searchParams.delete(existingKey)
-				}
-			}
-			for (const [k, v] of secretParams.entries()) {
-				parsed.searchParams.append(k, v)
-			}
-			fetchUrl = parsed.toString()
-		} else if (/^(?:Bearer|Basic)\s+/i.test(cleanToken)) {
-			const isBasic = /^basic/i.test(cleanToken)
-			reqHeaders.authorization = `${isBasic ? 'Basic' : 'Bearer'} ${cleanToken.replace(/^(?:Bearer|Basic)\s+/i, '').trim()}`
-		} else if (cleanToken.includes(':')) {
-			reqHeaders.authorization = `Basic ${Buffer.from(cleanToken).toString('base64')}`
-		} else {
-			reqHeaders.authorization = `Bearer ${cleanToken}`
-		}
-	}
+	delete baseHeaders.authorization
+	delete baseHeaders.cookie
+	baseHeaders['user-agent'] ||= 'jump'
 	let reqBody
 	if (body !== undefined && body !== null) {
 		if (ArrayBuffer.isView(body)) {
@@ -85,11 +92,11 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 				reqBody = Buffer.from(body.buffer, body.byteOffset, body.byteLength)
 			}
 		} else if (typeof body === 'object') {
-			const ct = (reqHeaders['content-type'] || '').split(';')[0].trim().toLowerCase()
+			const ct = (baseHeaders['content-type'] || '').split(';')[0].trim().toLowerCase()
 			if (ct === 'application/x-www-form-urlencoded') {
 				reqBody = Buffer.from(serializeFormBody(body), 'utf8')
 			} else {
-				reqHeaders['content-type'] ||= 'application/json'
+				baseHeaders['content-type'] ||= 'application/json'
 				reqBody = Buffer.from(JSON.stringify(body), 'utf8')
 			}
 		} else {
@@ -99,19 +106,25 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 			}
 		}
 	}
+	const initialOrigin = new URL(url).origin
 	let curMethod = method.toUpperCase()
-	let curUrl = fetchUrl
+	let curUrl = url
 	let curBody = reqMethodAllowsBody(curMethod) ? reqBody : undefined
 	const signal = AbortSignal.timeout(Number(process.env.UPSTREAM_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS)
 	let res
 	for (let hop = 0; ; hop++) {
-		res = await fetch(curUrl, {
+		const isInitialOrigin = new URL(curUrl).origin === initialOrigin
+		const hopReq = isInitialOrigin
+			? attachAuth(curUrl, baseHeaders, token)
+			: { url: curUrl, headers: { ...baseHeaders } }
+		res = await fetch(hopReq.url, {
 			method: curMethod,
-			headers: reqHeaders,
+			headers: hopReq.headers,
 			...(curBody !== undefined && { body: curBody }),
 			redirect: 'manual',
 			signal
 		})
+		if (raw) break
 		const location = REDIRECT_STATUSES.has(res.status) ? res.headers.get('location') : null
 		if (!location) break
 		await res.body?.cancel()
@@ -133,17 +146,16 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 			err.status = 403
 			throw err
 		}
-		if (nextParsed.origin !== new URL(curUrl).origin) {
-			delete reqHeaders.authorization
-			delete reqHeaders.cookie
-		}
 		if (res.status === 303 || ((res.status === 301 || res.status === 302) && curMethod === 'POST')) {
 			curMethod = 'GET'
 			curBody = undefined
-			delete reqHeaders['content-type']
-			delete reqHeaders['content-length']
+			delete baseHeaders['content-type']
+			delete baseHeaders['content-length']
 		}
 		curUrl = nextParsed.toString()
+		if (nextParsed.origin === initialOrigin && onSameOriginRedirect) {
+			onSameOriginRedirect({ url: curUrl, method: curMethod, hasBody: curBody !== undefined })
+		}
 	}
 	if (onStatus) onStatus(res.status)
 	const maxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB) || 10
@@ -281,12 +293,6 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 			}
 		}
 		resolvedUrl = provider.normalizeTargetUrl(url, upstreamApp)
-		const urlCheck = provider.isAllowedUrl(resolvedUrl, upstreamApp)
-		if (!urlCheck.allowed) {
-			const err = new Error(urlCheck.reason)
-			err.status = 403
-			throw err
-		}
 		let contentType = ''
 		if (headers && typeof headers === 'object') {
 			for (const [k, v] of Object.entries(headers)) {
@@ -298,34 +304,43 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 		}
 		const objectFormat = contentType.split(';')[0].trim().toLowerCase() === 'application/x-www-form-urlencoded' ? 'form' : 'json'
 		const sharePolicy = targetLink.app?.type === 'share' ? targetLink.app.credentials?.policy : null
-		if (sharePolicy) {
-			const check = evaluatePolicy(sharePolicy, {
-				url: resolvedUrl,
-				method: normalizedMethod,
-				body,
-				objectFormat,
-				contentType
-			})
-			if (!check.allowed) {
-				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by shared app policy'}`)
+		const checkTargetPolicy = (targetUrl, targetMethod, targetBody, targetContentType) => {
+			const urlCheck = provider.isAllowedUrl(targetUrl, upstreamApp)
+			if (!urlCheck.allowed) {
+				const err = new Error(urlCheck.reason)
 				err.status = 403
 				throw err
 			}
-		}
-		if (targetLink.policy) {
-			const check = evaluatePolicy(targetLink.policy, {
-				url: resolvedUrl,
-				method: normalizedMethod,
-				body,
-				objectFormat,
-				contentType
-			})
-			if (!check.allowed) {
-				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by session policy'}`)
-				err.status = 403
-				throw err
+			if (sharePolicy) {
+				const check = evaluatePolicy(sharePolicy, {
+					url: targetUrl,
+					method: targetMethod,
+					body: targetBody,
+					objectFormat,
+					contentType: targetContentType
+				})
+				if (!check.allowed) {
+					const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by shared app policy'}`)
+					err.status = 403
+					throw err
+				}
+			}
+			if (targetLink.policy) {
+				const check = evaluatePolicy(targetLink.policy, {
+					url: targetUrl,
+					method: targetMethod,
+					body: targetBody,
+					objectFormat,
+					contentType: targetContentType
+				})
+				if (!check.allowed) {
+					const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by session policy'}`)
+					err.status = 403
+					throw err
+				}
 			}
 		}
+		checkTargetPolicy(resolvedUrl, normalizedMethod, body, contentType)
 		allowed = true
 		let freshInfo = null
 		try {
@@ -366,7 +381,13 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 			body,
 			headers,
 			raw,
-			onStatus: s => { upstreamStatus = s }
+			onStatus: s => { upstreamStatus = s },
+			onSameOriginRedirect: ({ url: nextUrl, method: nextMethod, hasBody }) => {
+				allowed = false
+				resolvedUrl = nextUrl
+				checkTargetPolicy(nextUrl, nextMethod, hasBody ? body : undefined, hasBody ? contentType : '')
+				allowed = true
+			}
 		})
 		const logError = raw && upstreamStatus >= 400
 			? (result.body.length > 0 ? result.body.subarray(0, 512).toString('utf8') : `HTTP ${upstreamStatus}`)
