@@ -303,7 +303,8 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 				url: resolvedUrl,
 				method: normalizedMethod,
 				body,
-				objectFormat
+				objectFormat,
+				contentType
 			})
 			if (!check.allowed) {
 				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by shared app policy'}`)
@@ -316,7 +317,8 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 				url: resolvedUrl,
 				method: normalizedMethod,
 				body,
-				objectFormat
+				objectFormat,
+				contentType
 			})
 			if (!check.allowed) {
 				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by session policy'}`)

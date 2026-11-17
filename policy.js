@@ -59,7 +59,59 @@ function normalizeFormObject (obj) {
 	return out
 }
 
-function parseBodyObject (body, bodyType = 'json', objectFormat = 'json') {
+function hasDuplicateJsonKeys (str) {
+	const stack = []
+	let i = 0
+	const n = str.length
+	while (i < n) {
+		const ch = str[i]
+		if (ch === '"') {
+			let j = i + 1
+			while (j < n) {
+				if (str[j] === '\\') {
+					j += 2
+					continue
+				}
+				if (str[j] === '"') break
+				j++
+			}
+			if (j >= n) return false
+			const rawLit = str.slice(i, j + 1)
+			i = j + 1
+			while (i < n && str.charCodeAt(i) <= 32) i++
+			if (str[i] === ':' && stack.length > 0 && stack[stack.length - 1] !== null) {
+				const key = JSON.parse(rawLit)
+				if (stack[stack.length - 1].has(key)) return true
+				stack[stack.length - 1].add(key)
+				i++
+			}
+			continue
+		}
+		if (ch === '{') {
+			stack.push(new Set())
+		} else if (ch === '[') {
+			stack.push(null)
+		} else if (ch === '}' || ch === ']') {
+			stack.pop()
+		}
+		i++
+	}
+	return false
+}
+
+function isCompatibleContentType (contentType, bodyType) {
+	if (!contentType || typeof contentType !== 'string') return true
+	const mime = contentType.split(';')[0].trim().toLowerCase()
+	if (!mime) return true
+	if (bodyType === 'json') return mime === 'application/json' || mime.endsWith('+json')
+	if (bodyType === 'form') return mime === 'application/x-www-form-urlencoded'
+	return false
+}
+
+function parseBodyObject (body, bodyType = 'json', objectFormat = 'json', contentType = '') {
+	if (!isCompatibleContentType(contentType, bodyType)) {
+		return isEmptyBody(body) ? {} : null
+	}
 	if (isEmptyBody(body)) return {}
 	if (isPlainObject(body)) {
 		if (objectFormat !== bodyType) return null
@@ -79,7 +131,7 @@ function parseBodyObject (body, bodyType = 'json', objectFormat = 'json') {
 		if (!trimmed.startsWith('{')) return null
 		try {
 			const parsed = JSON.parse(trimmed)
-			if (isPlainObject(parsed)) return parsed
+			if (isPlainObject(parsed) && !hasDuplicateJsonKeys(trimmed)) return parsed
 		} catch {}
 		return null
 	}
@@ -144,17 +196,19 @@ function matchValuePattern (pattern, str) {
 	return pi === p.length
 }
 
-function matchFieldValue (expected, actual) {
+function matchFieldValue (expected, actual, action = 'allow') {
 	const patterns = Array.isArray(expected) ? expected : [expected]
 	if (actual === undefined || actual === null) return patterns.includes(null)
+	const hasNonNullPattern = patterns.some(p => p !== null)
 	const values = Array.isArray(actual) ? actual : [actual]
-	if (values.length === 0) return false
-	return values.every(val => {
+	if (values.length === 0) return action === 'deny' && hasNonNullPattern
+	const matchOne = val => {
 		if (val === undefined || val === null) return patterns.includes(null)
-		if (typeof val === 'object') return false
+		if (typeof val === 'object') return action === 'deny' && hasNonNullPattern
 		const valStr = String(val)
 		return patterns.some(pat => pat !== null && matchValuePattern(String(pat), valStr))
-	})
+	}
+	return action === 'deny' ? values.some(matchOne) : values.every(matchOne)
 }
 
 function validateFieldMap (map, label, ruleIndex) {
@@ -180,10 +234,10 @@ function validateFieldMap (map, label, ruleIndex) {
 	return null
 }
 
-function matchFieldMap (expectedMap, actualObj) {
+function matchFieldMap (expectedMap, actualObj, action = 'allow') {
 	if (!actualObj) return false
 	for (const [key, expected] of Object.entries(expectedMap)) {
-		if (!matchFieldValue(expected, resolveField(actualObj, key))) return false
+		if (!matchFieldValue(expected, resolveField(actualObj, key), action)) return false
 	}
 	return true
 }
@@ -319,22 +373,30 @@ function matchPattern (pattern, str) {
 	if (!pattern || typeof pattern !== 'string' || typeof str !== 'string') return false
 	if (pattern === '*' || pattern === '**') return true
 	if (pattern === str) return true
-	let p = pattern.replace(/(?:\/\*\*)+/g, '/**')
-	p = p.replace(/\/\*\*$/, '§§SLASH_GLOB_END§§')
-	p = p.replace(/\/\*\*\//g, '§§SLASH_GLOB_MID§§')
-	p = p.replace(/^\*\*\//, '§§GLOB_START_SLASH§§')
-	p = p.replace(/[.+^${}()|[\]\\?]/g, '\\$&')
-	p = p.replace(/\*\*/g, '.*')
-	p = p.replace(/\*/g, '[^/]*')
-	p = p.replace(/§§SLASH_GLOB_END§§/g, '(?:/.*)?')
-	p = p.replace(/§§SLASH_GLOB_MID§§/g, '(?:/|/.+/)')
-	p = p.replace(/§§GLOB_START_SLASH§§/g, '(?:.*/)?')
-	try {
-		const regex = new RegExp(`^${p}$`, 'i')
-		return regex.test(str)
-	} catch {
-		return false
+	const patSegs = pattern.split('/')
+	const strSegs = str.split('/')
+	let pi = 0
+	let si = 0
+	let starPi = -1
+	let starSi = 0
+	while (si < strSegs.length) {
+		if (pi < patSegs.length && patSegs[pi] === '**') {
+			starPi = pi++
+			starSi = si
+		} else if (pi < patSegs.length && !patSegs[pi].includes('**') && matchValuePattern(patSegs[pi], strSegs[si])) {
+			pi++
+			si++
+		} else if (pi < patSegs.length && patSegs[pi].includes('**')) {
+			return matchValuePattern(patSegs.slice(pi).join('/'), strSegs.slice(si).join('/'))
+		} else if (starPi !== -1) {
+			pi = starPi + 1
+			si = ++starSi
+		} else {
+			return false
+		}
 	}
+	while (pi < patSegs.length && patSegs[pi] === '**') pi++
+	return pi === patSegs.length
 }
 
 function normalizeUrl (targetUrl, baseUrl = null) {
@@ -395,7 +457,7 @@ function evaluatePolicy (policy, req = {}) {
 			if (parsedQuery === undefined) {
 				parsedQuery = parseUrlEncoded(parsedUrl.search.slice(1))
 			}
-			if (!matchFieldMap(rule.query, parsedQuery)) continue
+			if (!matchFieldMap(rule.query, parsedQuery, action)) continue
 		}
 		if (rule.body !== undefined) {
 			if (rule.body === null) {
@@ -409,7 +471,7 @@ function evaluatePolicy (policy, req = {}) {
 			} else {
 				const bodyType = rule.bodyType ? rule.bodyType.trim().toLowerCase() : 'json'
 				if (!Object.hasOwn(parsedBodies, bodyType)) {
-					parsedBodies[bodyType] = parseBodyObject(req.body, bodyType, objectFormat)
+					parsedBodies[bodyType] = parseBodyObject(req.body, bodyType, objectFormat, req.contentType)
 				}
 				const parsedBody = parsedBodies[bodyType]
 				if (parsedBody === null) {
@@ -421,7 +483,7 @@ function evaluatePolicy (policy, req = {}) {
 					}
 					continue
 				}
-				if (!matchFieldMap(rule.body, parsedBody)) continue
+				if (!matchFieldMap(rule.body, parsedBody, action)) continue
 			}
 		}
 		if (action === 'deny') {
