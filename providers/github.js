@@ -10,7 +10,7 @@ export default {
 		extractAccount (user) {
 			return user.login || null
 		},
-		async revoke ({ token, clientId, clientSecret }) {
+		async revoke ({ token, clientId, clientSecret, signal }) {
 			if (!clientId || !clientSecret) return
 			await fetch(`https://api.github.com/applications/${clientId}/token`, {
 				method: 'DELETE',
@@ -20,7 +20,8 @@ export default {
 					'content-type': 'application/json',
 					'user-agent': 'jump'
 				},
-				body: JSON.stringify({ access_token: token })
+				body: JSON.stringify({ access_token: token }),
+				signal
 			})
 		},
 		baseScopes: ['read:user'],

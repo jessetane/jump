@@ -4728,8 +4728,8 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 				id: 1
 			}), { status: 200, headers: { 'content-type': 'application/json' } })
 		}
-		if (u.startsWith('https://api.github.com/applications/')) {
-			revokedCalls.push({ url: u, method: init?.method, headers: init?.headers, body: init?.body })
+		if (u.startsWith('https://api.github.com/applications/') || u === 'https://oauth2.googleapis.com/revoke') {
+			revokedCalls.push({ url: u, method: init?.method, headers: init?.headers, body: init?.body, signal: init?.signal })
 			return new Response(null, { status: 204 })
 		}
 		return origFetch(input, init)
@@ -4778,6 +4778,22 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 		assert.equal(revokedCalls[0].url, 'https://api.github.com/applications/gh-test-client-id/token')
 		assert.equal(revokedCalls[0].method, 'DELETE')
 		assert.equal(JSON.parse(revokedCalls[0].body).access_token, 'gho_test_oauth_token')
+		assert.ok(revokedCalls[0].signal instanceof AbortSignal, 'GitHub revoke must set AbortSignal timeout')
+		const gRevokeApp = db.tokens.create({
+			userId: user.id,
+			provider: 'google',
+			type: 'oauth',
+			credentials: { accessToken: 'ya29.to_revoke', refreshToken: '1//to_revoke' }
+		})
+		const disconnectGoogleRes = await executeTool('admin', {
+			action: 'disconnect_app',
+			appId: gRevokeApp.id,
+			revoke: true
+		}, adminSession.token)
+		assert.equal(disconnectGoogleRes.isError, undefined)
+		assert.equal(revokedCalls.length, 2)
+		assert.equal(revokedCalls[1].url, 'https://oauth2.googleapis.com/revoke')
+		assert.ok(revokedCalls[1].signal instanceof AbortSignal, 'Google revoke must set AbortSignal timeout')
 	} finally {
 		globalThis.fetch = origFetch
 	}

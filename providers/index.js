@@ -267,7 +267,7 @@ function createProvider (config) {
 				try {
 					const clientId = process.env[`${envPrefix}_CLIENT_ID`]
 					const clientSecret = process.env[`${envPrefix}_CLIENT_SECRET`]
-					await oauth.revoke({ token, clientId, clientSecret })
+					await oauth.revoke({ token, clientId, clientSecret, signal: AbortSignal.timeout(15000) })
 				} catch (err) {
 					console.warn(`Failed to revoke token with ${label} upstream:`, err.message)
 				}
