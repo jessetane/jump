@@ -6315,6 +6315,36 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 			res.end()
 			return
 		}
+		if (req.url === '/public/bounce-to-admin') {
+			res.statusCode = 302
+			res.setHeader('location', '/admin/secrets')
+			res.end()
+			return
+		}
+		if (req.url === '/admin/secrets') {
+			res.statusCode = 200
+			res.setHeader('content-type', 'application/json')
+			res.end(JSON.stringify({ leaked: 'top-secret', auth: req.headers.authorization || null }))
+			return
+		}
+		if (req.url.startsWith('/qauth/start')) {
+			res.statusCode = 302
+			res.setHeader('location', '/qauth/dest?page=2')
+			res.end()
+			return
+		}
+		if (req.url.startsWith('/qauth/dest')) {
+			res.statusCode = 200
+			res.setHeader('content-type', 'application/json')
+			res.end(JSON.stringify({ url: req.url }))
+			return
+		}
+		if (req.url.startsWith('/qauth/cdn')) {
+			res.statusCode = 302
+			res.setHeader('location', `http://127.0.0.1:${cdnPort}/cdn-file?ApiKey=should_not_be_reattached`)
+			res.end()
+			return
+		}
 		if (req.url.startsWith('/loop')) {
 			res.statusCode = 302
 			res.setHeader('location', '/loop')
@@ -6327,6 +6357,7 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 	await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve))
 	const apiPort = apiServer.address().port
 	try {
+		const addr = server.address()
 		const u = db.logins.resolveUser('google', 'redirects@example.com')
 		const s = db.tokens.create({ userId: u.id, provider: 'self', admin: 1 })
 		const app = db.tokens.create({
@@ -6335,7 +6366,14 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 			type: 'api_key',
 			credentials: { apiKey: 'ghp_secret_token', baseUrl: `http://127.0.0.1:${apiPort}` }
 		})
-		db.links.create({ sessionId: s.id, appId: app.id })
+		db.links.create({
+			sessionId: s.id,
+			appId: app.id,
+			policy: [
+				{ action: 'deny', path: '/admin/**' },
+				{ action: 'allow', path: '/**' }
+			]
+		})
 		const okRedirect = await executeTool('github_api', {
 			url: '/repos/acme/app/tarball'
 		}, s.token)
@@ -6344,14 +6382,40 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 		assert.equal(Buffer.from(okData.data, 'base64').toString('utf8'), 'archive-bytes')
 		assert.equal(cdnReceived.length, 1)
 		assert.equal(cdnReceived[0].headers.authorization, undefined, 'Cross-origin redirect must strip upstream Authorization header')
+		const restRawRedirect = await fetch(`http://127.0.0.1:${addr.port}/api/github/repos/acme/app/tarball`, {
+			headers: { authorization: `Bearer ${s.token}` },
+			redirect: 'manual'
+		})
+		assert.equal(restRawRedirect.status, 302, 'REST /api/:provider/* returns 302 Location directly without following')
+		assert.equal(restRawRedirect.headers.get('location'), `http://127.0.0.1:${cdnPort}/download/tarball.tar.gz?sig=signed123`)
+		const sameOriginBypass = await executeTool('github_api', {
+			url: '/public/bounce-to-admin'
+		}, s.token)
+		assert.equal(sameOriginBypass.isError, true, 'Same-origin redirect to policy-denied path must be blocked')
+		assert.match(sameOriginBypass.content[0].text, /Policy violation/)
+		const qApp = db.tokens.create({
+			userId: u.id,
+			provider: 'namecheap',
+			type: 'api_key',
+			credentials: { apiKey: '?ApiKey=nc_top_secret', baseUrl: `http://127.0.0.1:${apiPort}` }
+		})
+		db.links.create({ sessionId: s.id, appId: qApp.id, policy: [{ action: 'allow', path: '/qauth/**' }] })
+		const qSameOrigin = await executeTool('namecheap_api', { url: '/qauth/start' }, s.token)
+		assert.equal(qSameOrigin.isError, undefined, 'Same-origin redirect preserves query-param credentials')
+		assert.equal(JSON.parse(qSameOrigin.content[0].text).url, '/qauth/dest?page=2&ApiKey=nc_top_secret')
+		cdnReceived.length = 0
+		const qCrossOrigin = await executeTool('namecheap_api', { url: '/qauth/cdn' }, s.token)
+		assert.equal(qCrossOrigin.isError, undefined)
+		assert.equal(cdnReceived[0].url.includes('nc_top_secret'), false, 'Cross-origin redirect never attaches query-param credentials')
+		cdnReceived.length = 0
 		const post303 = await executeTool('github_api', {
 			url: '/post-303',
 			method: 'POST',
 			body: { hello: 'world' }
 		}, s.token)
 		assert.equal(post303.isError, undefined)
-		assert.equal(cdnReceived[1].method, 'GET', '303 redirect downgrades POST to GET')
-		assert.equal(cdnReceived[1].headers['content-type'], undefined, 'Downgraded GET redirect strips Content-Type')
+		assert.equal(cdnReceived[0].method, 'GET', '303 redirect downgrades POST to GET')
+		assert.equal(cdnReceived[0].headers['content-type'], undefined, 'Downgraded GET redirect strips Content-Type')
 		const metadataRedirect = await executeTool('github_api', {
 			url: '/ssrf-metadata'
 		}, s.token)
