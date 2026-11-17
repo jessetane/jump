@@ -1,22 +1,20 @@
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto'
-import fs from 'node:fs/promises'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import fs from 'node:fs'
 import * as db from './db/index.js'
 import { getProvider, listAuthProviders, requireAuthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
-import { getBody, sendJson, isLoopbackHost } from './util.js'
+import { getBody, getBaseUrl, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
 
 export {
 	handleOauth,
 	handleAuthorize,
 	handleAuthorizeConsent,
 	isAllowedRedirectUri,
-	deriveClientName,
-	getBaseUrl
+	deriveClientName
 }
 
-const dirname = path.dirname(fileURLToPath(import.meta.url))
+const AUTHORIZE_HTML = fs.readFileSync(new URL('./public/authorize.html', import.meta.url), 'utf8')
+const CONNECT_HTML = fs.readFileSync(new URL('./public/connect.html', import.meta.url), 'utf8')
 
 const KNOWN_CLIENT_NAMES = {
 	'antigravity.google': 'Google Antigravity',
@@ -43,26 +41,6 @@ const DISALLOWED_REDIRECT_SCHEMES = new Set([
 	'about:'
 ])
 
-function getBaseUrl (req) {
-	if (req && req.headers && (req.headers['x-forwarded-host'] || req.headers.host)) {
-		const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host).split(',')[0].trim().toLowerCase()
-		if (rawHost) {
-			try {
-				const parsed = new URL(`http://${rawHost}`)
-				const isLocal = isLoopbackHost(parsed.hostname)
-				const rawProto = String(req.headers['x-forwarded-proto'] || (isLocal ? 'http' : 'https')).split(',')[0].trim().toLowerCase()
-				const validHost = parsed.host === rawHost || (!parsed.port && rawHost === `${parsed.hostname}:80`)
-				if ((rawProto === 'http' || rawProto === 'https') && parsed.port !== '0' && !parsed.username && !parsed.password && parsed.pathname === '/' && !parsed.search && !parsed.hash && validHost) {
-					const port = parsed.port || (rawHost === `${parsed.hostname}:80` ? '80' : '')
-					const effectivePort = (rawProto === 'https' && port === '443') || (rawProto === 'http' && port === '80') ? '' : port
-					return `${rawProto}://${parsed.hostname}${effectivePort ? `:${effectivePort}` : ''}`
-				}
-			} catch {}
-		}
-	}
-	return 'http://localhost:8080'
-}
-
 function getClientIp (req) {
 	return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || null
 }
@@ -73,9 +51,7 @@ function enforceSso (res, fn) {
 		return true
 	} catch (err) {
 		if (err.status === 403) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end(`${err.message}.`)
+			sendText(res, `${err.message}.`, 403)
 			return false
 		}
 		throw err
@@ -294,9 +270,7 @@ function resolveSetupState (setup, expectedMode, expectedProvider = null) {
 
 async function handleAuthorize (req, res, query) {
 	if (query.session_id !== undefined) {
-		res.statusCode = 403
-		res.setHeader('content-type', 'text/plain')
-		res.end('Access denied: invalid or expired setup code.')
+		sendText(res, 'Access denied: invalid or expired setup code.', 403)
 		return
 	}
 	try {
@@ -311,9 +285,7 @@ async function handleAuthorize (req, res, query) {
 		const setup = db.tokens.getState(query.code)
 		const session = resolveSetupState(setup, 'setup_link')
 		if (!session) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: invalid or expired setup code.')
+			sendText(res, 'Access denied: invalid or expired setup code.', 403)
 			return
 		}
 		if (!enforceSso(res, () => assertSsoLink(db.logins.listByUserId(session.userId), setup.provider))) return
@@ -329,11 +301,7 @@ async function handleAuthorize (req, res, query) {
 		...(linkMode && { linkMode: true }),
 		...(clientName && { clientName })
 	}
-	const authorizeHtml = await fs.readFile(path.join(dirname, 'public/authorize.html'), 'utf8')
-	const html = authorizeHtml.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c'))
-	res.statusCode = 200
-	res.setHeader('content-type', 'text/html; charset=utf-8')
-	res.end(html)
+	sendHtml(res, AUTHORIZE_HTML.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c')))
 }
 
 function filterValidAppIds (userId, appIds = []) {
@@ -376,9 +344,7 @@ function completeLogin (req, res, { user, clientId, clientRedirectUri, clientSta
 		const target = new URL(clientRedirectUri)
 		target.searchParams.set('code', authCode)
 		if (clientState) target.searchParams.set('state', clientState)
-		res.statusCode = 302
-		res.setHeader('location', target.toString())
-		res.end()
+		redirect(res, target.toString())
 		return
 	}
 	const session = db.tokens.create({
@@ -391,9 +357,7 @@ function completeLogin (req, res, { user, clientId, clientRedirectUri, clientSta
 		ua
 	})
 	linkSessionApps(session.id, user.id, appIds)
-	res.statusCode = 200
-	res.setHeader('content-type', 'text/plain; charset=utf-8')
-	res.end(`user: ${db.logins.getAccountByUserId(user.id)}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
+	sendText(res, `user: ${db.logins.getAccountByUserId(user.id)}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
 }
 
 function redirectToVerifyOrComplete (req, res, base, opts) {
@@ -415,15 +379,12 @@ function redirectToVerifyOrComplete (req, res, base, opts) {
 		admin: opts.admin,
 		ip: opts.ip
 	})
-	res.statusCode = 302
-	res.setHeader('location', `${base}/oauth/verify?code=${verifyCode}`)
-	res.end()
+	redirect(res, `${base}/oauth/verify?code=${verifyCode}`)
 }
 
 async function handleAuthorizeConsent (req, res) {
 	if (req.method !== 'POST') {
-		res.statusCode = 405
-		res.end('Method Not Allowed')
+		sendText(res, 'Method Not Allowed', 405)
 		return
 	}
 	const rawBody = await getBody(req)
@@ -453,9 +414,7 @@ async function handleAuthorizeConsent (req, res) {
 		}
 	}
 	if (hasSessionId) {
-		res.statusCode = 403
-		res.setHeader('content-type', 'text/plain')
-		res.end('Access denied: invalid or expired setup code.')
+		sendText(res, 'Access denied: invalid or expired setup code.', 403)
 		return
 	}
 	let validation
@@ -475,17 +434,13 @@ async function handleAuthorizeConsent (req, res) {
 	const base = getBaseUrl(req)
 	if (!setupCode && localToken && !providerName) {
 		if (listAuthProviders().length > 0) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: local token sign-in is disabled when OAuth providers are configured.')
+			sendText(res, 'Access denied: local token sign-in is disabled when OAuth providers are configured.', 403)
 			return
 		}
 		const adminSession = db.tokens.getByToken(localToken)
 		const user = adminSession?.admin ? db.users.get(adminSession.userId) : null
 		if (!user) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: valid admin bearer token required.')
+			sendText(res, 'Access denied: valid admin bearer token required.', 403)
 			return
 		}
 		redirectToVerifyOrComplete(req, res, base, {
@@ -506,16 +461,12 @@ async function handleAuthorizeConsent (req, res) {
 		const setup = db.tokens.getState(setupCode)
 		linkSession = resolveSetupState(setup, 'setup_link')
 		if (!linkSession) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: invalid or expired setup code.')
+			sendText(res, 'Access denied: invalid or expired setup code.', 403)
 			return
 		}
 		if (setup.provider) {
 			if (providerName && providerName !== setup.provider) {
-				res.statusCode = 403
-				res.setHeader('content-type', 'text/plain')
-				res.end('Access denied: provider mismatch for setup code.')
+				sendText(res, 'Access denied: provider mismatch for setup code.', 403)
 				return
 			}
 			providerName = setup.provider
@@ -537,9 +488,7 @@ async function handleAuthorizeConsent (req, res) {
 		const consumed = db.tokens.consumeState(setupCode)
 		linkSession = resolveSetupState(consumed, 'setup_link')
 		if (!linkSession) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: invalid or expired setup code.')
+			sendText(res, 'Access denied: invalid or expired setup code.', 403)
 			return
 		}
 	}
@@ -562,26 +511,20 @@ async function handleAuthorizeConsent (req, res) {
 		callbackUrl,
 		login: true
 	})
-	res.statusCode = 302
-	res.setHeader('location', authUrl)
-	res.end()
+	redirect(res, authUrl)
 }
 
 async function handleVerify (req, res, query) {
 	if (req.method === 'GET') {
 		const code = query.code
 		if (!code || !/^[a-zA-Z0-9_-]+$/.test(code)) {
-			res.statusCode = 400
-			res.setHeader('content-type', 'text/plain')
-			res.end('Invalid or expired verification code')
+			sendText(res, 'Invalid or expired verification code', 400)
 			return
 		}
 		const state = db.tokens.getState(code)
 		const existingUser = state?.mode === 'verify' && state.userId ? db.users.get(state.userId) : null
 		if (!existingUser) {
-			res.statusCode = 400
-			res.setHeader('content-type', 'text/plain')
-			res.end('Invalid or expired verification code')
+			sendText(res, 'Invalid or expired verification code', 400)
 			return
 		}
 		const userApps = db.tokens.listByUserId(existingUser.id).filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
@@ -599,9 +542,7 @@ async function handleVerify (req, res, query) {
 			appsHtml = `<div class="app-list"><div class="app-list-title">Link connected apps</div>${items}</div>`
 		}
 		const displayAccount = db.logins.getAccountByUserId(existingUser.id)
-		res.statusCode = 200
-		res.setHeader('content-type', 'text/html; charset=utf-8')
-		res.end(renderCardPage(
+		sendHtml(res, renderCardPage(
 			'jump verify',
 			`Activate session for <strong>${escapeHtml(displayAccount)}</strong>`,
 			`<form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${escapeHtml(code)}">${appsHtml}<button type="submit">Continue</button></form>`
@@ -609,25 +550,20 @@ async function handleVerify (req, res, query) {
 		return
 	}
 	if (req.method !== 'POST') {
-		res.statusCode = 405
-		res.end('Method Not Allowed')
+		sendText(res, 'Method Not Allowed', 405)
 		return
 	}
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
 	const code = params.get('code') || query.code
 	if (!code) {
-		res.statusCode = 400
-		res.setHeader('content-type', 'text/plain')
-		res.end('Missing verification code.')
+		sendText(res, 'Missing verification code.', 400)
 		return
 	}
 	const state = db.tokens.consumeState(code)
 	const user = state?.mode === 'verify' && state.userId ? db.users.get(state.userId) : null
 	if (!user) {
-		res.statusCode = 400
-		res.setHeader('content-type', 'text/plain')
-		res.end('Invalid or expired verification code')
+		sendText(res, 'Invalid or expired verification code', 400)
 		return
 	}
 	completeLogin(req, res, {
@@ -649,9 +585,7 @@ function requireProviderEnv (res, provider) {
 		provider.requireEnv()
 		return true
 	} catch (err) {
-		res.statusCode = err.status || 500
-		res.setHeader('content-type', 'text/plain')
-		res.end(err.message)
+		sendText(res, err.message, err.status || 500)
 		return false
 	}
 }
@@ -663,7 +597,7 @@ function getOwnedOauthApp (session, appId, providerId) {
 	return app
 }
 
-async function handleProviderConnect (req, res, query, providerName = 'google') {
+async function handleProviderConnect (req, res, query, providerName = 'google', url = null) {
 	const provider = getProvider(providerName)
 	if (!provider || provider.type !== 'oauth') {
 		const err = new Error('not found')
@@ -672,28 +606,28 @@ async function handleProviderConnect (req, res, query, providerName = 'google') 
 	}
 	if (!requireProviderEnv(res, provider)) return
 	if (query.session_id !== undefined) {
-		res.statusCode = 403
-		res.setHeader('content-type', 'text/plain')
-		res.end('Access denied: invalid or expired setup code.')
+		sendText(res, 'Access denied: invalid or expired setup code.', 403)
 		return
 	}
 	const resolvedParams = { ...query }
+	if (url?.searchParams) {
+		for (const key of ['services', 'write']) {
+			const all = url.searchParams.getAll(key)
+			if (all.length > 1) resolvedParams[key] = all.join(',')
+		}
+	}
 	delete resolvedParams.reauth_app_id
 	if (query.code !== undefined) {
 		const setup = db.tokens.getState(query.code)
 		const session = resolveSetupState(setup, 'setup_connect', provider.id)
 		if (!session) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: invalid or expired setup code.')
+			sendText(res, 'Access denied: invalid or expired setup code.', 403)
 			return
 		}
 		if (setup.reauthAppId) {
 			const existingApp = getOwnedOauthApp(session, setup.reauthAppId, provider.id)
 			if (!existingApp) {
-				res.statusCode = 403
-				res.setHeader('content-type', 'text/plain')
-				res.end('Access denied: unauthorized re-authentication request.')
+				sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
 				return
 			}
 			resolvedParams.reauth_app_id = setup.reauthAppId
@@ -721,17 +655,12 @@ async function handleProviderConnect (req, res, query, providerName = 'google') 
 			}))
 		})
 	}
-	const connectHtml = await fs.readFile(path.join(dirname, 'public/connect.html'), 'utf8')
-	const html = connectHtml.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c'))
-	res.statusCode = 200
-	res.setHeader('content-type', 'text/html; charset=utf-8')
-	res.end(html)
+	sendHtml(res, CONNECT_HTML.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c')))
 }
 
 async function handleProviderConsent (req, res, providerName = 'google') {
 	if (req.method !== 'POST') {
-		res.statusCode = 405
-		res.end('Method Not Allowed')
+		sendText(res, 'Method Not Allowed', 405)
 		return
 	}
 	const provider = getProvider(providerName)
@@ -758,34 +687,26 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		}
 	}
 	if (params.has('session_id')) {
-		res.statusCode = 403
-		res.setHeader('content-type', 'text/plain')
-		res.end('Access denied: admin session required.')
+		sendText(res, 'Access denied: admin session required.', 403)
 		return
 	}
 	const setupCode = params.get('code') || null
 	const setup = db.tokens.consumeState(setupCode)
 	const session = resolveSetupState(setup, 'setup_connect', provider.id)
 	if (!session) {
-		res.statusCode = 403
-		res.setHeader('content-type', 'text/plain')
-		res.end('Access denied: admin session required.')
+		sendText(res, 'Access denied: admin session required.', 403)
 		return
 	}
 	const reauthAppId = setup.reauthAppId || null
 	if (params.get('reauth_app_id') && params.get('reauth_app_id') !== reauthAppId) {
-		res.statusCode = 403
-		res.setHeader('content-type', 'text/plain')
-		res.end('Access denied: unauthorized re-authentication request.')
+		sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
 		return
 	}
 	let existingApp = null
 	if (reauthAppId) {
 		existingApp = getOwnedOauthApp(session, reauthAppId, provider.id)
 		if (!existingApp) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: unauthorized re-authentication request.')
+			sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
 			return
 		}
 	}
@@ -809,25 +730,19 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		write: writeList,
 		loginHint: existingApp?.credentials?.account || null
 	})
-	res.statusCode = 302
-	res.setHeader('location', authUrl)
-	res.end()
+	redirect(res, authUrl)
 }
 
 async function handleCallback (req, res, query) {
 	const code = query.code
 	const rawState = query.state
 	if (!code) {
-		res.statusCode = 400
-		res.setHeader('content-type', 'text/plain')
-		res.end(`OAuth Error: ${query.error || 'no code'}`)
+		sendText(res, `OAuth Error: ${query.error || 'no code'}`, 400)
 		return
 	}
 	const oauthState = db.tokens.consumeState(rawState)
 	if (!oauthState || (oauthState.mode !== null && oauthState.mode !== 'connect' && oauthState.mode !== 'auth' && oauthState.mode !== 'login')) {
-		res.statusCode = 403
-		res.setHeader('content-type', 'text/plain')
-		res.end('Invalid or expired OAuth state (CSRF verification failed). Please try connecting again.')
+		sendText(res, 'Invalid or expired OAuth state (CSRF verification failed). Please try connecting again.', 403)
 		return
 	}
 	const provider = getProvider(oauthState.provider || 'google')
@@ -838,18 +753,14 @@ async function handleCallback (req, res, query) {
 		exchanged = await provider.exchangeCode({ code, callbackUrl })
 	} catch (err) {
 		console.error(`${provider.name} token exchange failed:`, err.data || err.message)
-		res.statusCode = err.status || 502
-		res.setHeader('content-type', 'text/plain')
-		res.end(err.message)
+		sendText(res, err.message, err.status || 502)
 		return
 	}
 	const { accessToken, refreshToken, expiresAt, scopes, account } = exchanged
 	if (oauthState.mode === 'auth') {
 		const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
 		if (!session || !session.admin) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: admin session required.')
+			sendText(res, 'Access denied: admin session required.', 403)
 			return
 		}
 		const cleanAccount = String(account).trim().toLowerCase()
@@ -864,16 +775,12 @@ async function handleCallback (req, res, query) {
 			})
 		} catch (err) {
 			if (err.status === 409) {
-				res.statusCode = 409
-				res.setHeader('content-type', 'text/plain')
-				res.end(`${err.message}.`)
+				sendText(res, `${err.message}.`, 409)
 				return
 			}
 			throw err
 		}
-		res.statusCode = 200
-		res.setHeader('content-type', 'text/html; charset=utf-8')
-		res.end(renderCardPage(
+		sendHtml(res, renderCardPage(
 			'Login Linked',
 			`Linked <strong>${escapeHtml(cleanAccount)}</strong>`,
 			`<p class="subtitle">You can close this window and return to your agent.</p>`
@@ -901,24 +808,18 @@ async function handleCallback (req, res, query) {
 	}
 	const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
 	if (!session || !session.admin) {
-		res.statusCode = 403
-		res.setHeader('content-type', 'text/plain')
-		res.end('Access denied: admin session required.')
+		sendText(res, 'Access denied: admin session required.', 403)
 		return
 	}
 	if (oauthState.reauthAppId) {
 		const existingApp = getOwnedOauthApp(session, oauthState.reauthAppId, provider.id)
 		if (!existingApp) {
-			res.statusCode = 403
-			res.setHeader('content-type', 'text/plain')
-			res.end('Access denied: unauthorized re-authentication request.')
+			sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
 			return
 		}
 		const expectedAccount = existingApp.credentials?.account
 		if (expectedAccount && String(account).trim().toLowerCase() !== String(expectedAccount).trim().toLowerCase()) {
-			res.statusCode = 409
-			res.setHeader('content-type', 'text/plain')
-			res.end(`Re-authentication failed: expected account "${expectedAccount}", got "${account}".`)
+			sendText(res, `Re-authentication failed: expected account "${expectedAccount}", got "${account}".`, 409)
 			return
 		}
 		const updatedCreds = {
@@ -932,9 +833,7 @@ async function handleCallback (req, res, query) {
 			expiresAt,
 			scopes: scopes || existingApp.scopes
 		})
-		res.statusCode = 200
-		res.setHeader('content-type', 'text/html; charset=utf-8')
-		res.end(renderCardPage(
+		sendHtml(res, renderCardPage(
 			`${provider.name} Re-authenticated`,
 			`${escapeHtml(provider.name)} credentials updated`,
 			`<p class="subtitle">Linked sessions will resume automatically.</p>`
@@ -959,9 +858,7 @@ async function handleCallback (req, res, query) {
 		sessionId: session.id,
 		appId: appToken.id
 	})
-	res.statusCode = 200
-	res.setHeader('content-type', 'text/html; charset=utf-8')
-	res.end(renderCardPage(
+	sendHtml(res, renderCardPage(
 		`${provider.name} Connected`,
 		`Connected <strong>${escapeHtml(account)}</strong>`,
 		`<p class="subtitle">You can close this window and return to your agent.</p>`
@@ -993,8 +890,7 @@ function parseTokenParams (rawBody, req) {
 
 async function handleToken (req, res) {
 	if (req.method !== 'POST') {
-		res.statusCode = 405
-		res.end('Method Not Allowed')
+		sendText(res, 'Method Not Allowed', 405)
 		return
 	}
 	const rawBody = await getBody(req)
@@ -1146,7 +1042,7 @@ const routes = {
 	'/oauth/revoke': (req, res) => handleRevoke(req, res)
 }
 
-async function handleOauth (req, res, { pathname, query }) {
+async function handleOauth (req, res, { pathname, url, query }) {
 	if (pathname === '/.well-known/oauth-protected-resource' || pathname.startsWith('/.well-known/oauth-protected-resource/')) {
 		await handleProtectedResourceMetadata(req, res, pathname)
 		return
@@ -1170,7 +1066,7 @@ async function handleOauth (req, res, { pathname, query }) {
 		const [, providerName, action] = providerMatch
 		const id = providerName.toLowerCase()
 		if (action === 'connect') {
-			await handleProviderConnect(req, res, query, id)
+			await handleProviderConnect(req, res, query, id, url)
 			return
 		}
 		if (action === 'consent') {

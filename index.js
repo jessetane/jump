@@ -2,19 +2,18 @@
 
 import 'dotenv/config'
 import http from 'node:http'
-import fs from 'node:fs/promises'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { handleOauth, getBaseUrl } from './oauth.js'
+import fs from 'node:fs'
+import { handleOauth } from './oauth.js'
 import { handleMcp } from './mcp.js'
 import { handleRest } from './rest.js'
 import { listAuthProviders } from './providers/index.js'
 import * as db from './db/index.js'
-import { sendJson } from './util.js'
+import { getBaseUrl, sendJson, sendHtml } from './util.js'
 
 export { server, bootstrapLocalAdmin }
 
-const dirname = path.dirname(fileURLToPath(import.meta.url))
+const INDEX_HTML = fs.readFileSync(new URL('./public/index.html', import.meta.url), 'utf8')
+const STYLE_CSS = fs.readFileSync(new URL('./public/style.css', import.meta.url), 'utf8')
 const host = process.env.HOST || '::1'
 const port = process.env.PORT || '8080'
 const corsOrigin = process.env.CORS_ORIGIN || '*'
@@ -44,12 +43,6 @@ const server = http.createServer(async (req, res) => {
 	const url = new URL(req.url, 'http://localhost')
 	const pathname = url.pathname.replace(/\/+$/, '') || '/'
 	const query = Object.fromEntries(url.searchParams)
-	if (pathname.startsWith('/providers/')) {
-		for (const key of ['services', 'write']) {
-			const all = url.searchParams.getAll(key)
-			if (all.length > 1) query[key] = all.join(',')
-		}
-	}
 	const token = resolveToken(req)
 	try {
 		if (pathname === '/') {
@@ -57,18 +50,13 @@ const server = http.createServer(async (req, res) => {
 				await handleMcp(req, res, token)
 				return
 			}
-			const base = getBaseUrl(req)
-			const indexHtml = await fs.readFile(path.join(dirname, 'public/index.html'), 'utf8')
-			res.statusCode = 200
-			res.setHeader('content-type', 'text/html; charset=utf-8')
-			res.end(indexHtml.replaceAll('{{APP_URL}}', base))
+			sendHtml(res, INDEX_HTML.replaceAll('{{APP_URL}}', getBaseUrl(req)))
 			return
 		}
 		if (pathname === '/style.css' && (req.method === 'GET' || req.method === 'HEAD')) {
-			const styleCss = await fs.readFile(path.join(dirname, 'public/style.css'), 'utf8')
 			res.statusCode = 200
 			res.setHeader('content-type', 'text/css; charset=utf-8')
-			res.end(req.method === 'HEAD' ? undefined : styleCss)
+			res.end(req.method === 'HEAD' ? undefined : STYLE_CSS)
 			return
 		}
 		if (pathname.startsWith('/api/')) {
@@ -80,7 +68,7 @@ const server = http.createServer(async (req, res) => {
 			return
 		}
 		if (pathname.startsWith('/oauth/') || pathname.startsWith('/providers/') || pathname.startsWith('/.well-known/')) {
-			await handleOauth(req, res, { pathname, query })
+			await handleOauth(req, res, { pathname, url, query })
 			return
 		}
 		const err = new Error('not found')

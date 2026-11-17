@@ -1,8 +1,12 @@
 export {
 	getRawBody,
 	getBody,
+	getBaseUrl,
 	serializeFormBody,
 	sendJson,
+	sendText,
+	sendHtml,
+	redirect,
 	isLoopbackHost,
 	validateBaseUrl,
 	resolveTargetUrl,
@@ -89,6 +93,44 @@ function sendJson (res, data, status = 200, headers = null) {
 	}
 	res.setHeader('content-type', 'application/json; charset=utf-8')
 	res.end(typeof data === 'string' ? data : JSON.stringify(data, null, '\t'))
+}
+
+function sendText (res, text, status = 200) {
+	res.statusCode = status
+	res.setHeader('content-type', 'text/plain; charset=utf-8')
+	res.end(text)
+}
+
+function sendHtml (res, html, status = 200) {
+	res.statusCode = status
+	res.setHeader('content-type', 'text/html; charset=utf-8')
+	res.end(html)
+}
+
+function redirect (res, location, status = 302) {
+	res.statusCode = status
+	res.setHeader('location', location)
+	res.end()
+}
+
+function getBaseUrl (req) {
+	if (req && req.headers && (req.headers['x-forwarded-host'] || req.headers.host)) {
+		const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host).split(',')[0].trim().toLowerCase()
+		if (rawHost) {
+			try {
+				const parsed = new URL(`http://${rawHost}`)
+				const isLocal = isLoopbackHost(parsed.hostname)
+				const rawProto = String(req.headers['x-forwarded-proto'] || (isLocal ? 'http' : 'https')).split(',')[0].trim().toLowerCase()
+				const validHost = parsed.host === rawHost || (!parsed.port && rawHost === `${parsed.hostname}:80`)
+				if ((rawProto === 'http' || rawProto === 'https') && parsed.port !== '0' && !parsed.username && !parsed.password && parsed.pathname === '/' && !parsed.search && !parsed.hash && validHost) {
+					const port = parsed.port || (rawHost === `${parsed.hostname}:80` ? '80' : '')
+					const effectivePort = (rawProto === 'https' && port === '443') || (rawProto === 'http' && port === '80') ? '' : port
+					return `${rawProto}://${parsed.hostname}${effectivePort ? `:${effectivePort}` : ''}`
+				}
+			} catch {}
+		}
+	}
+	return 'http://localhost:8080'
 }
 
 function isLoopbackHost (hostname) {

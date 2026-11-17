@@ -1,6 +1,5 @@
 import * as api from './api/index.js'
-import { getBaseUrl } from './oauth.js'
-import { getRawBody, getBody, sendJson } from './util.js'
+import { getRawBody, getBody, getBaseUrl, sendJson, sendText } from './util.js'
 
 export {
 	handleRest
@@ -80,9 +79,7 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 const routes = {
 	'/api/health': {
 		GET (req, res) {
-			res.statusCode = 200
-			res.setHeader('content-type', 'text/plain')
-			res.end('ok\n')
+			sendText(res, 'ok\n')
 		}
 	},
 	'/api/whoami': {
