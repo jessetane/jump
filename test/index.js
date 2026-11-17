@@ -6615,6 +6615,77 @@ test('OAUTH_TIMEOUT_MS governs upstream OAuth token, userinfo, refresh, and revo
 	}
 })
 
+test('graceful SIGTERM shutdown finishes in-flight requests despite duplicate signals', async () => {
+	const http = await import('node:http')
+	const net = await import('node:net')
+	const { spawn } = await import('node:child_process')
+	const probe = http.createServer()
+	await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve))
+	const freePort = probe.address().port
+	await new Promise(resolve => probe.close(resolve))
+	const subDbPath = path.join(dirname, `shutdown-${process.pid}.db`)
+	const child = spawn(process.execPath, [path.join(dirname, '..', 'index.js')], {
+		cwd: dirname,
+		env: {
+			...process.env,
+			NODE_ENV: 'production',
+			HOST: '127.0.0.1',
+			PORT: String(freePort),
+			DB_PATH: subDbPath
+		},
+		stdio: ['ignore', 'pipe', 'pipe']
+	})
+	const agent = new http.Agent({ keepAlive: true })
+	let inflight = null
+	try {
+		await new Promise((resolve, reject) => {
+			let out = ''
+			child.stdout.on('data', chunk => {
+				out += chunk.toString('utf8')
+				if (out.includes('jump listening on')) resolve()
+			})
+			child.once('exit', code => reject(new Error(`Child exited early with code ${code}`)))
+		})
+		await new Promise((resolve, reject) => {
+			const req = http.get(`http://127.0.0.1:${freePort}/api/health`, { agent }, res => {
+				res.resume()
+				res.on('end', resolve)
+			})
+			req.on('error', reject)
+		})
+		const body = JSON.stringify({ redirect_uris: ['http://127.0.0.1:9999/cb'] })
+		inflight = net.connect(freePort, '127.0.0.1')
+		inflight.on('error', () => {})
+		await new Promise(resolve => inflight.once('connect', resolve))
+		let rawReply = ''
+		inflight.on('data', chunk => { rawReply += chunk.toString('utf8') })
+		inflight.write(`POST /oauth/register HTTP/1.1\r\nHost: 127.0.0.1:${freePort}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n`)
+		await new Promise(resolve => setTimeout(resolve, 20))
+		const exitPromise = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })))
+		child.kill('SIGTERM')
+		await new Promise(resolve => setTimeout(resolve, 15))
+		child.kill('SIGTERM')
+		await new Promise(resolve => setTimeout(resolve, 25))
+		if (!inflight.destroyed) inflight.write(body)
+		await new Promise(resolve => inflight.destroyed ? resolve() : inflight.once('close', resolve))
+		assert.match(rawReply, /^HTTP\/1\.1 201 /, 'In-flight request must complete cleanly instead of being killed by duplicate SIGTERM')
+		const exitResult = await Promise.race([
+			exitPromise,
+			new Promise(resolve => setTimeout(() => resolve({ timedOut: true }), 1500).unref())
+		])
+		assert.equal(exitResult.timedOut, undefined)
+		assert.equal(exitResult.code, 0)
+		assert.equal(exitResult.signal, null)
+	} finally {
+		agent.destroy()
+		inflight?.destroy()
+		if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+		fs.rmSync(subDbPath, { force: true })
+		fs.rmSync(`${subDbPath}-wal`, { force: true })
+		fs.rmSync(`${subDbPath}-shm`, { force: true })
+	}
+})
+
 test('teardown server', (t, done) => {
 	server.close(() => {
 		fs.rmSync(testDbPath, { force: true })
