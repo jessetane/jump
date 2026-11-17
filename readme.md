@@ -8,7 +8,7 @@ So my trusted agents can do Google stuff. So my untrusted agents can also do Goo
 
 * One `<provider>_api` passthrough tool per linked provider (`google_api`, `github_api`, `stripe_api`, etc).
 * Sessions are decoupled from upstream OAuth and API-key credentials, so multiple accounts can be linked to one or many sessions.
-* Each session-to-app link can carry an ordered `allow`/`deny` policy matching HTTP methods, origins, URL path globs, query parameters, and request body fields.
+* Each session-to-app link (and shared app) can carry an ordered `allow`/`deny` policy matching HTTP methods, origins, URL path globs, query parameters, and request bodies (`body` field maps with `bodyType: "json" | "form"`, raw body globs, or `null` for empty bodies).
 
 ## Setup
 ```sh
@@ -102,6 +102,7 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 ## HTTP
 ```
 POST   /mcp                                     # json-rpc mcp endpoint (also POST /)
+GET    /style.css                               # shared ui stylesheet
 GET    /oauth/authorize                         # oauth / token sign-in screen
 POST   /oauth/authorize/consent                 # oauth / token sign-in submission
 GET    /oauth/verify                            # session activation & app selection screen
