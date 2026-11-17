@@ -34,7 +34,7 @@ function redactLogArgs (args) {
 
 const adminTool = {
 	name: 'admin',
-	description: 'Administer MCP sessions, connected upstream apps, routing policies, and user login keys.',
+	description: 'Administer MCP sessions, connected upstream apps, cross-user app shares, routing policies, login keys, and usage logs. Note: link_app and share_app upsert in place—re-calling them replaces the existing policy.',
 	inputSchema: {
 		type: 'object',
 		properties: {
@@ -75,8 +75,8 @@ const adminTool = {
 			apiKey: { type: 'string', description: 'Upstream API credential when connecting an API-key provider: Bearer token, HTTP Basic "user:pass", or query string "?key=val".' },
 			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe", "github").' },
 			policy: {
-				type: 'array',
-				description: 'Ordered list of policy rules evaluated top-to-bottom (first match wins, default deny). Best practice: write a minimal allowlist of specific paths (e.g. "/calendar/v3/calendars/xyz/events/**"); unlisted paths are automatically denied. Do NOT duplicate rules for URL-encoding—paths are automatically decoded (use literal "@" rather than "%40").',
+				type: ['array', 'null'],
+				description: 'Ordered list of rules evaluated top-to-bottom (first match wins; unmatched requests are denied). Semantics: (1) null or omitted = unrestricted allow-all; [] = deny-all. (2) Within a rule, all present fields (methods, origin, path, query, body) are ANDed; omitted fields match anything. Place specific deny rules BEFORE broader allow rules. (3) On shared apps, the owner share_app policy acts as an immutable ceiling—both the share policy AND the recipient link_app policy must independently allow each request. (4) Prefer minimal allowlists over denylists.',
 				items: {
 					type: 'object',
 					required: ['action'],
@@ -84,37 +84,37 @@ const adminTool = {
 						action: {
 							type: 'string',
 							enum: ['allow', 'deny'],
-							description: 'Rule action: "allow" or "deny".'
+							description: 'Rule outcome when all predicates on this rule match: "allow" or "deny".'
 						},
 						methods: {
 							type: 'array',
 							items: { type: 'string' },
-							description: 'Allowed HTTP methods (e.g. ["GET", "POST", "PUT", "PATCH", "DELETE", "*"]). Omit (or use ["*"]) to allow all methods.'
-						},
-						path: {
-							type: 'string',
-							description: 'Path glob pattern (* matches single segment, ** matches recursively, e.g. "/calendar/v3/calendars/xyz/events/**"). Trailing "/**" matches both the endpoint and all nested sub-paths (e.g. ".../events/**" matches both ".../events" and ".../events/123"). Use literal "@" (automatically matches "%40").'
+							description: 'Case-insensitive HTTP methods (["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "*"]). Omit (or use ["*"]) to match all methods.'
 						},
 						origin: {
 							type: 'string',
-							description: 'Origin glob pattern (e.g. "https://sheets.googleapis.com" or "https://*.googleapis.com").'
+							description: 'HTTPS origin glob without path or query (e.g. "https://sheets.googleapis.com" or "https://*.googleapis.com"). Always set origin on multi-host providers like Google so a path rule such as "/v4/spreadsheets/**" cannot match another host.'
+						},
+						path: {
+							type: 'string',
+							description: 'Case-insensitive URL pathname glob (* matches within one segment excluding "/", ** matches across segments). Trailing "/**" matches both the base path and all nested sub-paths (e.g. "/v1/events/**" matches "/v1/events" and "/v1/events/123"). Trailing slashes and safe percent-encoding are normalized automatically—write literal "@" rather than "%40", and never include "?query" here.'
 						},
 						query: {
 							type: 'object',
-							description: 'Optional map of URL query parameter names to expected glob patterns, arrays of patterns, or null (to match an absent parameter, e.g. ["none", null]).'
+							description: 'Non-empty map of URL query parameter names to expected primitive glob(s) or null. Matching is case-insensitive and "*" matches any character (including "/"). IMPORTANT: a string pattern requires the parameter to be PRESENT—use ["none", null] to allow a parameter to be either "none" or omitted, or null alone to require absence. Repeated parameters (?tag=a&tag=b) only match when EVERY value matches at least one pattern.'
 						},
 						body: {
 							type: ['object', 'string', 'array', 'null'],
-							description: 'Optional request body rule: field-map object (supporting dot-notation like "recipient.email" mapped to expected glob patterns, arrays of patterns, or null for absent/null fields), raw body glob pattern string (e.g. "*<DomainList>*"), array of raw body glob strings, or null to require an empty body.'
+							description: 'Optional request body constraint (omit to pass body through uninspected): (a) field-map object: non-empty map of field keys (dot-notation like "recipient.email" traverses nested JSON; flat keys like "metadata[env]" for form) to primitive glob(s) or null—same presence/absence and array-every semantics as query; empty bodies evaluate as {}; (b) string or string[] of globs: case-insensitive full-body match where "*" crosses newlines (e.g. "*<DeleteDomain*" matches both "<DeleteDomain>" and "<DeleteDomain/>"); (c) null: requires an empty request body.'
 						},
 						bodyType: {
 							type: 'string',
 							enum: ['json', 'form'],
-							description: 'Serialization format when "body" is a field-map object: "json" (default) or "form" (application/x-www-form-urlencoded).'
+							description: 'Required serialization format when "body" is a field-map object (invalid otherwise): "json" (default) or "form" (application/x-www-form-urlencoded—use "form" for Stripe, Twilio, Mailgun, etc.). Caveat: if a non-empty payload cannot be parsed as bodyType, an "allow" rule skips it, whereas a "deny" rule FAILS CLOSED and blocks the request immediately so callers cannot bypass field blocks by switching formats.'
 						},
 						description: {
 							type: 'string',
-							description: 'Optional human-readable label or explanation for this rule.'
+							description: 'Optional human-readable label; returned as the error reason when a "deny" rule blocks a request.'
 						}
 					}
 				}
@@ -153,7 +153,7 @@ function buildProviderTool (providerName, providerLinks = []) {
 				},
 				body: {
 					type: ['object', 'string'],
-					description: 'Request body payload for POST/PUT/PATCH requests (JSON object, form-urlencoded object when Content-Type is application/x-www-form-urlencoded, or raw XML/text string).'
+					description: 'Request body payload for POST/PUT/PATCH requests: JS object (serialized as JSON by default, or URL-encoded when headers["content-type"] is "application/x-www-form-urlencoded") or raw string (sent byte-for-byte without injecting a Content-Type header—set headers["content-type"] explicitly when upstream requires one).'
 				},
 				headers: {
 					type: 'object',
