@@ -352,12 +352,30 @@ test('rejects non-googleapis URLs in google_api tool', async () => {
 
 test('mcp google_api tool ignores body on GET requests', async () => {
 	const { session } = createTestSession({ account: 'getbody@example.com' })
-	const result = await executeTool('google_api', {
-		url: 'https://www.googleapis.com/drive/v3/files',
-		method: 'GET',
-		body: { unwanted: 'payload' }
-	}, session.token)
-	assert.ok(result)
+	const origFetch = globalThis.fetch
+	let capturedInit = null
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://www.googleapis.com/drive/v3/files') {
+			capturedInit = init
+			return new Response(JSON.stringify({ files: [] }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			})
+		}
+		return origFetch(input, init)
+	}
+	try {
+		const result = await executeTool('google_api', {
+			url: 'https://www.googleapis.com/drive/v3/files',
+			method: 'GET',
+			body: { unwanted: 'payload' }
+		}, session.token)
+		assert.equal(result.isError, undefined)
+		assert.equal(capturedInit?.body, undefined, 'GET request must strip body before fetch')
+	} finally {
+		globalThis.fetch = origFetch
+	}
 })
 
 test('oauth state flow', async () => {
@@ -601,6 +619,15 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	assert.equal(deriveClientName('client_bearer_12345'), null, 'Generated DCR client_bearer_id must not become derived session name')
 	assert.equal(deriveClientName('client_12345', 'Explicit Client'), 'Explicit Client')
 	assert.equal(deriveClientName('custom_named_client'), 'custom_named_client')
+	const unnamedRegRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/register`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			redirect_uris: ['http://localhost:8080/cb']
+		})
+	})
+	const unnamedRegData = await unnamedRegRes.json()
+	assert.equal(deriveClientName(unnamedRegData.client_id), null, 'DCR client_id registered without client_name derives null')
 	const bearerRegRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/register`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -633,7 +660,7 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	const bearerStateToken = new URL(bearerConsentRes.headers.get('location')).searchParams.get('state')
 	const bearerState = db.tokens.getState(bearerStateToken)
 	assert.equal(bearerState.clientId, bearerRegData.client_id)
-	assert.equal(bearerState.sessionName, null, 'DCR client_id without explicit name must not pollute sessionName')
+	assert.equal(bearerState.sessionName, 'Embedded MCP Client', 'DCR client_id registered with client_name preserves client_name as sessionName')
 	const origFetch = globalThis.fetch
 	globalThis.fetch = async (input, init) => {
 		const u = typeof input === 'string' ? input : input.url
@@ -680,7 +707,7 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	assert.ok(bearerSession)
 	assert.equal(bearerSession.expiresAt, null, 'Static bearer OAuth session must have expiresAt: null')
 	assert.equal(bearerSession.credentials, null, 'Static bearer OAuth session must have credentials: null')
-	assert.equal(bearerSession.name, 'Default Session')
+	assert.equal(bearerSession.name, 'Embedded MCP Client')
 	const boundCode = db.tokens.createAuthCode({
 		userId: bearerSession.userId,
 		clientId: 'client_refresh_bound',
@@ -6124,6 +6151,134 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 	assert.equal(clearedNameUpdData.app.name, null, 'Whitespace-only name clears name to null in single updateCredentials write')
 	assert.equal(clearedNameUpdData.app.account, 'acct_single_write')
 	assert.equal(db.tokens.get(updApp.id).name, null)
+})
+
+test('linear-time glob matching, strict form body validation, SSRF host checks, form Origin CSRF guard, DCR client_name, and REST response headers', async () => {
+	const addr = server.address()
+	const redosStart = performance.now()
+	const resRedos = evaluatePolicy([
+		{ action: 'deny', methods: ['POST'], path: '/soap', body: '*<a>*<a>*<a>*<a>*<a>*</b>*' },
+		{ action: 'allow' }
+	], {
+		url: 'https://api.example.com/soap',
+		method: 'POST',
+		body: '<a>'.repeat(2000)
+	})
+	assert.equal(resRedos.allowed, true)
+	assert.ok(performance.now() - redosStart < 25, 'Linear-time wildcard matcher completes in milliseconds without ReDoS')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/charges', body: { destination: null }, bodyType: 'form' }
+	], {
+		url: 'https://api.stripe.com/v1/charges',
+		method: 'POST',
+		body: '--b=1\r\nContent-Disposition: form-data; name="destination"\r\n\r\nacct_evil\r\n--b=1--'
+	}).allowed, false, 'Multipart payload with = and CRLF must not parse as form-urlencoded')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/charges', body: { destination: null }, bodyType: 'form' }
+	], {
+		url: 'https://api.stripe.com/v1/charges',
+		method: 'POST',
+		body: '<?xml version="1.0"?><root><x>a=b</x></root>'
+	}).allowed, false, 'XML payload containing whitespace must not parse as form-urlencoded')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/flags', body: { dry_run: '', mode: 'fast' }, bodyType: 'form' }
+	], {
+		url: 'https://api.example.com/v1/flags',
+		method: 'POST',
+		body: 'dry_run&mode=fast'
+	}).allowed, true, 'Valueless form-urlencoded flag (dry_run) parses cleanly')
+	const prevEnv = process.env.NODE_ENV
+	process.env.NODE_ENV = 'production'
+	try {
+		assert.equal(validateBaseUrl('https://localhost.'), null, 'Trailing dot localhost. must be blocked in production')
+		assert.equal(validateBaseUrl('https://sub.localhost.'), null)
+		assert.equal(validateBaseUrl('https://[fc0::1]'), null, 'Short IPv6 ULA [fc0::1] must be blocked')
+		assert.equal(validateBaseUrl('https://[fd1::1]'), null, 'Short IPv6 ULA [fd1::1] must be blocked')
+		assert.equal(validateBaseUrl('https://100.64.0.1'), null, 'CGNAT / Tailscale 100.64.0.0/10 must be blocked')
+		assert.equal(validateBaseUrl('https://100.127.255.254'), null)
+		assert.equal(validateBaseUrl('https://100.128.0.1'), 'https://100.128.0.1', 'Public 100.128.0.1 outside 100.64/10 remains allowed')
+		assert.equal(validateBaseUrl('https://metadata.google.internal'), null)
+	} finally {
+		process.env.NODE_ENV = prevEnv
+	}
+	const headHealth = await fetch(`http://127.0.0.1:${addr.port}/api/health`, { method: 'HEAD' })
+	assert.equal(headHealth.status, 200)
+	const regRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/register`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			client_name: 'Claude Code',
+			redirect_uris: ['http://127.0.0.1:9999/cb']
+		})
+	})
+	assert.equal(regRes.status, 201)
+	const { client_id: registeredClientId } = await regRes.json()
+	assert.equal(deriveClientName(registeredClientId), 'Claude Code', 'Stateless DCR client_id preserves client_name')
+	const authPage = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?client_id=${encodeURIComponent(registeredClientId)}&redirect_uri=${encodeURIComponent('http://127.0.0.1:9999/cb')}&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256`)
+	assert.equal(authPage.status, 200)
+	assert.match(await authPage.text(), /"clientName":"Claude Code"/)
+	const crossOriginConsent = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+		method: 'POST',
+		headers: {
+			origin: 'https://evil.example.com',
+			'content-type': 'application/x-www-form-urlencoded'
+		},
+		body: 'provider=google'
+	})
+	assert.equal(crossOriginConsent.status, 403, 'Cross-origin form POST to /oauth/authorize/consent must be rejected')
+	const sameOriginConsent = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+		method: 'POST',
+		headers: {
+			origin: `http://127.0.0.1:${addr.port}`,
+			'content-type': 'application/x-www-form-urlencoded'
+		},
+		body: 'provider=google',
+		redirect: 'manual'
+	})
+	assert.equal(sameOriginConsent.status, 302, 'Same-origin form POST to /oauth/authorize/consent succeeds')
+	const logUser = db.users.create()
+	const longLog = db.logs.create({
+		userId: logUser.id,
+		provider: 'stripe',
+		method: 'GET',
+		url: `https://api.stripe.com/${'x'.repeat(3000)}`,
+		allowed: true,
+		status: 500,
+		error: 'e'.repeat(5000)
+	})
+	assert.equal(longLog.url.length, 2049)
+	assert.equal(longLog.error.length, 2049)
+	const http = await import('node:http')
+	const headerUpstream = http.createServer((req, res) => {
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.setHeader('etag', '"v1-abc"')
+		res.setHeader('x-ratelimit-remaining', '49')
+		res.setHeader('set-cookie', 'upstream_secret=1; HttpOnly')
+		res.end(JSON.stringify({ ok: true }))
+	})
+	await new Promise(resolve => headerUpstream.listen(0, '127.0.0.1', resolve))
+	try {
+		const upPort = headerUpstream.address().port
+		const u = db.logins.resolveUser('google', 'rest-headers@example.com')
+		const s = db.tokens.create({ userId: u.id, provider: 'self', admin: 1 })
+		const app = db.tokens.create({
+			userId: u.id,
+			provider: 'github',
+			type: 'api_key',
+			credentials: { apiKey: 'ghp_hdr', baseUrl: `http://127.0.0.1:${upPort}` }
+		})
+		db.links.create({ sessionId: s.id, appId: app.id })
+		const restRes = await fetch(`http://127.0.0.1:${addr.port}/api/github/repos`, {
+			headers: { authorization: `Bearer ${s.token}` }
+		})
+		assert.equal(restRes.status, 200)
+		assert.equal(restRes.headers.get('etag'), '"v1-abc"')
+		assert.equal(restRes.headers.get('x-ratelimit-remaining'), '49')
+		assert.equal(restRes.headers.get('set-cookie'), null, 'Upstream Set-Cookie must not attach to jump origin')
+	} finally {
+		await new Promise(resolve => headerUpstream.close(resolve))
+	}
 })
 
 test('teardown server', (t, done) => {
