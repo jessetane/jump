@@ -5,18 +5,33 @@ export {
 	handleRest
 }
 
-const STRIPPED_PROXY_HEADERS = new Set([
-	'host',
+const HOP_BY_HOP_HEADERS = [
 	'connection',
 	'keep-alive',
 	'transfer-encoding',
 	'te',
 	'trailer',
 	'upgrade',
-	'content-length',
+	'content-length'
+]
+
+const STRIPPED_REQUEST_HEADERS = new Set([
+	...HOP_BY_HOP_HEADERS,
+	'host',
 	'authorization',
 	'x-api-key',
 	'cookie'
+])
+
+const STRIPPED_RESPONSE_HEADERS = new Set([
+	...HOP_BY_HOP_HEADERS,
+	'content-encoding',
+	'set-cookie',
+	'access-control-allow-origin',
+	'access-control-allow-methods',
+	'access-control-allow-headers',
+	'access-control-expose-headers',
+	'access-control-allow-credentials'
 ])
 
 async function parseJsonBody (req) {
@@ -48,7 +63,7 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 	const headers = {}
 	for (const [k, v] of Object.entries(req.headers)) {
 		const lower = k.toLowerCase()
-		if (STRIPPED_PROXY_HEADERS.has(lower) || v === undefined) continue
+		if (STRIPPED_REQUEST_HEADERS.has(lower) || v === undefined) continue
 		headers[lower] = Array.isArray(v) ? v.join(', ') : v
 	}
 	let body = undefined
@@ -70,8 +85,10 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 		raw: true
 	}, token)
 	res.statusCode = upstream.status
-	for (const [k, v] of Object.entries(upstream.headers)) {
-		res.setHeader(k, v)
+	for (const [k, v] of upstream.headers.entries()) {
+		if (!STRIPPED_RESPONSE_HEADERS.has(k.toLowerCase())) {
+			res.setHeader(k, v)
+		}
 	}
 	res.end(upstream.body)
 }

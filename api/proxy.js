@@ -11,22 +11,6 @@ export {
 const DEFAULT_TIMEOUT_MS = 60000
 const MAX_REDIRECT_HOPS = 5
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
-const STRIPPED_RESPONSE_HEADERS = new Set([
-	'connection',
-	'keep-alive',
-	'transfer-encoding',
-	'te',
-	'trailer',
-	'upgrade',
-	'content-encoding',
-	'content-length',
-	'set-cookie',
-	'access-control-allow-origin',
-	'access-control-allow-methods',
-	'access-control-allow-headers',
-	'access-control-expose-headers',
-	'access-control-allow-credentials'
-])
 
 function reqMethodAllowsBody (method) {
 	return method !== 'GET' && method !== 'HEAD'
@@ -175,16 +159,9 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 	const rawContentType = res.headers.get('content-type') || ''
 	const buf = await readResponseBody(res, maxFileSizeBytes)
 	if (raw) {
-		const resHeaders = {}
-		for (const [k, v] of res.headers.entries()) {
-			const lower = k.toLowerCase()
-			if (!STRIPPED_RESPONSE_HEADERS.has(lower)) {
-				resHeaders[lower] = v
-			}
-		}
 		return {
 			status: res.status,
-			headers: resHeaders,
+			headers: res.headers,
 			body: buf
 		}
 	}
