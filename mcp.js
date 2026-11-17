@@ -45,21 +45,21 @@ const adminTool = {
 				type: 'string',
 				enum: [
 					'whoami',
-					'list',
-					'get',
+					'list_sessions',
+					'get_session',
 					'create_session',
-					'revoke',
+					'update_session',
+					'revoke_session',
 					'list_apps',
 					'connect_app',
 					'disconnect_app',
+					'update_app',
 					'share_app',
 					'unshare_app',
 					'link_app',
 					'unlink_app',
 					'link_login',
 					'unlink_login',
-					'update_app',
-					'update_session',
 					'list_logs'
 				],
 				description: 'Administrative action to perform.'
@@ -125,7 +125,7 @@ const adminTool = {
 			admin: { type: 'boolean', description: 'Grant or revoke admin permissions on a session (used for create_session and update_session).' },
 			rotateToken: { type: 'boolean', description: 'When action is update_session, set to true to rotate and regenerate the session bearer token.' },
 			revoke: { type: 'boolean', description: 'When action is disconnect_app, set to false to remove locally without upstream revocation (defaults to true).' },
-			allOthers: { type: 'boolean', description: 'When action is revoke, set to true to revoke all other sessions.' },
+			allOthers: { type: 'boolean', description: 'When action is revoke_session, set to true to revoke all other sessions.' },
 			allowed: { type: 'boolean', description: 'When action is list_logs, filter logs by whether the request was allowed by policy.' },
 			limit: { type: 'number', description: 'When action is list_logs, maximum number of log entries to return (defaults to 100, max 1000).' }
 		}
@@ -178,11 +178,11 @@ function buildProviderTool (providerName, providerLinks = []) {
 
 const adminActions = {
 	whoami: (args, token, appUrl) => api.auth.whoami(token, { appUrl }),
-	list: (args, token, appUrl) => api.auth.list(token, { appUrl }),
-	get: (args, token, appUrl) => api.auth.get(token, args.sessionId, { appUrl }),
+	list_sessions: (args, token, appUrl) => api.auth.listSessions(token, { appUrl }),
+	get_session: (args, token, appUrl) => api.auth.getSession(token, args.sessionId, { appUrl }),
 	create_session: (args, token, appUrl) => api.auth.createSession(token, { ...args, appUrl }),
 	update_session: (args, token, appUrl) => api.auth.updateSession(token, { ...args, appUrl }),
-	revoke: (args, token) => api.auth.revoke(token, args),
+	revoke_session: (args, token) => api.auth.revokeSession(token, args),
 	list_apps: (args, token, appUrl) => api.auth.listApps(token, { appUrl }),
 	connect_app: (args, token, appUrl) => api.auth.connectApp(token, { ...args, appUrl }),
 	disconnect_app: (args, token, appUrl) => api.auth.disconnectApp(token, { ...args, appUrl }),

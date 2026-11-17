@@ -113,7 +113,7 @@ const routes = {
 	},
 	'/api/sessions': {
 		async GET (req, res, { token, appUrl }) {
-			const result = await api.auth.list(token, { appUrl })
+			const result = await api.auth.listSessions(token, { appUrl })
 			sendJson(res, result)
 		},
 		async POST (req, res, { token, appUrl }) {
@@ -122,7 +122,7 @@ const routes = {
 			sendJson(res, result, 201)
 		},
 		async DELETE (req, res, { token, query }) {
-			const result = await api.auth.revoke(token, { allOthers: query.allOthers })
+			const result = await api.auth.revokeSession(token, { allOthers: query.allOthers })
 			sendJson(res, result)
 		}
 	},
@@ -219,12 +219,12 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 	if (pathname.startsWith('/api/sessions/')) {
 		const sessionId = decodePathParam(pathname.slice('/api/sessions/'.length))
 		if (req.method === 'GET') {
-			const result = await api.auth.get(token, sessionId, { appUrl })
+			const result = await api.auth.getSession(token, sessionId, { appUrl })
 			sendJson(res, result)
 			return
 		}
 		if (req.method === 'DELETE') {
-			const result = await api.auth.revoke(token, { sessionId })
+			const result = await api.auth.revokeSession(token, { sessionId })
 			sendJson(res, result)
 			return
 		}

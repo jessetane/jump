@@ -6,11 +6,11 @@ import { validateBaseUrl, parseAccountSpec, requireBoolean } from '../util.js'
 
 export {
 	whoami,
-	list,
-	get,
+	listSessions,
+	getSession,
 	createSession,
 	updateSession,
-	revoke,
+	revokeSession,
 	listApps,
 	connectApp,
 	disconnectApp,
@@ -170,13 +170,13 @@ function requireShareTarget (token, opts = {}) {
 	return { session, targetApp, cleanAccount, cleanProvider }
 }
 
-async function list (token, opts = {}) {
+async function listSessions (token, opts = {}) {
 	const { session } = requireAdmin(token, opts, 'Access denied: session administration requires admin privileges')
 	const rawSessions = db.tokens.listByUserId(session.userId, { provider: 'self' })
 	return { sessions: rawSessions.map(s => formatSession(s, session.id)) }
 }
 
-async function get (token, sessionId, opts = {}) {
+async function getSession (token, sessionId, opts = {}) {
 	const { session } = requireSession(token, opts)
 	if (!session.admin && sessionId !== session.id) {
 		const error = new Error('Access denied: session administration requires admin privileges')
@@ -228,7 +228,7 @@ async function createSession (token, opts = {}) {
 	}
 }
 
-async function revoke (token, { sessionId, allOthers } = {}) {
+async function revokeSession (token, { sessionId, allOthers } = {}) {
 	const session = resolveSession(token)
 	if (!session) {
 		return {
@@ -334,13 +334,8 @@ function requireValidBaseUrl (rawBase) {
 }
 
 async function connectApp (token, opts = {}) {
-	let { provider, name, apiKey, account, baseUrl, credentials, appId } = opts
+	let { provider, name, apiKey, account, baseUrl, appId } = opts
 	const { session, appUrl } = requireAdmin(token, opts)
-	if (credentials !== undefined) {
-		const error = new Error('Pass apiKey, account, and baseUrl instead of credentials')
-		error.status = 400
-		throw error
-	}
 	if (apiKey !== undefined) {
 		apiKey = requireNonEmptyString(apiKey, 'apiKey')
 	}

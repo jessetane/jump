@@ -298,10 +298,6 @@ function resolveSetupState (setup, expectedMode, expectedProvider = null) {
 }
 
 async function handleAuthorize (req, res, query) {
-	if (query.session_id !== undefined) {
-		sendText(res, 'Access denied: invalid or expired setup code.', 403)
-		return
-	}
 	try {
 		validateAuthorizeParams(query)
 	} catch (err) {
@@ -424,7 +420,6 @@ async function handleAuthorizeConsent (req, res) {
 	let localToken = null
 	let sessionName = null
 	let setupCode = null
-	let hasSessionId = false
 	let admin = 0
 	for (const [key, value] of params.entries()) {
 		if (key === 'provider') {
@@ -435,17 +430,11 @@ async function handleAuthorizeConsent (req, res) {
 			sessionName = value.trim() || null
 		} else if (key === 'code') {
 			setupCode = value.trim() || null
-		} else if (key === 'session_id') {
-			hasSessionId = true
 		} else if (key === 'admin') {
 			admin = value === 'true' || value === '1' || value === 'on' ? 1 : 0
 		} else {
 			query[key] = value
 		}
-	}
-	if (hasSessionId) {
-		sendText(res, 'Access denied: invalid or expired setup code.', 403)
-		return
 	}
 	let validation
 	try {
@@ -636,10 +625,6 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 		throw err
 	}
 	if (!requireProviderEnv(res, provider)) return
-	if (query.session_id !== undefined) {
-		sendText(res, 'Access denied: invalid or expired setup code.', 403)
-		return
-	}
 	const resolvedParams = { ...query }
 	if (url?.searchParams) {
 		for (const key of ['services', 'write']) {
@@ -717,10 +702,6 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 			const clean = s.trim().toLowerCase()
 			if (clean) writeList.push(clean)
 		}
-	}
-	if (params.has('session_id')) {
-		sendText(res, 'Access denied: admin session required.', 403)
-		return
 	}
 	const setupCode = params.get('code') || null
 	const setup = db.tokens.consumeState(setupCode)
