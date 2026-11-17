@@ -29,7 +29,7 @@ const { isAllowedRedirectUri, deriveClientName, getBaseUrl } = await import('../
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
 const { parseSsoDomains, shouldClaimUnscoped } = await import('../sso.js')
-const { validateBaseUrl, resolveTargetUrl, hasPathTraversal, isXml } = await import('../util.js')
+const { validateBaseUrl, resolveTargetUrl, hasPathTraversal } = await import('../util.js')
 
 function createTestSession (opts = {}) {
 	const {
@@ -1638,10 +1638,23 @@ test('validatePolicy validates schema and fails fast on errors', () => {
 	assert.equal(validatePolicy([{ action: 'allow', query: { param: { nested: 'obj' } } }]).valid, false)
 	assert.match(validatePolicy([{ action: 'allow', query: { param: { nested: 'obj' } } }]).error, /query field "param" must be a primitive or non-empty array of primitives/)
 	assert.equal(validatePolicy([{ action: 'allow', query: { param: undefined } }]).valid, false)
-	assert.equal(validatePolicy([{ action: 'allow', body: null }]).valid, false)
-	assert.match(validatePolicy([{ action: 'allow', body: null }]).error, /body must be a non-empty object/)
+	assert.equal(validatePolicy([{ action: 'allow', body: null }]).valid, true)
+	assert.equal(validatePolicy([{ action: 'allow', body: '*<DomainList>*' }]).valid, true)
+	assert.equal(validatePolicy([{ action: 'allow', body: ['*<Get>*', '*<List>*'] }]).valid, true)
+	assert.equal(validatePolicy([{ action: 'allow', body: { currency: 'usd' }, bodyType: 'json' }]).valid, true)
+	assert.equal(validatePolicy([{ action: 'allow', body: { currency: 'usd' }, bodyType: 'form' }]).valid, true)
+	assert.equal(validatePolicy([{ action: 'allow', body: '' }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', body: '   ' }]).error, /body pattern must be a non-empty string/)
 	assert.equal(validatePolicy([{ action: 'allow', body: [] }]).valid, false)
-	assert.match(validatePolicy([{ action: 'allow', body: [] }]).error, /body must be a non-empty object/)
+	assert.match(validatePolicy([{ action: 'allow', body: [] }]).error, /body array must be a non-empty array of non-empty pattern strings/)
+	assert.equal(validatePolicy([{ action: 'allow', body: ['ok', ''] }]).valid, false)
+	assert.equal(validatePolicy([{ action: 'allow', body: 123 }]).valid, false)
+	assert.equal(validatePolicy([{ action: 'allow', bodyType: 'form' }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', bodyType: 'form' }]).error, /bodyType is only valid when body is a field-map object/)
+	assert.equal(validatePolicy([{ action: 'allow', body: '*<Ping>*', bodyType: 'form' }]).valid, false)
+	assert.equal(validatePolicy([{ action: 'allow', body: null, bodyType: 'json' }]).valid, false)
+	assert.equal(validatePolicy([{ action: 'allow', body: { a: '1' }, bodyType: 'xml' }]).valid, false)
+	assert.match(validatePolicy([{ action: 'allow', body: { a: '1' }, bodyType: 'xml' }]).error, /bodyType must be "json" or "form"/)
 	assert.equal(validatePolicy([{ action: 'allow', body: {} }]).valid, false)
 	assert.match(validatePolicy([{ action: 'allow', body: {} }]).error, /body must be a non-empty object/)
 	assert.equal(validatePolicy([{ action: 'allow', body: { '': 'val' } }]).valid, false)
@@ -1653,13 +1666,14 @@ test('validatePolicy validates schema and fails fast on errors', () => {
 	assert.equal(validatePolicy([{ action: 'allow', body: { field: ['ok', undefined] } }]).valid, false)
 })
 
-test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON string, form-urlencoded)', () => {
+test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON, explicit form, raw globs, empty null)', () => {
 	const policy = [
 		{
 			action: 'deny',
 			methods: ['POST'],
 			path: '/v1/charges',
 			body: { currency: 'btc' },
+			bodyType: 'form',
 			description: 'Crypto charges forbidden'
 		},
 		{
@@ -1674,7 +1688,7 @@ test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON
 		{
 			action: 'allow',
 			methods: ['POST'],
-			path: '/v1/charges',
+			path: '/v1/orders',
 			body: {
 				'metadata.env': 'staging',
 				capture: true
@@ -1691,6 +1705,11 @@ test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON
 		method: 'POST',
 		body: JSON.stringify({ channel: 'C_TEAM', 'recipient.email': 'bob@example.com' })
 	}).allowed, true)
+	assert.equal(evaluatePolicy(policy, {
+		url: 'https://api.slack.com/v1/messages',
+		method: 'POST',
+		body: Buffer.from(JSON.stringify({ channel: 'C_TEAM', recipient: { email: 'carol@example.com' } }))
+	}).allowed, true, 'Raw Buffer JSON body parses cleanly when rule inspects body')
 	assert.equal(evaluatePolicy(policy, {
 		url: 'https://api.slack.com/v1/messages',
 		method: 'POST',
@@ -1713,7 +1732,7 @@ test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON
 	assert.equal(denyCrypto.allowed, false)
 	assert.equal(denyCrypto.reason, 'Crypto charges forbidden')
 	assert.equal(evaluatePolicy(policy, {
-		url: 'https://api.stripe.com/v1/charges',
+		url: 'https://api.stripe.com/v1/orders',
 		method: 'POST',
 		body: { metadata: { env: 'staging' }, capture: true }
 	}).allowed, true)
@@ -1794,7 +1813,7 @@ test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON
 		body: { nested: {} }
 	}).allowed, false, 'Nested prototype property must not match')
 	assert.equal(evaluatePolicy([
-		{ action: 'allow', methods: ['POST'], path: '/v1/proto', body: { toString: 'hello' } }
+		{ action: 'allow', methods: ['POST'], path: '/v1/proto', body: { toString: 'hello' }, bodyType: 'form' }
 	], {
 		url: 'https://api.example.com/v1/proto',
 		method: 'POST',
@@ -1808,92 +1827,108 @@ test('evaluatePolicy matches request body fields (nested dot-paths, arrays, JSON
 		body: { text: 'hello/cruel/world', mime: 'application/json' }
 	}).allowed, true, 'Single star in body value pattern must match across slashes')
 	assert.equal(evaluatePolicy([
-		{ action: 'allow', methods: ['POST'], path: '/xml', body: { '<?xml version': '"1.0"?>' } }
-	], {
-		url: 'https://api.example.com/xml',
-		method: 'POST',
-		body: '<?xml version="1.0"?><request><action>transfer</action></request>'
-	}).allowed, false, 'XML string body must not be misparsed as URLSearchParams')
-	assert.equal(evaluatePolicy([
-		{ action: 'deny', methods: ['POST'], path: '/v1/charges', body: { currency: 'btc' } },
-		{ action: 'allow' }
-	], {
-		url: 'https://api.stripe.com/v1/charges',
-		method: 'POST',
-		body: '<x>=1&currency=btc',
-		contentType: 'application/x-www-form-urlencoded'
-	}).allowed, false, 'Form-urlencoded string starting with < must still be evaluated against body deny rules')
-	assert.equal(evaluatePolicy([
-		{ action: 'deny', methods: ['POST'], path: '/v1/charges', body: { currency: 'btc' } },
-		{ action: 'allow' }
-	], {
-		url: 'https://api.stripe.com/v1/charges',
-		method: 'POST',
-		body: '<x>=1&currency=btc'
-	}).allowed, false, 'Form-urlencoded string starting with < without explicit contentType must still match body deny rules')
-	assert.equal(evaluatePolicy([
-		{ action: 'allow', methods: ['POST'], path: '/v1/form', body: { '<foo>': 'bar>' } }
+		{ action: 'allow', methods: ['POST'], path: '/v1/form', body: { '<foo>': 'bar>' }, bodyType: 'form' }
 	], {
 		url: 'https://api.stripe.com/v1/form',
 		method: 'POST',
 		body: '<foo>=bar>'
-	}).allowed, true, 'Form-urlencoded <foo>=bar> without contentType must not be misclassified as XML')
+	}).allowed, true, 'Explicit bodyType: form parses <foo>=bar> without header guessing')
 	assert.equal(evaluatePolicy([
-		{ action: 'allow', methods: ['POST'], path: '/v1/form', body: { '<a': '1', b: '2>' } }
+		{ action: 'deny', methods: ['POST'], path: '/v1/charges', body: { currency: 'btc' }, bodyType: 'form' },
+		{ action: 'allow' }
 	], {
-		url: 'https://api.stripe.com/v1/form',
+		url: 'https://api.stripe.com/v1/charges',
 		method: 'POST',
-		body: '<a=1&b=2>'
-	}).allowed, true, 'Form-urlencoded <a=1&b=2> without contentType must not be misclassified as XML')
+		body: '{"currency":"btc"}'
+	}).allowed, false, 'Deny rule with bodyType: form must fail closed when non-form JSON payload is sent')
 	assert.equal(evaluatePolicy([
-		{ action: 'allow', methods: ['POST'], path: '/v1/form', body: { '<a>': '1', b: '<a>2</a>' } }
+		{ action: 'deny', methods: ['POST'], path: '/v1/charges', body: { currency: 'btc' } },
+		{ action: 'allow' }
 	], {
-		url: 'https://api.stripe.com/v1/form',
+		url: 'https://api.stripe.com/v1/charges',
 		method: 'POST',
-		body: '<a>=1&b=<a>2</a>'
-	}).allowed, true, 'Unbalanced <a>=1&b=<a>2</a> form body must not be misclassified as XML')
+		body: 'currency=btc&amount=1000'
+	}).allowed, false, 'Deny rule with default bodyType: json must fail closed when form-urlencoded string is sent')
 	assert.equal(evaluatePolicy([
-		{ action: 'allow', methods: ['POST'], path: '/xml', body: { '<Ping': '*' } }
+		{ action: 'deny', methods: ['POST'], path: '/v1/charges', body: { currency: 'btc' }, bodyType: 'form' },
+		{ action: 'allow' }
 	], {
-		url: 'https://api.example.com/xml',
+		url: 'https://api.stripe.com/v1/charges',
 		method: 'POST',
-		body: '<?xml version="1.0"?><!-- comment --><Ping attr="1"/>'
-	}).allowed, false, 'Genuine self-closing XML with declaration and comment must not be parsed as form-urlencoded')
-	assert.equal(isXml('<!DOCTYPE note><note>a=1</note>'), true)
-	assert.equal(isXml('<!DOCTYPE note SYSTEM "https://example.com/a>b.dtd"><note/>'), true)
-	assert.equal(isXml('<?xml-stylesheet type="text/xsl" href="style.xsl"?><root/>'), true)
-	assert.equal(isXml('<?xml version="1.0"?><?xml-stylesheet type="text/xsl" href="style.xsl"?><!DOCTYPE note [<!ELEMENT note (#PCDATA)>]><note>a=1</note>'), true)
-	assert.equal(isXml('<?xml version="1.0"?>'), false, 'Bare XML declaration without root element must return false')
-	assert.equal(isXml('<!DOCTYPE a=1&b=2>'), false, 'Bare DOCTYPE without root element must return false')
-	assert.equal(isXml('<foo>=bar>'), false)
-	assert.equal(isXml('<a=1&b=2>'), false)
-	assert.equal(isXml('<a>=1&b=<a>2</a>'), false)
-	const redosStart = performance.now()
-	assert.equal(isXml(`<a ${' '.repeat(5000)}b="c"`), false)
-	assert.ok(performance.now() - redosStart < 5, 'isXml must finish in linear time on long unclosed tags')
+		body: { currency: 'btc' },
+		objectFormat: 'json'
+	}).allowed, false, 'Deny rule with bodyType: form must fail closed when MCP caller sends JSON object')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/soap', body: '*<DomainList*>*' }
+	], {
+		url: 'https://api.namecheap.com/soap',
+		method: 'POST',
+		body: '<soap:Envelope>\n  <soap:Body>\n    <DomainList/>\n  </soap:Body>\n</soap:Envelope>'
+	}).allowed, true, 'String glob body rule matches multiline XML across newlines')
+	assert.equal(evaluatePolicy([
+		{ action: 'deny', methods: ['POST'], path: '/soap', body: ['*<DeleteDomain*', '*<Transfer*'] },
+		{ action: 'allow', methods: ['POST'], path: '/soap', body: '*<soap:Envelope>*' }
+	], {
+		url: 'https://api.namecheap.com/soap',
+		method: 'POST',
+		body: '<soap:Envelope><soap:Body><DeleteDomain id="1"/></soap:Body></soap:Envelope>'
+	}).allowed, false, 'Array of string globs in deny rule blocks matching XML body')
+	assert.equal(evaluatePolicy([
+		{ action: 'deny', methods: ['POST'], path: '/v1/any', body: '*secret_token*' },
+		{ action: 'allow' }
+	], {
+		url: 'https://api.example.com/v1/any',
+		method: 'POST',
+		body: { nested: { key: 'my_secret_token_123' } }
+	}).allowed, false, 'String glob rule inspects serialized wire text when MCP caller passes a JS object')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/ping', body: null }
+	], {
+		url: 'https://api.example.com/v1/ping',
+		method: 'POST'
+	}).allowed, true, 'body: null allows empty request body')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/ping', body: null }
+	], {
+		url: 'https://api.example.com/v1/ping',
+		method: 'POST',
+		body: Buffer.alloc(0)
+	}).allowed, true, 'body: null allows 0-byte Buffer body')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/ping', body: null }
+	], {
+		url: 'https://api.example.com/v1/ping',
+		method: 'POST',
+		body: 'non-empty'
+	}).allowed, false, 'body: null rejects non-empty request body')
+	assert.equal(evaluatePolicy([
+		{ action: 'allow', methods: ['POST'], path: '/v1/raw' }
+	], {
+		url: 'https://api.example.com/v1/raw',
+		method: 'POST',
+		body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00])
+	}).allowed, true, 'Rules without body never inspect or parse raw binary request bodies')
 	assert.equal(evaluatePolicy([
 		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null] } }
 	], {
 		url: 'https://api.example.com/v1/events',
 		method: 'POST',
 		body: '[{"a":"1=2"}]'
-	}).allowed, false, 'JSON array string containing = must not fall through to URLSearchParams and match null body rule')
+	}).allowed, false, 'JSON array string must not match object body rule')
 	assert.equal(evaluatePolicy([
 		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null] } }
 	], {
 		url: 'https://api.example.com/v1/events',
 		method: 'POST',
-		body: '{"broken": "a=b"',
-		contentType: 'application/json'
-	}).allowed, false, 'Malformed JSON string must not fall through to URLSearchParams')
+		body: '{"broken": "a=b"'
+	}).allowed, false, 'Malformed JSON string must not match object body rule')
 	assert.equal(evaluatePolicy([
 		{ action: 'allow', methods: ['POST'], path: '/v1/events', body: { sendUpdates: ['none', null] } }
 	], {
 		url: 'https://api.example.com/v1/events',
 		method: 'POST',
-		body: 'foo=bar',
-		contentType: 'text/plain'
-	}).allowed, false, 'Non-form/non-JSON contentType must not parse string body as URL-encoded')
+		body: 'foo=bar'
+	}).allowed, false, 'Form string must not match default bodyType: json rule')
 })
 
 test('evaluatePolicy matches URL query parameters (exact, glob, null absence, optional array, repeated params)', () => {
@@ -4332,13 +4367,15 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 					action: 'deny',
 					methods: ['POST'],
 					path: '/v3/messages',
-					body: { forbidden: '1' }
+					body: { forbidden: '1' },
+					bodyType: 'form'
 				},
 				{
 					action: 'allow',
 					methods: ['POST'],
 					path: '/v3/messages',
-					body: { from: 'noreply@example.com', tag: ['onboarding', 'welcome'] }
+					body: { from: 'noreply@example.com', tag: ['onboarding', 'welcome'] },
+					bodyType: 'form'
 				}
 			]
 		}, session.token)
@@ -4440,11 +4477,18 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 		assert.equal(rotatedParsedUrl.searchParams.get('ApiKey'), 'rotatedsecret456')
 		assert.equal(rotatedParsedUrl.searchParams.get('ClientIp'), '5.6.7.8')
 		const restXmlRes = await fetch(`http://127.0.0.1:${addr.port}/api/namecheap/xml.response?Command=namecheap.domains.getList`, {
-			headers: { authorization: `Bearer ${session.token}` }
+			headers: {
+				authorization: `Bearer ${session.token}`,
+				'x-custom-trace': 'trace-abc-123'
+			}
 		})
 		assert.equal(restXmlRes.status, 200)
-		assert.equal(restXmlRes.headers.get('content-type'), 'application/xml; charset=utf-8')
-		assert.match(await restXmlRes.text(), /<ApiResponse Status="OK">/)
+		assert.equal(restXmlRes.headers.get('content-type'), 'application/xml; charset=iso-8859-1')
+		const restXmlBuf = Buffer.from(await restXmlRes.arrayBuffer())
+		assert.equal(restXmlBuf.toString('latin1'), '<?xml version="1.0" encoding="iso-8859-1"?><ApiResponse Status="OK"><CommandResponse>caf\xe9</CommandResponse></ApiResponse>', 'REST proxy preserves raw Latin-1 bytes and upstream charset header untouched')
+		const restXmlCaptured = captured.findLast(r => r.url.startsWith('/xml.response'))
+		assert.equal(restXmlCaptured.headers['x-custom-trace'], 'trace-abc-123', 'REST proxy must pass safe caller headers through')
+		captured.length = 0
 		const soapRes = await executeTool('namecheap_api', {
 			url: '/soap',
 			method: 'POST',
@@ -4453,7 +4497,34 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 		assert.equal(soapRes.isError, undefined)
 		assert.equal(soapRes.content[0].text, '<soap:Envelope><soap:Body><Result>ok</Result></soap:Body></soap:Envelope>')
 		const soapCaptured = captured.find(r => r.url.startsWith('/soap'))
-		assert.equal(soapCaptured.headers['content-type'], 'application/xml')
+		assert.equal(soapCaptured.headers['content-type'], undefined, 'Dumb proxy must never inject Content-Type on string bodies')
+		captured.length = 0
+		const explicitSoapRes = await executeTool('namecheap_api', {
+			url: '/soap',
+			method: 'POST',
+			headers: { 'Content-Type': 'application/soap+xml; charset=utf-8' },
+			body: '<soap:Envelope><soap:Body><Ping/></soap:Body></soap:Envelope>'
+		}, session.token)
+		assert.equal(explicitSoapRes.isError, undefined)
+		assert.equal(captured[0].headers['content-type'], 'application/soap+xml; charset=utf-8', 'Explicit caller Content-Type is forwarded intact')
+		captured.length = 0
+		const rawRestPost = await fetch(`http://127.0.0.1:${addr.port}/api/namecheap/raw-upload`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${session.token}`,
+				cookie: 'jump_sid=should_not_leak',
+				'x-api-key': 'jump_key_should_not_leak',
+				'x-upstream-header': 'keep-me'
+			},
+			body: Buffer.from('raw-unlabelled-payload')
+		})
+		assert.equal(rawRestPost.status, 200)
+		const rawRestData = await rawRestPost.json()
+		assert.equal(rawRestData.contentType, null, 'REST proxy must not inject Content-Type when client omits it')
+		assert.equal(rawRestData.body, 'raw-unlabelled-payload')
+		assert.equal(captured[0].headers['x-upstream-header'], 'keep-me')
+		assert.equal(captured[0].headers.cookie, undefined, 'Jump Cookie header must not leak upstream')
+		assert.equal(captured[0].headers['x-api-key'], undefined, 'Jump X-Api-Key header must not leak upstream')
 		const problemRes = await executeTool('namecheap_api', { url: '/problem' }, session.token)
 		assert.equal(problemRes.isError, undefined)
 		const problemData = JSON.parse(problemRes.content[0].text)
