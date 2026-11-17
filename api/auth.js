@@ -32,6 +32,29 @@ function formatLogin (login) {
 	}
 }
 
+function formatApp (app, { sharesByAppId } = {}) {
+	const item = {
+		id: app.id,
+		provider: app.provider,
+		type: app.type,
+		name: app.name,
+		account: app.credentials?.account || null,
+		...(app.credentials?.baseUrl ? { baseUrl: app.credentials.baseUrl } : {}),
+		scopes: app.scopes,
+		expiresAt: app.expiresAt,
+		created: app.created,
+		updated: app.updated
+	}
+	if (app.type === 'share') {
+		item.sharedBy = app.sharedBy || null
+		item.policy = parsePolicy(app.credentials?.policy)
+	} else if (sharesByAppId) {
+		const shares = sharesByAppId.get(app.id)
+		if (shares) item.shares = shares
+	}
+	return item
+}
+
 function formatSession (s, currentSessionId) {
 	const links = db.links.listBySessionId(s.id)
 	return {
@@ -59,9 +82,15 @@ function formatSession (s, currentSessionId) {
 	}
 }
 
+function resolveSession (auth) {
+	if (!auth) return null
+	if (typeof auth === 'object') return auth
+	return db.tokens.getByToken(auth)
+}
+
 async function whoami (token, opts = {}) {
 	const appUrl = (opts.appUrl || 'http://localhost:8080').replace(/\/$/, '')
-	const session = token ? db.tokens.getByToken(token) : null
+	const session = resolveSession(token)
 	if (!session) {
 		return {
 			authenticated: false,
@@ -83,7 +112,7 @@ async function whoami (token, opts = {}) {
 
 function requireSession (token, opts = {}) {
 	const appUrl = (opts.appUrl || 'http://localhost:8080').replace(/\/$/, '')
-	const session = token ? db.tokens.getByToken(token) : null
+	const session = resolveSession(token)
 	if (!session) {
 		const error = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
 		error.status = 401
@@ -207,7 +236,7 @@ async function createSession (token, opts = {}) {
 }
 
 async function revoke (token, { sessionId, allOthers } = {}) {
-	const session = token ? db.tokens.getByToken(token) : null
+	const session = resolveSession(token)
 	if (!session) {
 		return {
 			revoked: false,
@@ -278,28 +307,7 @@ async function listApps (token, opts = {}) {
 			policy: parsePolicy(s.credentials?.policy)
 		})
 	}
-	const apps = allTokens.filter(t => t.provider !== 'self').map(a => {
-		const item = {
-			id: a.id,
-			provider: a.provider,
-			type: a.type,
-			name: a.name,
-			account: a.credentials?.account || null,
-			...(a.credentials?.baseUrl ? { baseUrl: a.credentials.baseUrl } : {}),
-			scopes: a.scopes,
-			expiresAt: a.expiresAt,
-			created: a.created,
-			updated: a.updated
-		}
-		if (a.type === 'share') {
-			item.sharedBy = a.sharedBy || null
-			item.policy = parsePolicy(a.credentials?.policy)
-		} else {
-			const shares = sharesByAppId.get(a.id)
-			if (shares) item.shares = shares
-		}
-		return item
-	})
+	const apps = allTokens.filter(t => t.provider !== 'self').map(a => formatApp(a, { sharesByAppId }))
 	return { apps }
 }
 
@@ -413,14 +421,7 @@ async function connectApp (token, opts = {}) {
 	})
 	return {
 		connected: true,
-		app: {
-			id: app.id,
-			provider: app.provider,
-			type: app.type,
-			name: app.name,
-			account: app.credentials?.account || null,
-			...(app.credentials?.baseUrl ? { baseUrl: app.credentials.baseUrl } : {})
-		}
+		app: formatApp(app)
 	}
 }
 
@@ -554,18 +555,7 @@ async function updateApp (token, opts = {}) {
 	}
 	return {
 		updated: true,
-		app: {
-			id: updated.id,
-			provider: updated.provider,
-			type: updated.type,
-			name: updated.name,
-			account: updated.credentials?.account || null,
-			...(updated.credentials?.baseUrl ? { baseUrl: updated.credentials.baseUrl } : {}),
-			scopes: updated.scopes,
-			expiresAt: updated.expiresAt,
-			created: updated.created,
-			updated: updated.updated
-		}
+		app: formatApp(updated)
 	}
 }
 
@@ -673,23 +663,16 @@ async function updateSession (token, opts = {}) {
 	const parsedAdmin = requireBoolean(admin, 'admin')
 	const shouldRotate = requireBoolean(rotateToken, 'rotateToken', false)
 	requireTargetSession(session.userId, targetId)
-	if (name !== undefined) {
-		db.tokens.updateName(targetId, name)
-	}
-	if (parsedAdmin !== undefined) {
-		db.tokens.setAdmin(targetId, parsedAdmin)
-	}
-	let newToken = null
-	if (shouldRotate) {
-		const rotated = db.tokens.rotateToken(targetId)
-		newToken = rotated?.token || null
-	}
-	const updated = db.tokens.get(targetId)
+	const updated = db.tokens.updateSession(targetId, {
+		name,
+		admin: parsedAdmin,
+		rotateToken: shouldRotate
+	})
 	return {
 		updated: true,
 		session: {
 			...formatSession(updated, session.id),
-			...(newToken ? { token: newToken } : {})
+			...(shouldRotate && updated?.token ? { token: updated.token } : {})
 		}
 	}
 }

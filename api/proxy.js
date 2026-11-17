@@ -157,14 +157,14 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 	return result
 }
 
-async function request ({ provider: providerName = 'google', url, method = 'GET', body, headers, appId, account, appUrl: rawAppUrl, raw = false } = {}, token) {
+async function request ({ provider: providerName = 'google', url, method = 'GET', body, headers, appId, account, appUrl: rawAppUrl, raw = false } = {}, auth) {
 	if (!url) {
 		const err = new Error('URL is required')
 		err.status = 400
 		throw err
 	}
 	const appUrl = (rawAppUrl || 'http://localhost:8080').replace(/\/$/, '')
-	const session = token ? db.tokens.getByToken(token) : null
+	const session = auth && typeof auth === 'object' ? auth : (auth ? db.tokens.getByToken(auth) : null)
 	if (!session) {
 		const err = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
 		err.status = 401

@@ -6,7 +6,6 @@ export {
 	create,
 	get,
 	listBySessionId,
-	listByAppId,
 	remove
 }
 
@@ -81,42 +80,6 @@ function listBySessionId (sessionId) {
 		ORDER BY links.created ASC
 	`).all(sessionId)
 	return rows.map(formatLink)
-}
-
-function listByAppId (appId) {
-	if (!appId) return []
-	const rows = sqlite.prepare(`
-		SELECT links.*,
-			tokens.id AS target_session_id, tokens.user_id, tokens.provider, tokens.type,
-			tokens.name, tokens.token, tokens.admin, tokens.ip, tokens.ua,
-			tokens.created AS session_created, tokens.updated AS session_updated,
-			${USER_ACCOUNT_SQL} AS account
-		FROM links
-		JOIN tokens ON links.session_id = tokens.id
-		JOIN users ON tokens.user_id = users.id
-		WHERE links.app_id = ?
-		ORDER BY links.created ASC
-	`).all(appId)
-	return rows.map(r => ({
-		sessionId: r.session_id,
-		appId: r.app_id,
-		policy: r.policy,
-		created: r.created,
-		updated: r.updated,
-		session: {
-			id: r.target_session_id,
-			userId: r.user_id,
-			provider: r.provider,
-			type: r.type,
-			name: r.name,
-			admin: Boolean(r.admin),
-			ip: r.ip,
-			ua: r.ua,
-			created: r.session_created,
-			updated: r.session_updated,
-			account: r.account
-		}
-	}))
 }
 
 function remove (sessionId, appId) {

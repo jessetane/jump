@@ -1,9 +1,8 @@
 import RpcEngine from 'rpc-engine'
 import * as api from './api/index.js'
 import * as db from './db/index.js'
-import { getBaseUrl } from './oauth.js'
 import { getProvider } from './providers/index.js'
-import { getBody, sendJson } from './util.js'
+import { getBody, getBaseUrl, sendJson } from './util.js'
 
 export {
 	executeTool,
@@ -276,9 +275,9 @@ async function executeTool (name, args = {}, token, appUrl) {
 	}
 }
 
-function getAvailableTools (token) {
-	if (!token) return []
-	const session = db.tokens.getByToken(token)
+function getAvailableTools (auth) {
+	if (!auth) return []
+	const session = typeof auth === 'object' ? auth : db.tokens.getByToken(auth)
 	if (!session) return []
 	const links = db.links.listBySessionId(session.id)
 	const list = []
@@ -409,8 +408,8 @@ async function handleMcp (req, res, token) {
 			}
 		},
 		methods: Object.assign(Object.create(null), rpcMethods, {
-			'tools/list': params => rpcMethods['tools/list'](params, token),
-			'tools/call': params => rpcMethods['tools/call'](params, token, base)
+			'tools/list': params => rpcMethods['tools/list'](params, session),
+			'tools/call': params => rpcMethods['tools/call'](params, session, base)
 		})
 	})
 	rpc.addEventListener('error', evt => {

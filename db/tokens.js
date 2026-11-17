@@ -17,9 +17,7 @@ export {
 	upsertShare,
 	removeShare,
 	updateCredentials,
-	updateName,
-	setAdmin,
-	rotateToken,
+	updateSession,
 	touch,
 	remove,
 	prune,
@@ -33,8 +31,7 @@ export {
 	isUpstreamApp,
 	USER_ACCOUNT_SQL,
 	UPSTREAM_SELECT,
-	UPSTREAM_JOIN,
-	CREATE_TOKENS_SQL
+	UPSTREAM_JOIN
 }
 
 const CREATE_TOKENS_SQL = `
@@ -329,6 +326,14 @@ function listSharesByOwnerId (ownerUserId) {
 	return rows.map(formatToken)
 }
 
+function buildShareCreds (appId, policy, authProvider) {
+	return {
+		appId,
+		policy,
+		...(authProvider ? { authProvider } : {})
+	}
+}
+
 function upsertShare ({ userId = null, account = null, authProvider = null, appId, provider, policy = null }) {
 	const cleanAccount = account ? String(account).trim().toLowerCase() : null
 	const cleanAuthProvider = authProvider ? String(authProvider).trim().toLowerCase() : null
@@ -352,11 +357,7 @@ function upsertShare ({ userId = null, account = null, authProvider = null, appI
 				resolvedAuthProvider = matchedLogin?.provider || existingCreds?.authProvider || null
 			}
 		}
-		const claimedCreds = {
-			appId,
-			policy,
-			...(resolvedAuthProvider ? { authProvider: resolvedAuthProvider } : {})
-		}
+		const claimedCreds = buildShareCreds(appId, policy, resolvedAuthProvider)
 		if (existing) {
 			return updateCredentials(existing.id, { credentials: claimedCreds, ...(cleanAccount ? { name: cleanAccount } : {}) })
 		}
@@ -368,24 +369,13 @@ function upsertShare ({ userId = null, account = null, authProvider = null, appI
 			credentials: claimedCreds
 		})
 	}
-	const creds = {
-		appId,
-		policy,
-		...(cleanAuthProvider ? { authProvider: cleanAuthProvider } : {})
-	}
-	const existingPending = cleanAuthProvider
-		? sqlite.prepare(`
-			SELECT id FROM tokens
-			WHERE user_id IS NULL AND type = 'share' AND name = ?
-				AND json_extract(credentials, '$.appId') = ?
-				AND json_extract(credentials, '$.authProvider') = ?
-		`).get(cleanAccount, appId, cleanAuthProvider)
-		: sqlite.prepare(`
-			SELECT id FROM tokens
-			WHERE user_id IS NULL AND type = 'share' AND name = ?
-				AND json_extract(credentials, '$.appId') = ?
-				AND json_extract(credentials, '$.authProvider') IS NULL
-		`).get(cleanAccount, appId)
+	const creds = buildShareCreds(appId, policy, cleanAuthProvider)
+	const existingPending = sqlite.prepare(`
+		SELECT id FROM tokens
+		WHERE user_id IS NULL AND type = 'share' AND name = ?
+			AND json_extract(credentials, '$.appId') = ?
+			AND json_extract(credentials, '$.authProvider') IS ?
+	`).get(cleanAccount, appId, cleanAuthProvider)
 	if (existingPending) {
 		return updateCredentials(existingPending.id, { credentials: creds })
 	}
@@ -475,30 +465,31 @@ function updateCredentials (id, opts = {}) {
 	return get(id)
 }
 
-function updateName (id, name) {
-	if (!id) return null
-	const now = new Date().toISOString()
-	sqlite.prepare('UPDATE tokens SET name = ?, updated = ? WHERE id = ?').run(name ? String(name).trim() : null, now, id)
-	return get(id)
-}
-
-function setAdmin (id, admin = true) {
-	const now = new Date().toISOString()
-	sqlite.prepare('UPDATE tokens SET admin = ?, updated = ? WHERE id = ?').run(admin ? 1 : 0, now, id)
-	return get(id)
-}
-
-function rotateToken (id, newToken = randomUUID()) {
+function updateSession (id, { name, admin, rotateToken = false } = {}) {
 	if (!id) return null
 	const nowMs = Date.now()
 	const now = new Date(nowMs).toISOString()
-	sqlite.prepare(`
-		UPDATE tokens
-		SET token = ?,
-			expires_at = CASE WHEN expires_at IS NOT NULL THEN ? ELSE NULL END,
-			updated = ?
-		WHERE id = ? AND provider = 'self' AND type = 'bearer'
-	`).run(newToken, nowMs + 3600 * 1000, now, id)
+	const sets = []
+	const params = []
+	if (name !== undefined) {
+		sets.push('name = ?')
+		params.push(name ? String(name).trim() : null)
+	}
+	if (admin !== undefined) {
+		sets.push('admin = ?')
+		params.push(admin ? 1 : 0)
+	}
+	if (rotateToken) {
+		sets.push('token = ?')
+		params.push(randomUUID())
+		sets.push('expires_at = CASE WHEN expires_at IS NOT NULL THEN ? ELSE NULL END')
+		params.push(nowMs + 3600 * 1000)
+	}
+	if (sets.length > 0) {
+		sets.push('updated = ?')
+		params.push(now, id)
+		sqlite.prepare(`UPDATE tokens SET ${sets.join(', ')} WHERE id = ? AND provider = 'self' AND type = 'bearer'`).run(...params)
+	}
 	return get(id)
 }
 
