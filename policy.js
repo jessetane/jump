@@ -1,4 +1,4 @@
-import { resolveTargetUrl, hasPathTraversal, isXml } from './util.js'
+import { resolveTargetUrl, hasPathTraversal, serializeFormBody } from './util.js'
 
 export {
 	evaluatePolicy,
@@ -7,8 +7,19 @@ export {
 	validatePolicy
 }
 
-const ALLOWED_RULE_KEYS = new Set(['action', 'methods', 'origin', 'path', 'query', 'body', 'description'])
+const ALLOWED_RULE_KEYS = new Set(['action', 'methods', 'origin', 'path', 'query', 'body', 'bodyType', 'description'])
 const ALLOWED_HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', '*'])
+const ALLOWED_BODY_TYPES = new Set(['json', 'form'])
+
+function isPlainObject (val) {
+	return Boolean(val) && typeof val === 'object' && !Array.isArray(val) && !ArrayBuffer.isView(val)
+}
+
+function isEmptyBody (body) {
+	if (body === undefined || body === null || body === '') return true
+	if (ArrayBuffer.isView(body)) return body.byteLength === 0
+	return false
+}
 
 function isValidFieldScalar (val) {
 	if (val === null) return true
@@ -29,32 +40,67 @@ function parseUrlEncoded (str) {
 	return obj
 }
 
-function parseBodyObject (body, contentType = '') {
-	if (body === undefined || body === null || body === '') return {}
-	if (typeof body === 'object' && !Array.isArray(body)) return body
-	if (typeof body === 'string') {
-		const trimmed = body.trim()
-		if (!trimmed) return {}
-		const ct = String(contentType || '').split(';')[0].trim().toLowerCase()
-		if (ct === 'application/x-www-form-urlencoded') {
-			return parseUrlEncoded(trimmed)
-		}
-		if (ct && ct !== 'application/json' && !ct.endsWith('+json')) {
-			return null
-		}
-		if (isXml(trimmed)) return null
-		if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-			try {
-				const parsed = JSON.parse(trimmed)
-				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
-			} catch {}
-			return null
-		}
-		if (!ct && trimmed.split('&').every(part => /^[^=\s&]+=[^]*$/.test(part))) {
-			return parseUrlEncoded(trimmed)
+function normalizeFormObject (obj) {
+	const out = {}
+	for (const [k, v] of Object.entries(obj)) {
+		if (v === undefined || v === null) continue
+		if (Array.isArray(v)) {
+			const items = []
+			for (const item of v) {
+				if (item !== undefined && item !== null) {
+					items.push(typeof item === 'object' ? JSON.stringify(item) : String(item))
+				}
+			}
+			if (items.length > 0) out[k] = items
+		} else {
+			out[k] = typeof v === 'object' ? JSON.stringify(v) : String(v)
 		}
 	}
+	return out
+}
+
+function parseBodyObject (body, bodyType = 'json', objectFormat = 'json') {
+	if (isEmptyBody(body)) return {}
+	if (isPlainObject(body)) {
+		if (objectFormat !== bodyType) return null
+		return bodyType === 'form' ? normalizeFormObject(body) : body
+	}
+	let raw
+	if (typeof body === 'string') {
+		raw = body
+	} else if (ArrayBuffer.isView(body)) {
+		raw = Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString('utf8')
+	} else {
+		return null
+	}
+	const trimmed = raw.trim()
+	if (!trimmed) return {}
+	if (bodyType === 'json') {
+		if (!trimmed.startsWith('{')) return null
+		try {
+			const parsed = JSON.parse(trimmed)
+			if (isPlainObject(parsed)) return parsed
+		} catch {}
+		return null
+	}
+	if (bodyType === 'form') {
+		if (trimmed.startsWith('{') || trimmed.startsWith('[')) return null
+		if (!trimmed.split('&').every(part => /^[^=\s&]+=[^]*$/.test(part))) return null
+		return parseUrlEncoded(trimmed)
+	}
 	return null
+}
+
+function bodyToString (body, objectFormat = 'json') {
+	if (isEmptyBody(body)) return ''
+	if (typeof body === 'string') return body
+	if (ArrayBuffer.isView(body)) {
+		return Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString('utf8')
+	}
+	if (isPlainObject(body)) {
+		return objectFormat === 'form' ? serializeFormBody(body) : JSON.stringify(body)
+	}
+	return String(body)
 }
 
 function resolveField (obj, key) {
@@ -76,7 +122,7 @@ function matchValuePattern (pattern, str) {
 	if (pattern === str) return true
 	const escaped = pattern.replace(/[.+^${}()|[\]\\?]/g, '\\$&').replace(/\*+/g, '.*')
 	try {
-		const regex = new RegExp(`^${escaped}$`, 'i')
+		const regex = new RegExp(`^${escaped}$`, 'is')
 		return regex.test(str)
 	} catch {
 		return false
@@ -217,9 +263,30 @@ function validatePolicy (policy) {
 			const queryErr = validateFieldMap(rule.query, 'query', i)
 			if (queryErr) return { valid: false, error: queryErr }
 		}
-		if (rule.body !== undefined) {
-			const bodyErr = validateFieldMap(rule.body, 'body', i)
-			if (bodyErr) return { valid: false, error: bodyErr }
+		if (rule.body !== undefined && rule.body !== null) {
+			if (typeof rule.body === 'string') {
+				if (!rule.body.trim()) {
+					return { valid: false, error: `Rule at index ${i} body pattern must be a non-empty string` }
+				}
+			} else if (Array.isArray(rule.body)) {
+				if (rule.body.length === 0 || !rule.body.every(p => typeof p === 'string' && p.trim())) {
+					return { valid: false, error: `Rule at index ${i} body array must be a non-empty array of non-empty pattern strings` }
+				}
+			} else if (isPlainObject(rule.body)) {
+				const bodyErr = validateFieldMap(rule.body, 'body', i)
+				if (bodyErr) return { valid: false, error: bodyErr }
+			} else {
+				return { valid: false, error: `Rule at index ${i} body must be a non-empty object, pattern string, array of pattern strings, or null` }
+			}
+		}
+		if (rule.bodyType !== undefined) {
+			if (!isPlainObject(rule.body)) {
+				return { valid: false, error: `Rule at index ${i} bodyType is only valid when body is a field-map object` }
+			}
+			const bt = typeof rule.bodyType === 'string' ? rule.bodyType.trim().toLowerCase() : ''
+			if (!ALLOWED_BODY_TYPES.has(bt)) {
+				return { valid: false, error: `Rule at index ${i} bodyType must be "json" or "form"` }
+			}
 		}
 		if (rule.description !== undefined && typeof rule.description !== 'string') {
 			return { valid: false, error: `Rule at index ${i} description must be a string` }
@@ -289,8 +356,10 @@ function evaluatePolicy (policy, req = {}) {
 	if (canonicalPath === null) {
 		return { allowed: false, reason: 'Invalid path: path traversal is not permitted' }
 	}
+	const objectFormat = req.objectFormat === 'form' ? 'form' : 'json'
 	let parsedQuery = undefined
-	let parsedBody = undefined
+	let bodyText = undefined
+	const parsedBodies = {}
 	for (const rule of parsedPolicy) {
 		const action = rule.action.toLowerCase()
 		if (rule.methods) {
@@ -313,11 +382,32 @@ function evaluatePolicy (policy, req = {}) {
 			}
 			if (!matchFieldMap(rule.query, parsedQuery)) continue
 		}
-		if (rule.body) {
-			if (parsedBody === undefined) {
-				parsedBody = parseBodyObject(req.body, req.contentType)
+		if (rule.body !== undefined) {
+			if (rule.body === null) {
+				if (!isEmptyBody(req.body)) continue
+			} else if (typeof rule.body === 'string' || Array.isArray(rule.body)) {
+				if (bodyText === undefined) {
+					bodyText = bodyToString(req.body, objectFormat)
+				}
+				const patterns = Array.isArray(rule.body) ? rule.body : [rule.body]
+				if (!patterns.some(p => matchValuePattern(p, bodyText))) continue
+			} else {
+				const bodyType = rule.bodyType ? rule.bodyType.trim().toLowerCase() : 'json'
+				if (!Object.hasOwn(parsedBodies, bodyType)) {
+					parsedBodies[bodyType] = parseBodyObject(req.body, bodyType, objectFormat)
+				}
+				const parsedBody = parsedBodies[bodyType]
+				if (parsedBody === null) {
+					if (action === 'deny') {
+						return {
+							allowed: false,
+							reason: `Invalid request body: expected ${bodyType} object for deny rule on "${req.url}"`
+						}
+					}
+					continue
+				}
+				if (!matchFieldMap(rule.body, parsedBody)) continue
 			}
-			if (!matchFieldMap(rule.body, parsedBody)) continue
 		}
 		if (action === 'deny') {
 			return {
