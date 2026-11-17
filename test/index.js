@@ -25,11 +25,11 @@ const { isAllowedUrl: isGoogleAllowedUrl, services: googleServices } = google
 const { isAllowedUrl: isGithubAllowedUrl, services: githubServices } = github
 const { readResponseBody } = await import('../api/proxy.js')
 const { executeTool, redactLogArgs } = await import('../mcp.js')
-const { isAllowedRedirectUri, deriveClientName, getBaseUrl } = await import('../oauth.js')
+const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
 const { parseSsoDomains, shouldClaimUnscoped } = await import('../sso.js')
-const { validateBaseUrl, resolveTargetUrl, hasPathTraversal } = await import('../util.js')
+const { getBaseUrl, validateBaseUrl, resolveTargetUrl, hasPathTraversal } = await import('../util.js')
 
 function createTestSession (opts = {}) {
 	const {
@@ -1015,7 +1015,7 @@ test('oauth consent html page, post consent, callback login, and scanner-safe tw
 	assert.equal(targetUrl.searchParams.get('state'), 'client-state-123')
 	assert.ok(targetUrl.searchParams.get('code'))
 	assert.equal(db.tokens.getState(verifyCode), null, 'POST /oauth/verify must consume verify state')
-	assert.deepEqual(db.links.listByAppId(connectedApp.id), [], 'App links must not be created until /oauth/token exchanges the auth code')
+	assert.equal(db.sqlite.prepare('SELECT COUNT(*) AS count FROM links WHERE app_id = ?').get(connectedApp.id).count, 0, 'App links must not be created until /oauth/token exchanges the auth code')
 })
 
 test('direct browser authorize without redirect_uri', async () => {
@@ -5597,8 +5597,7 @@ test('redactLogArgs scrubs credentials and auth headers without mutating input',
 	assert.equal(raw.headers.Authorization, 'Bearer secret', 'Original headers must not be mutated')
 })
 
-test('pass 1 security & validation fixes', async () => {
-	const addr = server.address()
+test('hasPathTraversal backslash handling and getBaseUrl host/port edge cases', () => {
 	assert.equal(hasPathTraversal('https://www.googleapis.com/drive/v3\\..\\..\\oauth2/v2/userinfo'), true)
 	assert.equal(hasPathTraversal('/v2/tenant-a\\..\\tenant-b'), true)
 	assert.equal(hasPathTraversal('..\\secret'), true)
@@ -5621,7 +5620,12 @@ test('pass 1 security & validation fixes', async () => {
 	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com?foo=bar' } }), 'http://localhost:8080')
 	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com#frag' } }), 'http://localhost:8080')
 	assert.equal(getBaseUrl({ headers: { host: '@jump.acme.com' } }), 'http://localhost:8080')
-	const user = db.logins.resolveUser('google', 'pass1-fixes@example.com')
+	assert.equal(typeof db.users.userAccountSql, 'function')
+})
+
+test('updateCredentials nullable fields and upfront OAuth CLIENT_SECRET validation without burning setup codes', async () => {
+	const addr = server.address()
+	const user = db.logins.resolveUser('google', 'pass1-oauth-env@example.com')
 	const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
 	const oauthApp = db.tokens.create({
 		userId: user.id,
@@ -5706,68 +5710,30 @@ test('pass 1 security & validation fixes', async () => {
 		if (prevGhSecret === undefined) delete process.env.GITHUB_CLIENT_SECRET
 		else process.env.GITHUB_CLIENT_SECRET = prevGhSecret
 	}
-	const stripeApp = db.tokens.create({
+	const boundCodeOmitted = db.tokens.createAuthCode({
 		userId: user.id,
-		provider: 'stripe',
-		type: 'api_key',
-		name: 'Stripe Existing',
-		credentials: { apiKey: 'sk_existing', baseUrl: 'https://api.stripe.com' }
+		clientId: 'client_bound_strict',
+		clientRedirectUri: 'http://localhost:8080/cb'
 	})
-	const ghPatApp = db.tokens.create({
-		userId: user.id,
-		provider: 'github',
-		type: 'api_key',
-		name: 'GitHub PAT Existing',
-		credentials: { apiKey: 'ghp_existing', baseUrl: 'https://api.github.com' }
-	})
-	const appCountBefore = db.tokens.listByUserId(user.id).filter(t => t.provider !== 'self').length
-	const mismatchProvConnect = await executeTool('admin', {
-		action: 'connect_app',
-		appId: oauthApp.id,
-		provider: 'github'
-	}, adminSession.token)
-	assert.equal(mismatchProvConnect.isError, true)
-	assert.match(mismatchProvConnect.content[0].text, /belongs to provider "google", not "github"/)
-	const apiKeyReauthAttempt = await executeTool('admin', {
-		action: 'connect_app',
-		appId: stripeApp.id
-	}, adminSession.token)
-	assert.equal(apiKeyReauthAttempt.isError, true)
-	assert.match(apiKeyReauthAttempt.content[0].text, /use update_app/)
-	const ghPatReauthAttempt = await executeTool('admin', {
-		action: 'connect_app',
-		appId: ghPatApp.id
-	}, adminSession.token)
-	assert.equal(ghPatReauthAttempt.isError, true)
-	assert.match(ghPatReauthAttempt.content[0].text, /use update_app/)
-	const oauthWithKeyAttempt = await executeTool('admin', {
-		action: 'connect_app',
-		appId: oauthApp.id,
-		apiKey: 'should-fail'
-	}, adminSession.token)
-	assert.equal(oauthWithKeyAttempt.isError, true)
-	assert.match(oauthWithKeyAttempt.content[0].text, /use update_app/)
-	const missingKeyStripeAttempt = await executeTool('admin', {
-		action: 'connect_app',
-		provider: 'stripe',
-		baseUrl: 'https://api.stripe.com'
-	}, adminSession.token)
-	assert.equal(missingKeyStripeAttempt.isError, true)
-	assert.match(missingKeyStripeAttempt.content[0].text, /apiKey is required/)
-	const rawCredsRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+	const omittedClientRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
 		method: 'POST',
-		headers: {
-			authorization: `Bearer ${adminSession.token}`,
-			'content-type': 'application/json'
-		},
+		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({
-			provider: 'google',
-			credentials: { accessToken: 'ya29.injected' }
+			grant_type: 'authorization_code',
+			code: boundCodeOmitted,
+			redirect_uri: 'http://localhost:8080/cb'
 		})
 	})
-	assert.equal(rawCredsRes.status, 400)
-	assert.equal(db.tokens.listByUserId(user.id).filter(t => t.provider !== 'self').length, appCountBefore, 'Rejected connect_app calls must not create orphan app rows')
-	assert.equal(typeof db.users.userAccountSql, 'function')
+	assert.equal(omittedClientRes.status, 400, 'Bound auth code must reject omitted client_id on /oauth/token')
+	const omittedClientData = await omittedClientRes.json()
+	assert.equal(omittedClientData.error, 'invalid_grant')
+	assert.equal(omittedClientData.error_description, 'client_id mismatch')
+})
+
+test('reserved REST subpaths and MCP JSON-RPC malformed/prototype request hardening', async () => {
+	const addr = server.address()
+	const user = db.logins.resolveUser('google', 'pass1-rpc-rest@example.com')
+	const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
 	for (const reservedSubpath of ['/api/health/extra', '/api/whoami/extra', '/api/WHOAMI/extra', '/api/links/123', '/api/shares/123', '/api/logs/123']) {
 		const subRes = await fetch(`http://127.0.0.1:${addr.port}${reservedSubpath}`, {
 			headers: { authorization: `Bearer ${adminSession.token}` }
@@ -5801,6 +5767,36 @@ test('pass 1 security & validation fixes', async () => {
 	})
 	assert.equal(protoMethodRes.status, 200)
 	assert.equal((await protoMethodRes.json()).error?.code, -32601, 'Object.prototype keys must not resolve as RPC methods')
+	const invalidMethodRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${adminSession.token}`
+		},
+		body: JSON.stringify({ jsonrpc: '2.0', id: 42, method: 123 })
+	})
+	assert.equal(invalidMethodRes.status, 200)
+	const invalidMethodData = await invalidMethodRes.json()
+	assert.equal(invalidMethodData.id, 42, 'Invalid non-string method must preserve JSON-RPC id')
+	assert.equal(invalidMethodData.error?.code, -32600)
+	const zeroIdInvalidMethodRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${adminSession.token}`
+		},
+		body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: '' })
+	})
+	assert.equal(zeroIdInvalidMethodRes.status, 200)
+	const zeroIdInvalidMethodData = await zeroIdInvalidMethodRes.json()
+	assert.equal(zeroIdInvalidMethodData.id, 0, 'Empty method must preserve falsy JSON-RPC id: 0')
+	assert.equal(zeroIdInvalidMethodData.error?.code, -32600)
+})
+
+test('strict requireBoolean parsing across admin, allOthers, revoke, and allowed filters', async () => {
+	const addr = server.address()
+	const user = db.logins.resolveUser('google', 'pass1-booleans@example.com')
+	const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
 	const targetSess = db.tokens.create({ userId: user.id, provider: 'self', name: 'Bool Target', admin: 1 })
 	const demoteStringFalse = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${targetSess.id}`, {
 		method: 'PATCH',
@@ -5851,48 +5847,6 @@ test('pass 1 security & validation fixes', async () => {
 	})
 	assert.equal(createStrFalseRes.status, 201)
 	assert.equal((await createStrFalseRes.json()).session.admin, false)
-	const boundCodeOmitted = db.tokens.createAuthCode({
-		userId: user.id,
-		clientId: 'client_bound_strict',
-		clientRedirectUri: 'http://localhost:8080/cb'
-	})
-	const omittedClientRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({
-			grant_type: 'authorization_code',
-			code: boundCodeOmitted,
-			redirect_uri: 'http://localhost:8080/cb'
-		})
-	})
-	assert.equal(omittedClientRes.status, 400, 'Bound auth code must reject omitted client_id on /oauth/token')
-	const omittedClientData = await omittedClientRes.json()
-	assert.equal(omittedClientData.error, 'invalid_grant')
-	assert.equal(omittedClientData.error_description, 'client_id mismatch')
-	const invalidMethodRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
-		method: 'POST',
-		headers: {
-			'content-type': 'application/json',
-			authorization: `Bearer ${adminSession.token}`
-		},
-		body: JSON.stringify({ jsonrpc: '2.0', id: 42, method: 123 })
-	})
-	assert.equal(invalidMethodRes.status, 200)
-	const invalidMethodData = await invalidMethodRes.json()
-	assert.equal(invalidMethodData.id, 42, 'Invalid non-string method must preserve JSON-RPC id')
-	assert.equal(invalidMethodData.error?.code, -32600)
-	const zeroIdInvalidMethodRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
-		method: 'POST',
-		headers: {
-			'content-type': 'application/json',
-			authorization: `Bearer ${adminSession.token}`
-		},
-		body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: '' })
-	})
-	assert.equal(zeroIdInvalidMethodRes.status, 200)
-	const zeroIdInvalidMethodData = await zeroIdInvalidMethodRes.json()
-	assert.equal(zeroIdInvalidMethodData.id, 0, 'Empty method must preserve falsy JSON-RPC id: 0')
-	assert.equal(zeroIdInvalidMethodData.error?.code, -32600)
 	const revUser = db.logins.resolveUser('google', 'revoke-bool-test@example.com')
 	const revAdmin = db.tokens.create({ userId: revUser.id, provider: 'self', admin: 1 })
 	const revSibling1 = db.tokens.create({ userId: revUser.id, provider: 'self', name: 'Sibling 1' })
@@ -5960,6 +5914,80 @@ test('pass 1 security & validation fixes', async () => {
 	const allowedFalseLogs = db.logs.listByUserId(logFilterUser.id, { allowed: 'false' })
 	assert.equal(allowedFalseLogs.length, 1)
 	assert.equal(allowedFalseLogs[0].allowed, false)
+})
+
+test('connectApp and updateApp strict input validation parity and formatApp symmetry', async () => {
+	const addr = server.address()
+	const user = db.logins.resolveUser('google', 'pass1-app-validation@example.com')
+	const adminSession = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
+	const oauthApp = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Existing Google OAuth',
+		credentials: { accessToken: 'ya29.init', refreshToken: '1//init' }
+	})
+	const stripeApp = db.tokens.create({
+		userId: user.id,
+		provider: 'stripe',
+		type: 'api_key',
+		name: 'Stripe Existing',
+		credentials: { apiKey: 'sk_existing', baseUrl: 'https://api.stripe.com' }
+	})
+	const ghPatApp = db.tokens.create({
+		userId: user.id,
+		provider: 'github',
+		type: 'api_key',
+		name: 'GitHub PAT Existing',
+		credentials: { apiKey: 'ghp_existing', baseUrl: 'https://api.github.com' }
+	})
+	const appCountBefore = db.tokens.listByUserId(user.id).filter(t => t.provider !== 'self').length
+	const mismatchProvConnect = await executeTool('admin', {
+		action: 'connect_app',
+		appId: oauthApp.id,
+		provider: 'github'
+	}, adminSession.token)
+	assert.equal(mismatchProvConnect.isError, true)
+	assert.match(mismatchProvConnect.content[0].text, /belongs to provider "google", not "github"/)
+	const apiKeyReauthAttempt = await executeTool('admin', {
+		action: 'connect_app',
+		appId: stripeApp.id
+	}, adminSession.token)
+	assert.equal(apiKeyReauthAttempt.isError, true)
+	assert.match(apiKeyReauthAttempt.content[0].text, /use update_app/)
+	const ghPatReauthAttempt = await executeTool('admin', {
+		action: 'connect_app',
+		appId: ghPatApp.id
+	}, adminSession.token)
+	assert.equal(ghPatReauthAttempt.isError, true)
+	assert.match(ghPatReauthAttempt.content[0].text, /use update_app/)
+	const oauthWithKeyAttempt = await executeTool('admin', {
+		action: 'connect_app',
+		appId: oauthApp.id,
+		apiKey: 'should-fail'
+	}, adminSession.token)
+	assert.equal(oauthWithKeyAttempt.isError, true)
+	assert.match(oauthWithKeyAttempt.content[0].text, /use update_app/)
+	const missingKeyStripeAttempt = await executeTool('admin', {
+		action: 'connect_app',
+		provider: 'stripe',
+		baseUrl: 'https://api.stripe.com'
+	}, adminSession.token)
+	assert.equal(missingKeyStripeAttempt.isError, true)
+	assert.match(missingKeyStripeAttempt.content[0].text, /apiKey is required/)
+	const rawCredsRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({
+			provider: 'google',
+			credentials: { accessToken: 'ya29.injected' }
+		})
+	})
+	assert.equal(rawCredsRes.status, 400)
+	assert.equal(db.tokens.listByUserId(user.id).filter(t => t.provider !== 'self').length, appCountBefore, 'Rejected connect_app calls must not create orphan app rows')
 	for (const badProvider of ['', '   ', 123, true, {}]) {
 		const badProvRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
 			method: 'POST',
@@ -5984,6 +6012,8 @@ test('pass 1 security & validation fixes', async () => {
 	const blankMetaData = JSON.parse(blankMetaRes.content[0].text)
 	assert.equal(blankMetaData.app.name, 'Stripe', 'Whitespace-only name falls back to providerDef.name')
 	assert.equal(blankMetaData.app.account, null, 'Whitespace-only account is ignored instead of stored as empty string')
+	assert.ok(blankMetaData.app.created, 'connect_app returns canonical formatApp shape including created/updated')
+	assert.ok(blankMetaData.app.updated)
 	assert.equal('account' in db.tokens.get(blankMetaData.app.id).credentials, false)
 	const trimmedMetaRes = await executeTool('admin', {
 		action: 'connect_app',
