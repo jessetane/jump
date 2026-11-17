@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import dns from 'node:dns'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -360,7 +361,12 @@ test('rejects non-googleapis URLs in google_api tool', async () => {
 test('mcp google_api tool ignores body on GET requests', async () => {
 	const { session } = createTestSession({ account: 'getbody@example.com' })
 	const origFetch = globalThis.fetch
+	const origLookup = dns.promises.lookup
 	let capturedInit = null
+	dns.promises.lookup = async (host, opts) => {
+		if (host === 'www.googleapis.com') return [{ address: '142.250.80.46', family: 4 }]
+		return origLookup(host, opts)
+	}
 	globalThis.fetch = async (input, init) => {
 		const u = typeof input === 'string' ? input : input.url
 		if (u === 'https://www.googleapis.com/drive/v3/files') {
@@ -382,6 +388,7 @@ test('mcp google_api tool ignores body on GET requests', async () => {
 		assert.equal(capturedInit?.body, undefined, 'GET request must strip body before fetch')
 	} finally {
 		globalThis.fetch = origFetch
+		dns.promises.lookup = origLookup
 	}
 })
 
@@ -6441,6 +6448,126 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 	} finally {
 		await new Promise(resolve => apiServer.close(resolve))
 		await new Promise(resolve => cdnServer.close(resolve))
+	}
+})
+
+test('upstream SSRF filter blocks IANA special-purpose IP literals and private/special DNS answers before fetch', async () => {
+	for (const blockedUrl of [
+		'https://[64:ff9b::a9fe:a9fe]',
+		'https://[64:ff9b:1::1]',
+		'https://[2002:a9fe:a9fe::]',
+		'https://[::a9fe:a9fe]',
+		'https://[::ffff:127.0.0.1]',
+		'https://[::ffff:1.1.1.1]',
+		'https://[100::1]',
+		'https://[2001::1]',
+		'https://[2001:2::1]',
+		'https://[2001:db8::1]',
+		'https://[3fff::1]',
+		'https://[ff02::1]',
+		'https://192.0.0.1',
+		'https://192.0.2.1',
+		'https://192.88.99.1',
+		'https://198.18.0.1',
+		'https://198.51.100.1',
+		'https://203.0.113.1',
+		'https://224.0.0.1',
+		'https://240.0.0.1',
+		'https://255.255.255.255'
+	]) {
+		assert.equal(validateBaseUrl(blockedUrl), null, `Special-purpose IP literal must be rejected: ${blockedUrl}`)
+	}
+	for (const allowedUrl of [
+		'https://1.1.1.1',
+		'https://100.128.0.1',
+		'https://[2606:4700:4700::1111]',
+		'https://[2001:4860:4860::8888]'
+	]) {
+		assert.equal(validateBaseUrl(allowedUrl), allowedUrl, `Global unicast IP literal must be allowed: ${allowedUrl}`)
+	}
+	const addr = server.address()
+	const u = db.logins.resolveUser('google', 'dns-ssrf@example.com')
+	const s = db.tokens.create({ userId: u.id, provider: 'self', admin: 1 })
+	const dnsFixtures = {
+		'loopback-v4.example.test': [{ address: '127.0.0.1', family: 4 }],
+		'loopback-v6.example.test': [{ address: '::1', family: 6 }],
+		'rfc1918.example.test': [{ address: '10.0.0.5', family: 4 }],
+		'rfc6598.example.test': [{ address: '100.64.1.20', family: 4 }],
+		'nat64.example.test': [{ address: '64:ff9b::a9fe:a9fe', family: 6 }],
+		'ula.example.test': [{ address: 'fd00:ec2::254', family: 6 }],
+		'mixed.example.test': [{ address: '93.184.216.34', family: 4 }, { address: '192.168.1.10', family: 4 }],
+		'public.example.test': [{ address: '93.184.216.34', family: 4 }]
+	}
+	const origLookup = dns.promises.lookup
+	const origFetch = globalThis.fetch
+	const upstreamFetches = []
+	dns.promises.lookup = async (host, opts) => {
+		if (Object.hasOwn(dnsFixtures, host)) return dnsFixtures[host]
+		return origLookup(host, opts)
+	}
+	globalThis.fetch = async (input, init) => {
+		const urlStr = typeof input === 'string' ? input : input.url
+		const parsed = new URL(urlStr)
+		if (parsed.hostname.endsWith('.example.test')) {
+			upstreamFetches.push(urlStr)
+			if (parsed.hostname === 'public.example.test' && parsed.pathname === '/bounce-to-cgnat') {
+				return new Response(null, {
+					status: 302,
+					headers: { location: 'https://rfc6598.example.test/internal' }
+				})
+			}
+			return new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			})
+		}
+		return origFetch(input, init)
+	}
+	try {
+		for (const [idx, host] of [
+			'loopback-v4.example.test',
+			'loopback-v6.example.test',
+			'rfc1918.example.test',
+			'rfc6598.example.test',
+			'nat64.example.test',
+			'ula.example.test',
+			'mixed.example.test'
+		].entries()) {
+			const provider = `ssrf_${idx}`
+			const app = db.tokens.create({
+				userId: u.id,
+				provider,
+				type: 'api_key',
+				credentials: { apiKey: 'sk_test', baseUrl: `https://${host}` }
+			})
+			db.links.create({ sessionId: s.id, appId: app.id })
+			const mcpRes = await executeTool(`${provider}_api`, { url: '/v1/data' }, s.token)
+			assert.equal(mcpRes.isError, true, `MCP request to ${host} must fail`)
+			assert.match(mcpRes.content[0].text, /Blocked unsafe upstream host/)
+			const restRes = await origFetch(`http://127.0.0.1:${addr.port}/api/${provider}/v1/data`, {
+				headers: { authorization: `Bearer ${s.token}` }
+			})
+			assert.equal(restRes.status, 403, `REST request to ${host} must fail with 403`)
+		}
+		assert.deepEqual(upstreamFetches, [], 'fetch() must never be called when DNS resolves to a non-public IP')
+		const pubApp = db.tokens.create({
+			userId: u.id,
+			provider: 'ssrf_pub',
+			type: 'api_key',
+			credentials: { apiKey: 'sk_pub', baseUrl: 'https://public.example.test' }
+		})
+		db.links.create({ sessionId: s.id, appId: pubApp.id })
+		const okPub = await executeTool('ssrf_pub_api', { url: '/v1/ok' }, s.token)
+		assert.equal(okPub.isError, undefined, 'Public DNS answer succeeds normally')
+		assert.deepEqual(upstreamFetches, ['https://public.example.test/v1/ok'])
+		upstreamFetches.length = 0
+		const redirectToPrivate = await executeTool('ssrf_pub_api', { url: '/bounce-to-cgnat' }, s.token)
+		assert.equal(redirectToPrivate.isError, true, 'Redirect hop resolving to RFC 6598 IP must be blocked')
+		assert.match(redirectToPrivate.content[0].text, /Blocked unsafe upstream host/)
+		assert.deepEqual(upstreamFetches, ['https://public.example.test/bounce-to-cgnat'], 'fetch() must not follow redirect hop once DNS resolves to private IP')
+	} finally {
+		dns.promises.lookup = origLookup
+		globalThis.fetch = origFetch
 	}
 })
 

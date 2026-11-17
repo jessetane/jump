@@ -1,7 +1,7 @@
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy } from '../policy.js'
-import { serializeFormBody, validateBaseUrl } from '../util.js'
+import { assertUpstreamHost, serializeFormBody, validateBaseUrl } from '../util.js'
 
 export {
 	request,
@@ -113,7 +113,9 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 	const signal = AbortSignal.timeout(Number(process.env.UPSTREAM_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS)
 	let res
 	for (let hop = 0; ; hop++) {
-		const isInitialOrigin = new URL(curUrl).origin === initialOrigin
+		const hopUrl = new URL(curUrl)
+		await assertUpstreamHost(hopUrl.hostname)
+		const isInitialOrigin = hopUrl.origin === initialOrigin
 		const hopReq = isInitialOrigin
 			? attachAuth(curUrl, baseHeaders, token)
 			: { url: curUrl, headers: { ...baseHeaders } }

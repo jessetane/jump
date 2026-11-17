@@ -1,3 +1,6 @@
+import dns from 'node:dns'
+import net from 'node:net'
+
 export {
 	getRawBody,
 	getBody,
@@ -8,6 +11,7 @@ export {
 	sendHtml,
 	redirect,
 	isLoopbackHost,
+	assertUpstreamHost,
 	validateBaseUrl,
 	resolveTargetUrl,
 	hasPathTraversal,
@@ -135,6 +139,48 @@ function getBaseUrl (req) {
 	return 'http://localhost:8080'
 }
 
+const LOOPBACK_IPV4 = new net.BlockList()
+LOOPBACK_IPV4.addSubnet('127.0.0.0', 8, 'ipv4')
+
+const GLOBAL_UNICAST_IPV6 = new net.BlockList()
+GLOBAL_UNICAST_IPV6.addSubnet('2000::', 3, 'ipv6')
+
+const BLOCKED_IPS = new net.BlockList()
+for (const [addr, prefix] of [
+	['0.0.0.0', 8],
+	['10.0.0.0', 8],
+	['100.64.0.0', 10],
+	['127.0.0.0', 8],
+	['169.254.0.0', 16],
+	['172.16.0.0', 12],
+	['192.0.0.0', 24],
+	['192.0.2.0', 24],
+	['192.88.99.0', 24],
+	['192.168.0.0', 16],
+	['198.18.0.0', 15],
+	['198.51.100.0', 24],
+	['203.0.113.0', 24],
+	['224.0.0.0', 4],
+	['240.0.0.0', 4]
+]) {
+	BLOCKED_IPS.addSubnet(addr, prefix, 'ipv4')
+}
+for (const [addr, prefix] of [
+	['2001::', 23],
+	['2001:db8::', 32],
+	['2002::', 16],
+	['3fff::', 20]
+]) {
+	BLOCKED_IPS.addSubnet(addr, prefix, 'ipv6')
+}
+
+function isPublicIp (ip) {
+	const family = net.isIP(ip)
+	if (family === 4) return !BLOCKED_IPS.check(ip, 'ipv4')
+	if (family === 6) return GLOBAL_UNICAST_IPV6.check(ip, 'ipv6') && !BLOCKED_IPS.check(ip, 'ipv6')
+	return false
+}
+
 function stripTrailingDot (hostname) {
 	return hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
 }
@@ -142,7 +188,8 @@ function stripTrailingDot (hostname) {
 function isLoopbackHost (hostname) {
 	if (!hostname || typeof hostname !== 'string') return false
 	const host = stripTrailingDot(hostname)
-	return host === 'localhost' || host.endsWith('.localhost') || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+	if (host === 'localhost' || host.endsWith('.localhost') || host === '::1') return true
+	return net.isIP(host) === 4 && LOOPBACK_IPV4.check(host, 'ipv4')
 }
 
 function isAllowedUpstreamHost (hostname) {
@@ -151,24 +198,33 @@ function isAllowedUpstreamHost (hostname) {
 		return process.env.NODE_ENV === 'test'
 	}
 	const host = stripTrailingDot(hostname)
-	if (
-		!host ||
-		host === '0.0.0.0' ||
-		host === '::' ||
-		host === 'metadata.google.internal' ||
-		/^fe[89ab][0-9a-f]:/.test(host) ||
-		/^f[cd][0-9a-f]{0,2}:/.test(host) ||
-		host.startsWith('::ffff:') ||
-		/^0\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
-		/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
-		/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(host) ||
-		/^169\.254\.\d{1,3}\.\d{1,3}$/.test(host) ||
-		/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host) ||
-		/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host)
-	) {
-		return false
-	}
+	if (!host || host === 'metadata.google.internal') return false
+	if (net.isIP(host)) return isPublicIp(host)
 	return true
+}
+
+async function assertUpstreamHost (hostname) {
+	if (!isAllowedUpstreamHost(hostname)) {
+		const err = new Error(`Blocked unsafe upstream host: ${hostname}`)
+		err.status = 403
+		throw err
+	}
+	if (isLoopbackHost(hostname)) return
+	const host = stripTrailingDot(hostname)
+	if (net.isIP(host)) return
+	const records = await dns.promises.lookup(host, { all: true })
+	if (!Array.isArray(records) || records.length === 0) {
+		const err = new Error(`Unable to resolve upstream host: ${hostname}`)
+		err.status = 502
+		throw err
+	}
+	for (const { address } of records) {
+		if (!isPublicIp(address)) {
+			const err = new Error(`Blocked unsafe upstream host: ${hostname}`)
+			err.status = 403
+			throw err
+		}
+	}
 }
 
 function validateBaseUrl (baseUrl) {
