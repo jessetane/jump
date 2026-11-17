@@ -84,8 +84,8 @@ function parseBodyObject (body, bodyType = 'json', objectFormat = 'json') {
 		return null
 	}
 	if (bodyType === 'form') {
-		if (trimmed.startsWith('{') || trimmed.startsWith('[')) return null
-		if (!trimmed.split('&').every(part => /^[^=\s&]+=[^]*$/.test(part))) return null
+		if (trimmed.startsWith('{') || trimmed.startsWith('[') || /[\r\n\0]/.test(raw)) return null
+		if (!trimmed.split('&').every(part => part.length > 0 && !/\s/.test(part) && part[0] !== '=')) return null
 		return parseUrlEncoded(trimmed)
 	}
 	return null
@@ -119,14 +119,29 @@ function resolveField (obj, key) {
 function matchValuePattern (pattern, str) {
 	if (typeof pattern !== 'string' || typeof str !== 'string') return false
 	if (pattern === '*' || pattern === '**') return true
-	if (pattern === str) return true
-	const escaped = pattern.replace(/[.+^${}()|[\]\\?]/g, '\\$&').replace(/\*+/g, '.*')
-	try {
-		const regex = new RegExp(`^${escaped}$`, 'is')
-		return regex.test(str)
-	} catch {
-		return false
+	const p = pattern.replace(/\*+/g, '*').toLowerCase()
+	const s = str.toLowerCase()
+	if (p === s) return true
+	let pi = 0
+	let si = 0
+	let starIdx = -1
+	let matchIdx = 0
+	while (si < s.length) {
+		if (pi < p.length && p.charCodeAt(pi) === s.charCodeAt(si)) {
+			pi++
+			si++
+		} else if (pi < p.length && p.charCodeAt(pi) === 42) {
+			starIdx = pi++
+			matchIdx = si
+		} else if (starIdx !== -1) {
+			pi = starIdx + 1
+			si = ++matchIdx
+		} else {
+			return false
+		}
 	}
+	while (pi < p.length && p.charCodeAt(pi) === 42) pi++
+	return pi === p.length
 }
 
 function matchFieldValue (expected, actual) {

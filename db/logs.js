@@ -11,6 +11,13 @@ export {
 }
 
 const RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+const MAX_URL_LEN = 2048
+const MAX_ERROR_LEN = 2048
+
+function truncate (str, maxLen) {
+	if (typeof str !== 'string') return null
+	return str.length > maxLen ? `${str.slice(0, maxLen)}…` : str
+}
 
 function init () {
 	sqlite.exec(`
@@ -75,10 +82,12 @@ function create (opts = {}) {
 	} = opts
 	const created = new Date().toISOString()
 	const allowedInt = allowed ? 1 : 0
+	const safeUrl = truncate(String(url || ''), MAX_URL_LEN)
+	const safeError = error ? truncate(String(error), MAX_ERROR_LEN) : null
 	sqlite.prepare(`
 		INSERT INTO logs (id, user_id, session_id, app_id, provider, method, url, allowed, status, duration, error, created)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`).run(id, userId, sessionId, appId, provider, method, url, allowedInt, status, duration, error, created)
+	`).run(id, userId, sessionId, appId, provider, method, safeUrl, allowedInt, status, duration, safeError, created)
 	return format({
 		id,
 		user_id: userId,
@@ -86,11 +95,11 @@ function create (opts = {}) {
 		app_id: appId,
 		provider,
 		method,
-		url,
+		url: safeUrl,
 		allowed: allowedInt,
 		status,
 		duration,
-		error,
+		error: safeError,
 		created
 	})
 }

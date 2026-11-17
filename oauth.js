@@ -45,6 +45,16 @@ function getClientIp (req) {
 	return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || null
 }
 
+function checkFormOrigin (req, res) {
+	const origin = req.headers.origin
+	if (!origin) return true
+	if (origin === 'null' || origin.toLowerCase() !== getBaseUrl(req).toLowerCase()) {
+		sendText(res, 'Forbidden: cross-origin form submission.', 403)
+		return false
+	}
+	return true
+}
+
 function enforceSso (res, fn) {
 	try {
 		fn()
@@ -85,6 +95,24 @@ function renderCardPage (title, subtitle, bodyHtml) {
 </html>`
 }
 
+function encodeClientLabel (name) {
+	if (typeof name !== 'string') return ''
+	const clean = name.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 64)
+	if (!clean || clean === 'MCP Client') return ''
+	return Buffer.from(clean, 'utf8').toString('base64url')
+}
+
+function decodeClientLabel (clientId) {
+	const match = clientId.match(/^client_(?:bearer_)?[0-9a-f-]{36}_([A-Za-z0-9_-]{1,120})$/i)
+	if (!match) return null
+	try {
+		const decoded = Buffer.from(match[1], 'base64url').toString('utf8').replace(/[\x00-\x1f\x7f]/g, '').trim()
+		return decoded || null
+	} catch {
+		return null
+	}
+}
+
 function deriveClientName (clientId, explicitName) {
 	if (explicitName && typeof explicitName === 'string' && explicitName.trim()) {
 		return explicitName.trim()
@@ -105,7 +133,7 @@ function deriveClientName (clientId, explicitName) {
 		}
 		return host
 	}
-	if (clientId.startsWith('client_')) return null
+	if (clientId.startsWith('client_')) return decodeClientLabel(clientId)
 	return clientId.trim() || null
 }
 
@@ -215,7 +243,8 @@ async function handleRegister (req, res) {
 		? body.grant_types
 		: ['authorization_code', 'refresh_token']
 	const clientPrefix = grantTypes.includes('refresh_token') ? 'client_' : 'client_bearer_'
-	const clientId = `${clientPrefix}${randomUUID()}`
+	const encodedLabel = encodeClientLabel(body.client_name)
+	const clientId = `${clientPrefix}${randomUUID()}${encodedLabel ? `_${encodedLabel}` : ''}`
 	sendJson(res, {
 		client_id: clientId,
 		client_id_issued_at: Math.floor(Date.now() / 1000),
@@ -387,6 +416,7 @@ async function handleAuthorizeConsent (req, res) {
 		sendText(res, 'Method Not Allowed', 405)
 		return
 	}
+	if (!checkFormOrigin(req, res)) return
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
 	const query = {}
@@ -553,6 +583,7 @@ async function handleVerify (req, res, query) {
 		sendText(res, 'Method Not Allowed', 405)
 		return
 	}
+	if (!checkFormOrigin(req, res)) return
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
 	const code = params.get('code') || query.code
@@ -663,6 +694,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		sendText(res, 'Method Not Allowed', 405)
 		return
 	}
+	if (!checkFormOrigin(req, res)) return
 	const provider = getProvider(providerName)
 	if (!provider || provider.type !== 'oauth' || !provider.buildAuthUrl) {
 		const err = new Error('not found')

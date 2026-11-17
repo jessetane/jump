@@ -133,9 +133,13 @@ function getBaseUrl (req) {
 	return 'http://localhost:8080'
 }
 
+function stripTrailingDot (hostname) {
+	return hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+}
+
 function isLoopbackHost (hostname) {
 	if (!hostname || typeof hostname !== 'string') return false
-	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+	const host = stripTrailingDot(hostname)
 	return host === 'localhost' || host.endsWith('.localhost') || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
 }
 
@@ -144,15 +148,18 @@ function isAllowedUpstreamHost (hostname) {
 	if (isLoopbackHost(hostname)) {
 		return process.env.NODE_ENV === 'test'
 	}
-	const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+	const host = stripTrailingDot(hostname)
 	if (
+		!host ||
 		host === '0.0.0.0' ||
 		host === '::' ||
+		host === 'metadata.google.internal' ||
 		/^fe[89ab][0-9a-f]:/.test(host) ||
-		/^f[cd][0-9a-f]{2}:/.test(host) ||
+		/^f[cd][0-9a-f]{0,2}:/.test(host) ||
 		host.startsWith('::ffff:') ||
 		/^0\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
 		/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) ||
+		/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(host) ||
 		/^169\.254\.\d{1,3}\.\d{1,3}$/.test(host) ||
 		/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host) ||
 		/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(host)
