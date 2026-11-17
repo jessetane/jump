@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import 'dotenv/config'
+import './env.js'
 import http from 'node:http'
 import fs from 'node:fs'
 import { handleOauth } from './oauth.js'
