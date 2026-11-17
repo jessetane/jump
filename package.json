@@ -15,7 +15,7 @@
 	},
 	"scripts": {
 		"start": "node index.js",
-		"test": "node --test test/index.js"
+		"test": "node --test test/*.js"
 	},
 	"dependencies": {
 		"dotenv": "^17.4.2",
