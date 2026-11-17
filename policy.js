@@ -193,7 +193,7 @@ function canonicalizePath (str) {
 	if (hasPathTraversal(str)) {
 		return null
 	}
-	let decoded = str.replace(/%([0-9a-fA-F]{2})/g, (match, hex) => {
+	let decoded = str.replace(/\/+/g, '/').replace(/%([0-9a-fA-F]{2})/g, (match, hex) => {
 		const code = parseInt(hex, 16)
 		if (
 			(code >= 65 && code <= 90) ||

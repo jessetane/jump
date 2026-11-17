@@ -204,7 +204,8 @@ function resolveTargetUrl (targetUrl, baseUrl = null) {
 function hasPathTraversal (urlOrPath) {
 	if (typeof urlOrPath !== 'string' || !urlOrPath) return false
 	const pathPart = urlOrPath.split(/[?#]/, 1)[0]
-	return /(?:^|\/|\\|%2f|%5c)(?:\.\.|%2e\.|\.%2e|%2e%2e)(?:\/|\\|%2f|%5c|$)/i.test(pathPart)
+	if (/\\|%5c|%25(?:2e|2f|5c|25)/i.test(pathPart)) return true
+	return /(?:^|\/|%2f)(?:\.\.|%2e\.|\.%2e|%2e%2e)(?:\/|%2f|$)/i.test(pathPart)
 }
 
 function getRawBody (req, maxBytes = 1024 * 1024) {

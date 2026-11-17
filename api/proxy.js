@@ -1,7 +1,7 @@
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy } from '../policy.js'
-import { serializeFormBody } from '../util.js'
+import { serializeFormBody, validateBaseUrl } from '../util.js'
 
 export {
 	request,
@@ -9,6 +9,8 @@ export {
 }
 
 const DEFAULT_TIMEOUT_MS = 60000
+const MAX_REDIRECT_HOPS = 5
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const STRIPPED_RESPONSE_HEADERS = new Set([
 	'connection',
 	'keep-alive',
@@ -25,6 +27,10 @@ const STRIPPED_RESPONSE_HEADERS = new Set([
 	'access-control-expose-headers',
 	'access-control-allow-credentials'
 ])
+
+function reqMethodAllowsBody (method) {
+	return method !== 'GET' && method !== 'HEAD'
+}
 
 async function readResponseBody (res, maxBytes) {
 	if (!res.body) return Buffer.alloc(0)
@@ -109,17 +115,52 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 			}
 		}
 	}
-	const reqMethod = method.toUpperCase()
-	const timeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS
-	const fetchOpts = {
-		method: reqMethod,
-		headers: reqHeaders,
-		signal: AbortSignal.timeout(timeoutMs)
+	let curMethod = method.toUpperCase()
+	let curUrl = fetchUrl
+	let curBody = reqMethodAllowsBody(curMethod) ? reqBody : undefined
+	const signal = AbortSignal.timeout(Number(process.env.UPSTREAM_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS)
+	let res
+	for (let hop = 0; ; hop++) {
+		res = await fetch(curUrl, {
+			method: curMethod,
+			headers: reqHeaders,
+			...(curBody !== undefined && { body: curBody }),
+			redirect: 'manual',
+			signal
+		})
+		const location = REDIRECT_STATUSES.has(res.status) ? res.headers.get('location') : null
+		if (!location) break
+		await res.body?.cancel()
+		if (hop >= MAX_REDIRECT_HOPS) {
+			const err = new Error(`Too many upstream redirects (exceeded ${MAX_REDIRECT_HOPS})`)
+			err.status = 502
+			throw err
+		}
+		let nextParsed
+		try {
+			nextParsed = new URL(location, curUrl)
+		} catch {
+			const err = new Error(`Invalid upstream redirect Location: ${location}`)
+			err.status = 502
+			throw err
+		}
+		if (!validateBaseUrl(nextParsed.origin)) {
+			const err = new Error(`Blocked unsafe upstream redirect target: ${nextParsed.origin}`)
+			err.status = 403
+			throw err
+		}
+		if (nextParsed.origin !== new URL(curUrl).origin) {
+			delete reqHeaders.authorization
+			delete reqHeaders.cookie
+		}
+		if (res.status === 303 || ((res.status === 301 || res.status === 302) && curMethod === 'POST')) {
+			curMethod = 'GET'
+			curBody = undefined
+			delete reqHeaders['content-type']
+			delete reqHeaders['content-length']
+		}
+		curUrl = nextParsed.toString()
 	}
-	if (reqMethod !== 'GET' && reqMethod !== 'HEAD' && reqBody !== undefined) {
-		fetchOpts.body = reqBody
-	}
-	const res = await fetch(fetchUrl, fetchOpts)
 	if (onStatus) onStatus(res.status)
 	const maxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB) || 10
 	const maxFileSizeBytes = maxFileSizeMb * 1024 * 1024
