@@ -8,6 +8,7 @@ export {
 	create,
 	get,
 	getActiveSession,
+	hasActiveAdmin,
 	getByToken,
 	findRevocable,
 	refreshOauthSession,
@@ -171,6 +172,19 @@ function getActiveSession (id) {
 		if (session.updated < new Date(now - DORMANT_MS).toISOString()) return null
 	}
 	return session
+}
+
+function hasActiveAdmin () {
+	const now = Date.now()
+	const minUpdated = new Date(now - DORMANT_MS).toISOString()
+	const row = sqlite.prepare(`
+		SELECT 1
+		FROM tokens
+		WHERE provider = 'self' AND type = 'bearer' AND admin = 1
+			AND (expires_at IS NULL OR (expires_at > ? AND updated >= ?))
+		LIMIT 1
+	`).get(now, minUpdated)
+	return Boolean(row)
 }
 
 function getByToken (token) {
