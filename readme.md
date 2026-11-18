@@ -2,13 +2,14 @@
 MCP proxy for HTTP APIs.
 
 ## Why
-So my trusted agents can do Google stuff. So my untrusted agents can also do Google stuff.
+Giving agents access to an API usually means installing or writing a bespoke MCP server per service, burning context on dozens of incomplete tool schemas and handing raw API keys or broad OAuth tokens straight to every client. Models already speak HTTP: `jump` turns any HTTP API into an MCP tool on the fly without wrapper code, holds the upstream credentials in one place, and lets you hand out revocable, policy-scoped access to trusted agents, untrusted agents, scripts, and teammates without ever exposing the underlying keys.
 
 ## How
 
-* One `<provider>_api` passthrough tool per linked provider (`google_api`, `github_api`, `stripe_api`, etc).
-* Sessions are decoupled from upstream OAuth and API-key credentials, so multiple accounts can be linked to one or many sessions.
-* Each session-to-app link (and shared app) can carry an ordered `allow`/`deny` policy matching HTTP methods, origins, URL path globs, query parameters, and request bodies (`body` field maps with `bodyType: "json" | "form"`, raw body globs, or `null` for empty bodies).
+* Connect built-in OAuth providers (`google`, `github`) or any HTTPS API (`Bearer`, `Basic`, or `?key=val` query auth) at runtime to expose a single `<provider>_api` MCP tool and matching `/api/:provider/*` HTTP proxy.
+* Sessions are decoupled from upstream credentials: link multiple accounts (`work`, `personal`) to one session, fan one account out across many sessions, or share an app with another user (`share_app`) without sharing the secret.
+* Ordered `allow`/`deny` policies on any link or share filter requests by HTTP method, origin, URL path glob, query parameters, and request body (`json` or `form` field maps, raw globs, or `null` for empty bodies).
+* Built-in OAuth 2.1 + PKCE server for MCP clients (with optional `SSO_DOMAINS` pinning), falling back to a local bootstrap bearer token when run without OAuth providers.
 
 ## Setup
 ```sh
@@ -75,6 +76,14 @@ admin({
 		}
 	]
 })
+
+// share an app with another user under an optional ceiling policy
+admin({
+	action: 'share_app',
+	appId: '<app_id>',
+	account: 'teammate@example.com',
+	policy: [{ action: 'allow', methods: ['GET'], path: '/v1/customers/**' }]
+})
 ```
 
 For headless or embedded installations, pass a bearer token (from `create_session` or `https://<host>/oauth/authorize`) in `headers`:
@@ -90,6 +99,12 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 		}
 	}
 }
+```
+
+The same bearer token also works against the transparent HTTP proxy at `/api/:provider/*`:
+
+```sh
+$ curl -H "Authorization: Bearer <token>" https://<host>/api/stripe/v1/customers
 ```
 
 ## MCP
