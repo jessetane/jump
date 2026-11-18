@@ -6686,6 +6686,157 @@ test('graceful SIGTERM shutdown finishes in-flight requests despite duplicate si
 	}
 })
 
+test('link_login merge: true atomically merges two accounts, preserves older user and both sessions, cleans shares, and enforces SSO_DOMAINS', async () => {
+	const addr = server.address()
+	const origFetch = globalThis.fetch
+	const origSso = process.env.SSO_DOMAINS
+	let googleMockEmail = 'primary-owner@example.com'
+	let ghMockLogin = 'sso-bridge-gh'
+	globalThis.fetch = async (input, init) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u === 'https://oauth2.googleapis.com/token') {
+			return new Response(JSON.stringify({ access_token: 'ya29.merge', token_type: 'Bearer' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+			return new Response(JSON.stringify({ email: googleMockEmail, verified_email: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://github.com/login/oauth/access_token') {
+			return new Response(JSON.stringify({ access_token: 'gho_merge', token_type: 'bearer' }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		if (u === 'https://api.github.com/user') {
+			return new Response(JSON.stringify({ login: ghMockLogin }), { status: 200, headers: { 'content-type': 'application/json' } })
+		}
+		return origFetch(input, init)
+	}
+	try {
+		const olderUser = db.logins.resolveUser('google', 'primary-owner@example.com')
+		db.sqlite.prepare('UPDATE users SET created = ? WHERE id = ?').run('2026-01-01T00:00:00.000Z', olderUser.id)
+		db.sqlite.prepare('UPDATE logins SET created = ? WHERE user_id = ?').run('2026-01-01T00:00:00.000Z', olderUser.id)
+		const olderSession = db.tokens.create({ userId: olderUser.id, provider: 'self', name: 'Older Session', admin: 1 })
+		const olderApp = db.tokens.create({
+			userId: olderUser.id,
+			provider: 'stripe',
+			type: 'api_key',
+			name: 'Older Stripe',
+			credentials: { apiKey: 'sk_older', baseUrl: 'https://api.stripe.com' }
+		})
+		db.links.create({ sessionId: olderSession.id, appId: olderApp.id })
+		const newerUser = db.logins.resolveUser('github', 'accidental-new-gh')
+		const newerSession = db.tokens.create({ userId: newerUser.id, provider: 'self', name: 'Newer GH Session', admin: 1 })
+		db.logs.create({
+			userId: newerUser.id,
+			sessionId: newerSession.id,
+			appId: null,
+			provider: 'github',
+			method: 'GET',
+			url: 'https://api.github.com/user',
+			allowed: true,
+			status: 200,
+			duration: 12
+		})
+		await executeTool('admin', {
+			action: 'share_app',
+			appId: olderApp.id,
+			account: 'github:accidental-new-gh'
+		}, olderSession.token)
+		const thirdParty = db.logins.resolveUser('google', 'thirdparty-sharer@example.com')
+		const thirdSession = db.tokens.create({ userId: thirdParty.id, provider: 'self', admin: 1 })
+		const thirdApp = db.tokens.create({
+			userId: thirdParty.id,
+			provider: 'mailgun',
+			type: 'api_key',
+			name: 'Shared Mailgun',
+			credentials: { apiKey: 'key-mg', baseUrl: 'https://api.mailgun.net' }
+		})
+		await executeTool('admin', { action: 'share_app', appId: thirdApp.id, account: 'primary-owner@example.com' }, thirdSession.token)
+		await executeTool('admin', { action: 'share_app', appId: thirdApp.id, account: 'github:accidental-new-gh' }, thirdSession.token)
+		const badBoolRes = await executeTool('admin', {
+			action: 'link_login',
+			provider: 'google',
+			merge: 'not-a-bool'
+		}, newerSession.token)
+		assert.equal(badBoolRes.isError, true)
+		assert.match(badBoolRes.content[0].text, /merge must be a boolean/)
+		const noMergeInit = JSON.parse((await executeTool('admin', {
+			action: 'link_login',
+			provider: 'google'
+		}, newerSession.token, `http://127.0.0.1:${addr.port}`)).content[0].text)
+		const noMergeCode = new URL(noMergeInit.connectUrl).searchParams.get('code')
+		const noMergeConsent = await origFetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: noMergeCode, provider: 'google' }).toString(),
+			redirect: 'manual'
+		})
+		const noMergeState = new URL(noMergeConsent.headers.get('location')).searchParams.get('state')
+		const noMergeCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${noMergeState}`)
+		assert.equal(noMergeCb.status, 409, 'Without merge: true, existing account still returns 409')
+		assert.match(await noMergeCb.text(), /merge: true/)
+		const mergeInit = JSON.parse((await executeTool('admin', {
+			action: 'link_login',
+			provider: 'google',
+			merge: true
+		}, newerSession.token, `http://127.0.0.1:${addr.port}`)).content[0].text)
+		const mergeSetupCode = new URL(mergeInit.connectUrl).searchParams.get('code')
+		const mergeAuthPage = await origFetch(`http://127.0.0.1:${addr.port}/oauth/authorize?code=${mergeSetupCode}`)
+		assert.equal(mergeAuthPage.status, 200)
+		const mergeAuthHtml = await mergeAuthPage.text()
+		assert.match(mergeAuthHtml, /"mergeMode":true/)
+		assert.match(mergeAuthHtml, /"linkAccount":"accidental-new-gh"/)
+		const mergeConsent = await origFetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: mergeSetupCode, provider: 'google' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(mergeConsent.status, 302)
+		const mergeState = new URL(mergeConsent.headers.get('location')).searchParams.get('state')
+		const mergeCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${mergeState}`)
+		assert.equal(mergeCb.status, 200)
+		assert.match(await mergeCb.text(), /Accounts Merged/)
+		assert.equal(db.users.get(newerUser.id), null, 'Newer user row is removed after merge into older user')
+		assert.ok(db.users.get(olderUser.id), 'Older user row survives merge')
+		const whoamiFromNewerSession = JSON.parse((await executeTool('admin', { action: 'whoami' }, newerSession.token)).content[0].text)
+		assert.equal(whoamiFromNewerSession.user.id, olderUser.id, 'Newer session seamlessly points to surviving older user')
+		assert.equal(whoamiFromNewerSession.user.account, 'primary-owner@example.com')
+		assert.deepEqual(whoamiFromNewerSession.user.logins.map(l => `${l.provider}:${l.account}`), [
+			'google:primary-owner@example.com',
+			'github:accidental-new-gh'
+		])
+		const mergedApps = JSON.parse((await executeTool('admin', { action: 'list_apps' }, newerSession.token)).content[0].text).apps
+		assert.equal(mergedApps.filter(a => a.type === 'share' && a.name === 'Older Stripe').length, 0, 'Self-shares are cleaned up on merge')
+		assert.equal(mergedApps.filter(a => a.type === 'share' && a.name === 'Shared Mailgun').length, 1, 'Duplicate third-party shares are deduplicated on merge')
+		assert.ok(mergedApps.some(a => a.id === olderApp.id), 'Surviving owned apps are accessible from merged session')
+		const mergedLogs = JSON.parse((await executeTool('admin', { action: 'list_logs' }, olderSession.token)).content[0].text).logs
+		assert.ok(mergedLogs.some(l => l.sessionId === newerSession.id), 'Audit logs from absorbed user are preserved')
+		process.env.SSO_DOMAINS = 'isolated.corp:google'
+		const pinnedUser = db.logins.resolveUser('google', 'staff@isolated.corp')
+		db.sqlite.prepare('INSERT INTO logins (id, user_id, provider, account, created) VALUES (?, ?, ?, ?, ?)').run(
+			'sso-bridge-login-id',
+			pinnedUser.id,
+			'github',
+			'sso-bridge-gh',
+			new Date().toISOString()
+		)
+		const outsider = db.logins.resolveUser('google', 'outsider@gmail.com')
+		const outsiderAdmin = db.tokens.create({ userId: outsider.id, provider: 'self', admin: 1 })
+		const ssoMergeState = db.tokens.createState({
+			mode: 'auth',
+			sessionId: outsiderAdmin.id,
+			provider: 'github',
+			merge: true
+		})
+		const ssoMergeCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${ssoMergeState}`)
+		assert.equal(ssoMergeCb.status, 403, 'Merge must reject absorbing a user whose logins violate SSO_DOMAINS')
+		assert.ok(db.users.get(pinnedUser.id), 'Rejected SSO merge leaves target user untouched')
+		assert.ok(db.users.get(outsider.id), 'Rejected SSO merge leaves caller user untouched')
+	} finally {
+		globalThis.fetch = origFetch
+		if (origSso === undefined) delete process.env.SSO_DOMAINS
+		else process.env.SSO_DOMAINS = origSso
+	}
+})
+
 test('teardown server', (t, done) => {
 	server.close(() => {
 		fs.rmSync(testDbPath, { force: true })

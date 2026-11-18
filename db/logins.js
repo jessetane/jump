@@ -101,16 +101,55 @@ function runInTransaction (fn) {
 	return fn()
 }
 
-function upsert ({ id = randomUUID(), userId, provider, account, allowUnscoped = false }) {
+function mergeUsers (userIdA, userIdB) {
+	const uA = users.get(userIdA)
+	const uB = users.get(userIdB)
+	const [surviving, absorbed] = (uB && (!uA || uB.created < uA.created)) ? [uB, uA] : [uA, uB]
+	sqlite.prepare('UPDATE logins SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
+	sqlite.prepare('UPDATE tokens SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
+	sqlite.prepare('UPDATE logs SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
+	sqlite.prepare(`
+		DELETE FROM tokens
+		WHERE user_id = ? AND type = 'share'
+			AND EXISTS (
+				SELECT 1 FROM tokens AS owned
+				WHERE owned.id = json_extract(tokens.credentials, '$.appId') AND owned.user_id = ?
+			)
+	`).run(surviving.id, surviving.id)
+	const shares = sqlite.prepare(`
+		SELECT id, json_extract(credentials, '$.appId') AS app_id
+		FROM tokens
+		WHERE user_id = ? AND type = 'share'
+		ORDER BY created ASC, rowid ASC
+	`).all(surviving.id)
+	const seenApps = new Set()
+	for (const s of shares) {
+		if (!s.app_id) continue
+		if (seenApps.has(s.app_id)) {
+			sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(s.id)
+		} else {
+			seenApps.add(s.app_id)
+		}
+	}
+	sqlite.prepare('DELETE FROM users WHERE id = ?').run(absorbed.id)
+	return surviving.id
+}
+
+function upsert ({ id = randomUUID(), userId, provider, account, allowUnscoped = false, merge = false }) {
 	const cleanProvider = String(provider).trim().toLowerCase()
 	const cleanAccount = String(account).trim().toLowerCase()
 	return runInTransaction(() => {
 		const existing = sqlite.prepare('SELECT * FROM logins WHERE provider = ? AND account = ?').get(cleanProvider, cleanAccount)
 		if (existing) {
 			if (existing.user_id !== userId) {
-				const err = new Error(`Account ${cleanAccount} is already registered to another user`)
-				err.status = 409
-				throw err
+				if (!merge) {
+					const err = new Error(`Account ${cleanAccount} is already registered to another user. Re-run link_login with merge: true to merge both accounts`)
+					err.status = 409
+					throw err
+				}
+				const survivingId = mergeUsers(userId, existing.user_id)
+				tokens.claimPendingShares({ userId: survivingId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
+				return get(existing.id)
 			}
 			tokens.claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
 			return formatLogin(existing)

@@ -535,6 +535,7 @@ function formatState (row) {
 		codeChallengeMethod: meta.codeChallengeMethod || null,
 		name: tok.name,
 		admin: tok.admin,
+		merge: Boolean(meta.merge),
 		reauthAppId: meta.reauthAppId || null,
 		sessionId: meta.sessionId || null,
 		provider: tok.provider === 'self' ? null : tok.provider,
@@ -554,6 +555,7 @@ function createState (opts = {}) {
 		codeChallengeMethod = null,
 		name = null,
 		admin = 0,
+		merge = false,
 		reauthAppId = null,
 		sessionId = null,
 		provider = null,
@@ -575,6 +577,7 @@ function createState (opts = {}) {
 			clientState,
 			codeChallenge,
 			codeChallengeMethod,
+			...(merge && { merge: true }),
 			reauthAppId,
 			sessionId
 		},

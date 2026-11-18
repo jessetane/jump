@@ -121,7 +121,7 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 	* `unshare_app` - Revoke an app share from a user.
 	* `link_app` - Attach an app to a session with an optional policy.
 	* `unlink_app` - Detach an app from a session.
-	* `link_login` - Link an additional sign-in provider to the current user.
+	* `link_login` - Link an additional sign-in provider to the current user (or merge an existing account with `merge: true`).
 	* `unlink_login` - Unlink a sign-in provider from the current user.
 	* `list_logs` - Query proxied request audit logs.
 

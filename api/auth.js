@@ -470,18 +470,20 @@ async function unlinkApp (token, opts = {}) {
 
 async function linkLogin (token, opts = {}) {
 	const { session, appUrl } = requireAdmin(token, opts, 'Access denied: login administration requires admin privileges')
-	const { provider } = opts
+	const { provider, merge } = opts
 	if (!provider || typeof provider !== 'string' || !provider.trim()) {
 		const error = new Error('OAuth provider is required')
 		error.status = 400
 		throw error
 	}
+	const shouldMerge = requireBoolean(merge, 'merge', false)
 	const providerDef = requireAuthProvider(provider)
 	assertSsoLink(db.logins.listByUserId(session.userId), providerDef.id)
 	const setupCode = db.tokens.createState({
 		mode: 'setup_link',
 		sessionId: session.id,
 		provider: providerDef.id,
+		merge: shouldMerge,
 		ttl: 10 * 60 * 1000
 	})
 	return {

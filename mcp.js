@@ -124,6 +124,7 @@ const adminTool = {
 			},
 			admin: { type: 'boolean', description: 'Grant or revoke admin permissions on a session (used for create_session and update_session).' },
 			rotateToken: { type: 'boolean', description: 'When action is update_session, set to true to rotate and regenerate the session bearer token.' },
+			merge: { type: 'boolean', description: 'When action is link_login, set to true to merge an existing Jump account into the current user if that login is already registered.' },
 			revoke: { type: 'boolean', description: 'When action is disconnect_app, set to false to remove locally without upstream revocation (defaults to true).' },
 			allOthers: { type: 'boolean', description: 'When action is revoke_session, set to true to revoke all other sessions.' },
 			allowed: { type: 'boolean', description: 'When action is list_logs, filter logs by whether the request was allowed by policy.' },

@@ -305,6 +305,8 @@ async function handleAuthorize (req, res, query) {
 		return
 	}
 	let linkMode = false
+	let linkAccount = null
+	let mergeMode = false
 	let resolvedParams = query
 	if (query.code !== undefined) {
 		const setup = db.tokens.getState(query.code)
@@ -315,6 +317,8 @@ async function handleAuthorize (req, res, query) {
 		}
 		if (!enforceSso(res, () => assertSsoLink(db.logins.listByUserId(session.userId), setup.provider))) return
 		linkMode = true
+		linkAccount = db.logins.getAccountByUserId(session.userId)
+		mergeMode = Boolean(setup.merge)
 		resolvedParams = { ...query, ...(setup.provider && { provider: setup.provider }) }
 	}
 	const clientName = deriveClientName(query.client_id, query.client_name)
@@ -323,7 +327,7 @@ async function handleAuthorize (req, res, query) {
 		params: resolvedParams,
 		providers: authProviders,
 		localAuth: !linkMode && authProviders.length === 0,
-		...(linkMode && { linkMode: true }),
+		...(linkMode && { linkMode: true, linkAccount, ...(mergeMode && { mergeMode: true }) }),
 		...(clientName && { clientName })
 	}
 	sendHtml(res, AUTHORIZE_HTML.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c')))
@@ -476,6 +480,7 @@ async function handleAuthorizeConsent (req, res) {
 		return
 	}
 	let linkSession = null
+	let linkMerge = false
 	if (setupCode) {
 		const setup = db.tokens.getState(setupCode)
 		linkSession = resolveSetupState(setup, 'setup_link')
@@ -483,6 +488,7 @@ async function handleAuthorizeConsent (req, res) {
 			sendText(res, 'Access denied: invalid or expired setup code.', 403)
 			return
 		}
+		linkMerge = Boolean(setup.merge)
 		if (setup.provider) {
 			if (providerName && providerName !== setup.provider) {
 				sendText(res, 'Access denied: provider mismatch for setup code.', 403)
@@ -510,6 +516,7 @@ async function handleAuthorizeConsent (req, res) {
 			sendText(res, 'Access denied: invalid or expired setup code.', 403)
 			return
 		}
+		linkMerge = Boolean(consumed.merge)
 	}
 	const callbackUrl = `${base}/oauth/callback`
 	const stateToken = db.tokens.createState({
@@ -522,6 +529,7 @@ async function handleAuthorizeConsent (req, res) {
 		codeChallengeMethod,
 		name,
 		admin,
+		merge: linkMerge,
 		sessionId: linkSession ? linkSession.id : null,
 		ip
 	})
@@ -777,14 +785,26 @@ async function handleCallback (req, res, query) {
 			return
 		}
 		const cleanAccount = String(account).trim().toLowerCase()
-		if (!enforceSso(res, () => assertSsoLink(db.logins.listByUserId(session.userId), provider.id, cleanAccount))) return
+		const selfLogins = db.logins.listByUserId(session.userId)
+		const existingOwner = db.logins.findUserByAccount(cleanAccount, provider.id)
+		const willMerge = Boolean(existingOwner && existingOwner.id !== session.userId && oauthState.merge)
+		if (!enforceSso(res, () => {
+			assertSsoLink(selfLogins, provider.id, cleanAccount)
+			if (willMerge) {
+				const combined = [...selfLogins, ...db.logins.listByUserId(existingOwner.id)]
+				for (let i = 0; i < combined.length; i++) {
+					assertSsoLink(combined.filter((_, j) => j !== i), combined[i].provider, combined[i].account)
+				}
+			}
+		})) return
 		const allowUnscoped = shouldClaimUnscoped(provider.id, cleanAccount, { verifiedEmail: provider.verifiedEmail })
 		try {
 			db.logins.upsert({
 				userId: session.userId,
 				provider: provider.id,
 				account: cleanAccount,
-				allowUnscoped
+				allowUnscoped,
+				merge: oauthState.merge
 			})
 		} catch (err) {
 			if (err.status === 409) {
@@ -794,8 +814,8 @@ async function handleCallback (req, res, query) {
 			throw err
 		}
 		sendHtml(res, renderCardPage(
-			'Login Linked',
-			`Linked <strong>${escapeHtml(cleanAccount)}</strong>`,
+			willMerge ? 'Accounts Merged' : 'Login Linked',
+			willMerge ? `Merged <strong>${escapeHtml(cleanAccount)}</strong>` : `Linked <strong>${escapeHtml(cleanAccount)}</strong>`,
 			`<p class="subtitle">You can close this window and return to your agent.</p>`
 		))
 		return
