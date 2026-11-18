@@ -536,6 +536,7 @@ function formatState (row) {
 		name: tok.name,
 		admin: tok.admin,
 		merge: Boolean(meta.merge),
+		newAppIds: Array.isArray(meta.newAppIds) ? meta.newAppIds : null,
 		reauthAppId: meta.reauthAppId || null,
 		sessionId: meta.sessionId || null,
 		provider: tok.provider === 'self' ? null : tok.provider,
@@ -556,6 +557,7 @@ function createState (opts = {}) {
 		name = null,
 		admin = 0,
 		merge = false,
+		newAppIds = null,
 		reauthAppId = null,
 		sessionId = null,
 		provider = null,
@@ -578,6 +580,7 @@ function createState (opts = {}) {
 			codeChallenge,
 			codeChallengeMethod,
 			...(merge && { merge: true }),
+			...(Array.isArray(newAppIds) && { newAppIds }),
 			reauthAppId,
 			sessionId
 		},

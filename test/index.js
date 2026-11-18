@@ -3247,9 +3247,21 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		return origFetch(input, init)
 	}
 	try {
-		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${authStateToken}`)
-		assert.equal(cbRes.status, 200, 'Linking GitHub handle claims matching pending shares and succeeds with 200')
-		const cbHtml = await cbRes.text()
+		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${authStateToken}`, { redirect: 'manual' })
+		assert.equal(cbRes.status, 302, 'Linking GitHub handle that claims pending shares redirects to /oauth/verify')
+		const claimVerifyUrl = new URL(cbRes.headers.get('location'))
+		assert.equal(claimVerifyUrl.pathname, '/oauth/verify')
+		const claimVerifyCode = claimVerifyUrl.searchParams.get('code')
+		const getClaimVerify = await origFetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${claimVerifyCode}`)
+		assert.equal(getClaimVerify.status, 200)
+		assert.match(await getClaimVerify.text(), /Update session for <strong>user-props@example\.com<\/strong>/)
+		const postClaimVerify = await origFetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: claimVerifyCode }).toString()
+		})
+		assert.equal(postClaimVerify.status, 200)
+		const cbHtml = await postClaimVerify.text()
 		assert.match(cbHtml, /Login Linked/)
 		assert.match(cbHtml, /Linked <strong>jessetane<\/strong>/)
 		const userAppsAfterClaim = JSON.parse((await executeTool('admin', { action: 'list_apps' }, adminSession.token)).content[0].text).apps
@@ -6762,7 +6774,14 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 			credentials: { apiKey: 'key-mg', baseUrl: 'https://api.mailgun.net' }
 		})
 		await executeTool('admin', { action: 'share_app', appId: thirdApp.id, account: 'primary-owner@example.com' }, thirdSession.token)
-		await executeTool('admin', { action: 'share_app', appId: thirdApp.id, account: 'github:accidental-new-gh' }, thirdSession.token)
+		const newUserShare = JSON.parse((await executeTool('admin', { action: 'share_app', appId: thirdApp.id, account: 'github:accidental-new-gh' }, thirdSession.token)).content[0].text)
+		const preservedPolicy = [{ action: 'allow', methods: ['GET'], path: '/v3/**' }]
+		await executeTool('admin', {
+			action: 'link_app',
+			sessionId: newerSession.id,
+			appId: newUserShare.shareId,
+			policy: preservedPolicy
+		}, newerSession.token)
 		const badBoolRes = await executeTool('admin', {
 			action: 'link_login',
 			provider: 'google',
@@ -6804,9 +6823,29 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 		})
 		assert.equal(mergeConsent.status, 302)
 		const mergeState = new URL(mergeConsent.headers.get('location')).searchParams.get('state')
-		const mergeCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${mergeState}`)
-		assert.equal(mergeCb.status, 200)
-		assert.match(await mergeCb.text(), /Accounts Merged/)
+		const mergeCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${mergeState}`, { redirect: 'manual' })
+		assert.equal(mergeCb.status, 302, 'Merging an account with new apps redirects to /oauth/verify')
+		const mergeVerifyUrl = new URL(mergeCb.headers.get('location'))
+		assert.equal(mergeVerifyUrl.pathname, '/oauth/verify')
+		const mergeVerifyCode = mergeVerifyUrl.searchParams.get('code')
+		const getMergeVerify = await origFetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${mergeVerifyCode}`)
+		assert.equal(getMergeVerify.status, 200)
+		const mergeVerifyHtml = await getMergeVerify.text()
+		assert.match(mergeVerifyHtml, /Update session for <strong>primary-owner@example\.com<\/strong>/)
+		assert.match(mergeVerifyHtml, new RegExp(`value="${olderApp.id}" checked`))
+		const survivingMailgunShare = db.tokens.listByUserId(olderUser.id).find(t => t.type === 'share' && t.provider === 'mailgun')
+		assert.ok(survivingMailgunShare, 'Surviving third-party share exists on merged user')
+		assert.match(mergeVerifyHtml, new RegExp(`value="${survivingMailgunShare.id}" checked`), 'Existing session link transfers across deduplicated share and stays checked')
+		const verifyParams = new URLSearchParams({ code: mergeVerifyCode })
+		verifyParams.append('app_id', olderApp.id)
+		verifyParams.append('app_id', survivingMailgunShare.id)
+		const postMergeVerify = await origFetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: verifyParams.toString()
+		})
+		assert.equal(postMergeVerify.status, 200)
+		assert.match(await postMergeVerify.text(), /Accounts Merged/)
 		assert.equal(db.users.get(newerUser.id), null, 'Newer user row is removed after merge into older user')
 		assert.ok(db.users.get(olderUser.id), 'Older user row survives merge')
 		const whoamiFromNewerSession = JSON.parse((await executeTool('admin', { action: 'whoami' }, newerSession.token)).content[0].text)
@@ -6816,6 +6855,20 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 			'google:primary-owner@example.com',
 			'github:accidental-new-gh'
 		])
+		assert.ok(whoamiFromNewerSession.session.apps.some(a => a.id === olderApp.id), 'Selected merged app is now linked to existing session')
+		assert.deepEqual(whoamiFromNewerSession.session.apps.find(a => a.id === survivingMailgunShare.id)?.policy, preservedPolicy, 'Already-linked app preserves its existing policy across Update session')
+		const emptyUser = db.logins.resolveUser('github', 'empty-accidental-gh')
+		assert.ok(emptyUser.id)
+		ghMockLogin = 'empty-accidental-gh'
+		const mergeEmptyState = db.tokens.createState({
+			mode: 'auth',
+			sessionId: olderSession.id,
+			provider: 'github',
+			merge: true
+		})
+		const mergeEmptyCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${mergeEmptyState}`, { redirect: 'manual' })
+		assert.equal(mergeEmptyCb.status, 200, 'Merging an empty account with 0 new apps skips /oauth/verify and finishes immediately')
+		assert.match(await mergeEmptyCb.text(), /Accounts Merged/)
 		const mergedApps = JSON.parse((await executeTool('admin', { action: 'list_apps' }, newerSession.token)).content[0].text).apps
 		assert.equal(mergedApps.filter(a => a.type === 'share' && a.name === 'Older Stripe').length, 0, 'Self-shares are cleaned up on merge')
 		assert.equal(mergedApps.filter(a => a.type === 'share' && a.name === 'Shared Mailgun').length, 1, 'Duplicate third-party shares are deduplicated on merge')
@@ -6823,6 +6876,7 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 		const mergedLogs = JSON.parse((await executeTool('admin', { action: 'list_logs' }, olderSession.token)).content[0].text).logs
 		assert.ok(mergedLogs.some(l => l.sessionId === newerSession.id), 'Audit logs from absorbed user are preserved')
 		process.env.SSO_DOMAINS = 'isolated.corp:google'
+		ghMockLogin = 'sso-bridge-gh'
 		const pinnedUser = db.logins.resolveUser('google', 'staff@isolated.corp')
 		db.sqlite.prepare('INSERT INTO logins (id, user_id, provider, account, created) VALUES (?, ?, ?, ?, ?)').run(
 			'sso-bridge-login-id',

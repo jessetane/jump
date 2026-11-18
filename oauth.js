@@ -553,6 +553,18 @@ async function handleAuthorizeConsent (req, res) {
 	redirect(res, authUrl)
 }
 
+function renderAuthResult (res, merged, account) {
+	sendHtml(res, renderCardPage(
+		merged ? 'Accounts Merged' : 'Login Linked',
+		merged ? `Merged <strong>${escapeHtml(account)}</strong>` : `Linked <strong>${escapeHtml(account)}</strong>`,
+		`<p class="subtitle">You can close this window and return to your agent.</p>`
+	))
+}
+
+function appIdentityKey (app) {
+	return app.type === 'share' ? `share:${app.credentials?.appId || app.id}` : `app:${app.id}`
+}
+
 async function handleVerify (req, res, query) {
 	if (req.method === 'GET') {
 		const code = query.code
@@ -562,28 +574,35 @@ async function handleVerify (req, res, query) {
 		}
 		const state = db.tokens.getState(code)
 		const existingUser = state?.mode === 'verify' && state.userId ? db.users.get(state.userId) : null
-		if (!existingUser) {
+		const targetSession = state?.sessionId ? db.tokens.getActiveSession(state.sessionId) : null
+		if (!existingUser || (state.sessionId && (!targetSession || targetSession.userId !== existingUser.id))) {
 			sendText(res, 'Invalid or expired verification code', 400)
 			return
 		}
 		const userApps = db.tokens.listByUserId(existingUser.id).filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
 		let appsHtml = ''
 		if (userApps.length > 0) {
-			const checkedAttr = state.admin ? ' checked' : ''
+			const linkedIds = targetSession ? new Set(db.links.listBySessionId(targetSession.id).map(l => l.appId)) : null
+			const newIds = targetSession ? new Set(state.newAppIds || []) : null
 			const items = userApps.map(app => {
 				const provider = getProvider(app.provider)
 				const account = app.credentials?.account || ''
 				const scopeSummary = summarizeScopes(app.scopes, provider?.services)
 				const baseName = app.name || provider?.name || `${app.provider} app`
 				const label = scopeSummary ? `${baseName} · ${scopeSummary}` : baseName
+				const isChecked = targetSession
+					? (linkedIds.has(app.id) || (Boolean(state.admin) && newIds.has(app.id)))
+					: Boolean(state.admin)
+				const checkedAttr = isChecked ? ' checked' : ''
 				return `<label class="app-item"><input type="checkbox" name="app_id" value="${escapeHtml(app.id)}"${checkedAttr}><span>${escapeHtml(label)}</span>${account ? `<span class="app-meta">${escapeHtml(account)}</span>` : ''}</label>`
 			}).join('')
 			appsHtml = `<div class="app-list"><div class="app-list-title">Link connected apps</div>${items}</div>`
 		}
 		const displayAccount = db.logins.getAccountByUserId(existingUser.id)
+		const actionVerb = targetSession ? 'Update' : 'Activate'
 		sendHtml(res, renderCardPage(
 			'jump verify',
-			`Activate session for <strong>${escapeHtml(displayAccount)}</strong>`,
+			`${actionVerb} session for <strong>${escapeHtml(displayAccount)}</strong>`,
 			`<form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${escapeHtml(code)}">${appsHtml}<button type="submit">Continue</button></form>`
 		))
 		return
@@ -604,6 +623,27 @@ async function handleVerify (req, res, query) {
 	const user = state?.mode === 'verify' && state.userId ? db.users.get(state.userId) : null
 	if (!user) {
 		sendText(res, 'Invalid or expired verification code', 400)
+		return
+	}
+	if (state.sessionId) {
+		const targetSession = db.tokens.getActiveSession(state.sessionId)
+		if (!targetSession || targetSession.userId !== user.id) {
+			sendText(res, 'Invalid or expired verification code', 400)
+			return
+		}
+		const selectedIds = new Set(filterValidAppIds(user.id, params.getAll('app_id')))
+		const existingLinkedIds = new Set(db.links.listBySessionId(targetSession.id).map(l => l.appId))
+		for (const appId of selectedIds) {
+			if (!existingLinkedIds.has(appId)) {
+				db.links.create({ sessionId: targetSession.id, appId })
+			}
+		}
+		for (const appId of existingLinkedIds) {
+			if (!selectedIds.has(appId)) {
+				db.links.remove(targetSession.id, appId)
+			}
+		}
+		renderAuthResult(res, state.merge, state.name || db.logins.getAccountByUserId(user.id))
 		return
 	}
 	completeLogin(req, res, {
@@ -810,6 +850,11 @@ async function handleCallback (req, res, query) {
 			}
 		})) return
 		const allowUnscoped = shouldClaimUnscoped(provider.id, cleanAccount, { verifiedEmail: provider.verifiedEmail })
+		const beforeAppKeys = new Set(
+			db.tokens.listByUserId(session.userId)
+				.filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
+				.map(appIdentityKey)
+		)
 		try {
 			db.logins.upsert({
 				userId: session.userId,
@@ -825,11 +870,27 @@ async function handleCallback (req, res, query) {
 			}
 			throw err
 		}
-		sendHtml(res, renderCardPage(
-			willMerge ? 'Accounts Merged' : 'Login Linked',
-			willMerge ? `Merged <strong>${escapeHtml(cleanAccount)}</strong>` : `Linked <strong>${escapeHtml(cleanAccount)}</strong>`,
-			`<p class="subtitle">You can close this window and return to your agent.</p>`
-		))
+		const updatedSession = db.tokens.getActiveSession(session.id)
+		const afterApps = updatedSession
+			? db.tokens.listByUserId(updatedSession.userId).filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
+			: []
+		const newAppIds = afterApps.filter(a => !beforeAppKeys.has(appIdentityKey(a))).map(a => a.id)
+		if (updatedSession && newAppIds.length > 0) {
+			const verifyCode = db.tokens.createState({
+				mode: 'verify',
+				userId: updatedSession.userId,
+				sessionId: updatedSession.id,
+				provider: provider.id,
+				name: cleanAccount,
+				admin: updatedSession.admin ? 1 : 0,
+				merge: willMerge,
+				newAppIds,
+				ip: oauthState.ip
+			})
+			redirect(res, `${base}/oauth/verify?code=${verifyCode}`)
+			return
+		}
+		renderAuthResult(res, willMerge, cleanAccount)
 		return
 	}
 	if (oauthState.mode === 'login') {
