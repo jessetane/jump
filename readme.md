@@ -6,11 +6,12 @@ Giving agents access to an API usually means installing or writing a bespoke MCP
 
 ## How
 
-* **Client sessions**: Sign in via OAuth 2.1 + PKCE (using an identity-only Google or GitHub check, or a local bootstrap token when run standalone) to mint revocable `jump` bearer sessions. One session can link multiple accounts per provider, one account can fan out across many sessions, and apps can be shared with other users (`share_app`) without sharing the secret.
-* **Upstream apps**: Each linked provider exposes a single `<provider>_api` MCP tool and matching `/api/:provider/*` HTTP proxy (selectable via `account` when multiple accounts are linked):
-	* **OAuth** - Built-in providers (`google`, `github`) with granular read/write service scopes and automatic token refresh.
-	* **API keys** - Any HTTPS API at runtime using `Bearer`, `Basic` (`user:pass`), or query-param (`?key=val`) credentials.
-* **Request policies**: Ordered `allow`/`deny` rules on any session link or shared app filter requests by HTTP method, origin, URL path glob, query parameters, and request body (`json` or `form` field maps, raw globs, or `null` for empty bodies).
+* **Client sessions** - Sign in from an MCP client via OAuth (or a local bootstrap token), then mint revocable sessions for other agents and scripts.
+* **Upstream apps** - Each linked provider exposes one `<provider>_api` MCP tool:
+	* **OAuth** - Ships with [`google`](providers/google.js) and [`github`](providers/github.js); adding a new config in [`providers/`](providers) is trivial (patches welcome).
+	* **API keys** - Any HTTPS API at runtime using `Bearer`, `Basic`, or query-param credentials.
+* **Linking & sharing** - Link multiple apps to one session, fan one app across many sessions, or share apps with other users without exposing secrets.
+* **Request policies** - Attach ordered `allow`/`deny` rules matching HTTP method, origin, path, query, and body to any link or share.
 
 ## Setup
 ```sh
@@ -100,18 +101,29 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 }
 ```
 
-The same bearer token also works against the transparent HTTP proxy at `/api/:provider/*`:
-
-```sh
-$ curl -H "Authorization: Bearer <token>" https://<host>/api/stripe/v1/customers
-```
-
 ## MCP
 
 ### Tools
 
-* `<provider>_api({ url, method?, body?, headers?, account?, appId? })` - Proxies an HTTP request to the linked upstream provider.
-* `admin({ action, ... })` - Manages sessions, apps, shares, links, login keys, and usage logs (`whoami`, `list_sessions`, `get_session`, `create_session`, `update_session`, `revoke_session`, `list_apps`, `connect_app`, `disconnect_app`, `update_app`, `share_app`, `unshare_app`, `link_app`, `unlink_app`, `link_login`, `unlink_login`, `list_logs`). Listed in `tools/list` for admin sessions.
+* `<provider>_api({ url, method?, body?, headers?, account?, appId? })` - Proxies an HTTP request to a linked upstream app.
+* `admin({ action, ... })` - Manages sessions, apps, shares, links, logins, and usage logs (exposed on admin sessions):
+	* `whoami` - Current user, linked logins, session info, and linked apps.
+	* `list_sessions` - List active sessions.
+	* `get_session` - Get a session and its linked apps and policies.
+	* `create_session` - Mint a new bearer session (and optionally link apps).
+	* `update_session` - Rename a session, toggle `admin`, or rotate its token.
+	* `revoke_session` - Revoke the current session, a specific session, or `allOthers`.
+	* `list_apps` - List connected and shared apps.
+	* `connect_app` - Connect an OAuth or API-key upstream app (or re-authenticate one).
+	* `update_app` - Update an app's name or API-key credentials.
+	* `disconnect_app` - Remove an app (and revoke its upstream OAuth token).
+	* `share_app` - Share an owned app with another user under an optional ceiling policy.
+	* `unshare_app` - Revoke an app share from a user.
+	* `link_app` - Attach an app to a session with an optional policy.
+	* `unlink_app` - Detach an app from a session.
+	* `link_login` - Link an additional sign-in provider to the current user.
+	* `unlink_login` - Unlink a sign-in provider from the current user.
+	* `list_logs` - Query proxied request audit logs.
 
 ## HTTP
 ```
