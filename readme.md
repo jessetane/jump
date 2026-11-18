@@ -2,16 +2,16 @@
 MCP proxy for HTTP APIs.
 
 ## Why
-Giving agents access to an API usually means installing or writing a bespoke MCP server per service, burning context on dozens of incomplete tool schemas and handing raw API keys or broad OAuth tokens straight to every client. Models already speak HTTP: `jump` turns any HTTP API into an MCP tool on the fly without wrapper code, holds the upstream credentials in one place, and lets you hand out revocable, policy-scoped access to trusted agents, untrusted agents, scripts, and teammates without ever exposing the underlying keys.
+Giving agents access to APIs usually means installing or writing bespoke scripts or MCP servers, burning context on dozens of incomplete tool schemas and embedding raw API keys or OAuth tokens. Models already speak HTTP: `jump` turns any HTTP API into an MCP tool on the fly without wrapper code, holds the upstream credentials in one place and lets you hand out revocable, policy-scoped access to trusted agents, untrusted agents, scripts and teammates without exposing underlying credentials.
 
 ## How
 
-* **Client sessions** - Sign in from an MCP client via OAuth (or a local bootstrap token), then mint revocable sessions for other agents and scripts.
+* **Client sessions** - Sign in from an MCP client via OAuth (or a local bootstrap token). Mint revocable / non-admin sessions for other agents and scripts.
 * **Upstream apps** - Each linked provider exposes one `<provider>_api` MCP tool:
 	* **OAuth** - Ships with [`google`](providers/google.js) and [`github`](providers/github.js); adding a new config in [`providers/`](providers) is trivial (patches welcome).
 	* **API keys** - Any HTTPS API at runtime using `Bearer`, `Basic`, or query-param credentials.
 * **Linking & sharing** - Link multiple apps to one session, fan one app across many sessions, or share apps with other users without exposing secrets.
-* **Request policies** - Attach ordered `allow`/`deny` rules matching HTTP method, origin, path, query, and body to any link or share.
+* **Request policies** - Attach ordered `allow`/`deny` rules matching HTTP method, origin, path, query and body to any link or share.
 
 ## Setup
 ```sh
@@ -23,7 +23,7 @@ $ cp .env.example .env
 
 For upstream OAuth providers (`google`, `github`, etc.), register `https://<host>/oauth/callback` as the redirect URI in the provider's developer console and set `<PROVIDER>_CLIENT_ID` and `<PROVIDER>_CLIENT_SECRET` in `.env`. If no OAuth providers are configured, `jump` bootstraps a `localhost` admin bearer token on first startup and prints it to stdout.
 
-`jump` binds to `127.0.0.1` by default and derives public URLs and client IPs from `Host` / `X-Forwarded-*` headers; in production, run it behind a trusted reverse proxy that sets and overwrites `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Forwarded-For`.
+`jump` binds to `127.0.0.1` by default and derives public URLs and client IPs from `Host` / `X-Forwarded-*` headers; in production, run it behind a trusted reverse proxy that sets and overwrites `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto` and `X-Forwarded-For`.
 
 ## Usage
 Point an OAuth-capable MCP client at `https://<host>/mcp` and sign in as an admin:
@@ -38,7 +38,7 @@ Point an OAuth-capable MCP client at `https://<host>/mcp` and sign in as an admi
 }
 ```
 
-From an admin session, use the `admin` tool to connect upstream apps, create scoped sessions, and attach policies:
+From an admin session, use the `admin` tool to connect upstream apps, create scoped sessions and attach policies:
 
 ```javascript
 // connect an OAuth provider (returns an interactive authorization URL)
@@ -106,8 +106,8 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 ### Tools
 
 * `<provider>_api({ url, method?, body?, headers?, account?, appId? })` - Proxies an HTTP request to a linked upstream app.
-* `admin({ action, ... })` - Manages sessions, apps, shares, links, logins, and usage logs (exposed on admin sessions):
-	* `whoami` - Current user, linked logins, session info, and linked apps.
+* `admin({ action, ... })` - Manages sessions, apps, shares, links, logins and usage logs (exposed on admin sessions):
+	* `whoami` - Current user, linked logins, session info and linked apps.
 	* `list_sessions` - List active sessions.
 	* `get_session` - Get a session and its linked apps and policies.
 	* `create_session` - Mint a new bearer session (and optionally link apps).
