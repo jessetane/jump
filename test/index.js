@@ -409,7 +409,7 @@ test('oauth code exchange flow', async () => {
 	const { session, app } = createTestSession({ account: 'test@example.com', name: 'Test User' })
 	const code = db.tokens.createAuthCode({
 		userId: session.userId,
-		sessionName: 'Test OAuth Session',
+		name: 'Test OAuth Session',
 		appIds: [app.id],
 		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
@@ -429,7 +429,7 @@ test('oauth code exchange flow', async () => {
 	assert.equal(mismatchData.error, 'invalid_grant')
 	const code2 = db.tokens.createAuthCode({
 		userId: session.userId,
-		sessionName: 'Test OAuth Session',
+		name: 'Test OAuth Session',
 		appIds: [app.id],
 		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
@@ -481,7 +481,7 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	const user = db.logins.resolveUser('google', 'refresh-flow@example.com')
 	const code = db.tokens.createAuthCode({
 		userId: user.id,
-		sessionName: 'Refresh User',
+		name: 'Refresh User',
 		admin: 1,
 		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
@@ -674,7 +674,7 @@ test('oauth refresh_token grant rotation, access_token expiration, and embedded 
 	const bearerStateToken = new URL(bearerConsentRes.headers.get('location')).searchParams.get('state')
 	const bearerState = db.tokens.getState(bearerStateToken)
 	assert.equal(bearerState.clientId, bearerRegData.client_id)
-	assert.equal(bearerState.sessionName, 'Embedded MCP Client', 'DCR client_id registered with client_name preserves client_name as sessionName')
+	assert.equal(bearerState.name, 'Embedded MCP Client', 'DCR client_id registered with client_name preserves client_name as name')
 	const origFetch = globalThis.fetch
 	globalThis.fetch = async (input, init) => {
 		const u = typeof input === 'string' ? input : input.url
@@ -966,7 +966,7 @@ test('oauth consent html page, post consent, callback login, and scanner-safe tw
 	const stateObj = db.tokens.getState(loginStateToken)
 	assert.equal(stateObj.mode, 'login')
 	assert.equal(stateObj.clientRedirectUri, 'https://chatgpt.com/callback')
-	assert.equal(stateObj.sessionName, 'Coding Agent')
+	assert.equal(stateObj.name, 'Coding Agent')
 	const origFetch = globalThis.fetch
 	globalThis.fetch = async (input, init) => {
 		const u = typeof input === 'string' ? input : input.url
@@ -1080,7 +1080,7 @@ test('direct browser authorize without redirect_uri', async () => {
 	assert.equal(consentRes.status, 302)
 	const loginStateToken = new URL(consentRes.headers.get('location')).searchParams.get('state')
 	const stateObj = db.tokens.getState(loginStateToken)
-	assert.equal(stateObj.sessionName, 'Browser Session')
+	assert.equal(stateObj.name, 'Browser Session')
 	const origFetch = globalThis.fetch
 	globalThis.fetch = async (input, init) => {
 		const u = typeof input === 'string' ? input : input.url
@@ -1190,7 +1190,7 @@ test('google provider connect screen and consent flow', async () => {
 	const stateRow = db.tokens.consumeState(stateParam)
 	assert.equal(stateRow.mode, 'connect')
 	assert.equal(stateRow.sessionId, session.id)
-	assert.equal(stateRow.sessionName, 'Custom Work Google')
+	assert.equal(stateRow.name, 'Custom Work Google')
 	assert.equal(stateRow.provider, 'google')
 	assert.equal(db.tokens.consumeState(stateParam), null, 'consumeState atomically deletes state on first consumption')
 })
@@ -2294,7 +2294,7 @@ test('admin verification flow (/oauth/verify) with connected app selection and J
 		scopes: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.readonly',
 		expiresAt: Date.now() + 3600000
 	})
-	const stateWithoutUser = db.tokens.createState({ mode: 'verify', sessionName: 'Missing User Session' })
+	const stateWithoutUser = db.tokens.createState({ mode: 'verify', name: 'Missing User Session' })
 	const invalidGetVerify = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify?code=${stateWithoutUser}`)
 	assert.equal(invalidGetVerify.status, 400, 'GET /oauth/verify must fail loud with 400 when state has no valid userId')
 	const invalidPostVerify = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
@@ -2315,7 +2315,7 @@ test('admin verification flow (/oauth/verify) with connected app selection and J
 	const verifyCode = db.tokens.createState({
 		mode: 'verify',
 		userId: existingUser.id,
-		sessionName: 'Admin Magic Session',
+		name: 'Admin Magic Session',
 		admin: 1,
 		clientRedirectUri: 'https://antigravity.google/oauth-callback',
 		clientState: 'magic-state-abc'
@@ -2474,7 +2474,7 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	const namedSetupState = db.tokens.getState(namedConnectUrl.searchParams.get('code'))
 	assert.equal(namedSetupState.mode, 'setup_connect')
 	assert.equal(namedSetupState.sessionId, adminSession.id)
-	assert.equal(namedSetupState.sessionName, 'Work Google')
+	assert.equal(namedSetupState.name, 'Work Google')
 	const reauthRes = await executeTool('admin', {
 		action: 'connect_app',
 		appId: googleApp.id
@@ -3341,12 +3341,12 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		assert.equal(db.logins.findUserByAccount('sharedhandle', 'github').id, crossProvLinker.id)
 		assert.equal(db.logins.findUserByAccount('sharedhandle', 'custom_idp').id, crossProvHolder.id)
 		ghMockLogin = 'jessetane'
-		const googleLoginState = db.tokens.createState({ mode: 'login', provider: 'google', sessionName: 'Google Key Login' })
+		const googleLoginState = db.tokens.createState({ mode: 'login', provider: 'google', name: 'Google Key Login' })
 		const googleLoginCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${googleLoginState}`, { redirect: 'manual' })
 		assert.equal(googleLoginCb.status, 302)
 		const googleVerifyCode = new URL(googleLoginCb.headers.get('location'), `http://127.0.0.1:${addr.port}`).searchParams.get('code')
 		assert.equal(db.tokens.getState(googleVerifyCode).userId, user.id)
-		const githubLoginState = db.tokens.createState({ mode: 'login', provider: 'github', sessionName: 'GitHub Key Login' })
+		const githubLoginState = db.tokens.createState({ mode: 'login', provider: 'github', name: 'GitHub Key Login' })
 		const githubLoginCb = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=gh-code&state=${githubLoginState}`, { redirect: 'manual' })
 		assert.equal(githubLoginCb.status, 302)
 		const githubVerifyCode = new URL(githubLoginCb.headers.get('location'), `http://127.0.0.1:${addr.port}`).searchParams.get('code')

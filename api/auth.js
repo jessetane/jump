@@ -380,7 +380,7 @@ async function connectApp (token, opts = {}) {
 			sessionId: session.id,
 			provider: providerDef.id,
 			reauthAppId: appId || null,
-			sessionName: cleanName,
+			name: cleanName,
 			ttl: 10 * 60 * 1000
 		})
 		return {

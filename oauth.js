@@ -349,14 +349,14 @@ function linkSessionApps (sessionId, userId, appIds = []) {
 	}
 }
 
-function completeLogin (req, res, { user, clientId, clientRedirectUri, clientState, codeChallenge, codeChallengeMethod, sessionName, admin, ip, appIds = [] }) {
+function completeLogin (req, res, { user, clientId, clientRedirectUri, clientState, codeChallenge, codeChallengeMethod, name: rawName, admin, ip, appIds = [] }) {
 	const ua = req.headers['user-agent'] || null
-	const name = sessionName || (admin ? 'Admin Session' : 'Default Session')
+	const name = rawName || (admin ? 'Admin Session' : 'Default Session')
 	const clientIp = ip || getClientIp(req)
 	if (clientRedirectUri) {
 		const authCode = db.tokens.createAuthCode({
 			userId: user.id,
-			sessionName: name,
+			name,
 			admin: admin ? 1 : 0,
 			ip: clientIp,
 			ua,
@@ -400,7 +400,7 @@ function redirectToVerifyOrComplete (req, res, base, opts) {
 		clientState: opts.clientState,
 		codeChallenge: opts.codeChallenge,
 		codeChallengeMethod: opts.codeChallengeMethod,
-		sessionName: opts.sessionName,
+		name: opts.name,
 		admin: opts.admin,
 		ip: opts.ip
 	})
@@ -448,7 +448,7 @@ async function handleAuthorizeConsent (req, res) {
 	const clientRedirectUri = query.redirect_uri || null
 	const clientState = query.state || null
 	const derivedName = deriveClientName(query.client_id, query.client_name)
-	const effectiveSessionName = sessionName || derivedName || null
+	const name = sessionName || derivedName || null
 	const ip = getClientIp(req)
 	const base = getBaseUrl(req)
 	if (!setupCode && localToken && !providerName) {
@@ -469,7 +469,7 @@ async function handleAuthorizeConsent (req, res) {
 			clientState,
 			codeChallenge,
 			codeChallengeMethod,
-			sessionName: effectiveSessionName,
+			name,
 			admin,
 			ip
 		})
@@ -520,7 +520,7 @@ async function handleAuthorizeConsent (req, res) {
 		clientState,
 		codeChallenge,
 		codeChallengeMethod,
-		sessionName: effectiveSessionName,
+		name,
 		admin,
 		sessionId: linkSession ? linkSession.id : null,
 		ip
@@ -593,7 +593,7 @@ async function handleVerify (req, res, query) {
 		clientState: state.clientState,
 		codeChallenge: state.codeChallenge,
 		codeChallengeMethod: state.codeChallengeMethod,
-		sessionName: state.sessionName,
+		name: state.name,
 		admin: state.admin,
 		ip: state.ip,
 		appIds: params.getAll('app_id')
@@ -655,8 +655,8 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 					if (rwIds.length > 0) resolvedParams.write = rwIds.join(',')
 				}
 			}
-		} else if (setup.sessionName && !resolvedParams.name && !resolvedParams.app_name) {
-			resolvedParams.name = setup.sessionName
+		} else if (setup.name && !resolvedParams.name && !resolvedParams.app_name) {
+			resolvedParams.name = setup.name
 		}
 	}
 	const initData = {
@@ -723,8 +723,8 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 			return
 		}
 	}
-	const rawAppName = params.get('app_name') || params.get('name') || setup.sessionName || ''
-	const sessionName = rawAppName ? String(rawAppName).trim() : null
+	const rawAppName = params.get('app_name') || params.get('name') || setup.name || ''
+	const name = rawAppName ? String(rawAppName).trim() : null
 	const base = getBaseUrl(req)
 	const callbackUrl = `${base}/oauth/callback`
 	const ip = getClientIp(req)
@@ -732,7 +732,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		mode: 'connect',
 		sessionId: session.id,
 		reauthAppId,
-		sessionName,
+		name,
 		provider: provider.id,
 		ip
 	})
@@ -813,7 +813,7 @@ async function handleCallback (req, res, query) {
 			clientState: oauthState.clientState,
 			codeChallenge: oauthState.codeChallenge,
 			codeChallengeMethod: oauthState.codeChallengeMethod,
-			sessionName: oauthState.sessionName,
+			name: oauthState.name,
 			admin: oauthState.admin,
 			ip: oauthState.ip
 		})
@@ -853,7 +853,7 @@ async function handleCallback (req, res, query) {
 		))
 		return
 	}
-	const appName = oauthState.sessionName || provider.name
+	const appName = oauthState.name || provider.name
 	const appToken = db.tokens.create({
 		userId: session.userId,
 		provider: provider.id,
@@ -995,7 +995,7 @@ async function handleToken (req, res) {
 		userId: user.id,
 		provider: 'self',
 		type: 'bearer',
-		name: authCode.sessionName || (authCode.admin ? 'Admin Session' : 'Default Session'),
+		name: authCode.name || (authCode.admin ? 'Admin Session' : 'Default Session'),
 		credentials: withRefresh ? { refreshToken: randomUUID() } : null,
 		expiresAt: withRefresh ? Date.now() + 3600 * 1000 : null,
 		admin: authCode.admin ? 1 : 0,

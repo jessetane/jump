@@ -533,7 +533,7 @@ function formatState (row) {
 		clientState: meta.clientState || null,
 		codeChallenge: meta.codeChallenge || null,
 		codeChallengeMethod: meta.codeChallengeMethod || null,
-		sessionName: tok.name,
+		name: tok.name,
 		admin: tok.admin,
 		reauthAppId: meta.reauthAppId || null,
 		sessionId: meta.sessionId || null,
@@ -552,7 +552,7 @@ function createState (opts = {}) {
 		clientState = null,
 		codeChallenge = null,
 		codeChallengeMethod = null,
-		sessionName = null,
+		name = null,
 		admin = 0,
 		reauthAppId = null,
 		sessionId = null,
@@ -567,7 +567,7 @@ function createState (opts = {}) {
 		userId,
 		provider: provider || 'self',
 		type: 'oauth_state',
-		name: sessionName,
+		name,
 		credentials: {
 			mode,
 			clientId,
@@ -600,7 +600,7 @@ function consumeState (state) {
 function createAuthCode (opts = {}) {
 	const {
 		userId,
-		sessionName = null,
+		name = null,
 		admin = 0,
 		ip = null,
 		ua = null,
@@ -616,7 +616,7 @@ function createAuthCode (opts = {}) {
 		userId,
 		provider: 'self',
 		type: 'oauth_code',
-		name: sessionName,
+		name,
 		credentials: {
 			appIds,
 			clientId,
@@ -641,7 +641,7 @@ function consumeAuthCode (code) {
 	return {
 		code: tok.id,
 		userId: tok.userId,
-		sessionName: tok.name,
+		name: tok.name,
 		admin: tok.admin,
 		ip: tok.ip,
 		ua: tok.ua,
