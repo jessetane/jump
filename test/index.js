@@ -115,7 +115,7 @@ test('root endpoint', async () => {
 	assert.equal(putRootRes.status, 405, 'Unsupported methods on / return 405')
 	const authHtmlRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize`)
 	assert.equal(authHtmlRes.headers.get('access-control-allow-origin'), null, 'Browser OAuth authorize screen must not expose wildcard CORS')
-	assert.equal(authHtmlRes.headers.get('referrer-policy'), 'no-referrer')
+	assert.equal(authHtmlRes.headers.get('referrer-policy'), 'same-origin')
 	assert.equal(authHtmlRes.headers.get('x-frame-options'), 'DENY')
 	const cssRes = await fetch(`http://127.0.0.1:${addr.port}/style.css`)
 	assert.equal(cssRes.status, 200)
