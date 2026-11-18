@@ -398,7 +398,7 @@ test('oauth state flow', async () => {
 		clientState: 'random-state',
 		ip: '127.0.0.1'
 	})
-	assert.ok(state)
+	assert.match(state, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 	const consumed = db.tokens.consumeState(state)
 	assert.equal(consumed.clientState, 'random-state')
 	assert.equal(consumed.clientRedirectUri, 'https://example.com/oauth/return')
@@ -413,7 +413,7 @@ test('oauth code exchange flow', async () => {
 		appIds: [app.id],
 		clientRedirectUri: 'https://chatgpt.com/callback'
 	})
-	assert.ok(code)
+	assert.match(code, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 	const addr = server.address()
 	const mismatchRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/token`, {
 		method: 'POST',
@@ -990,7 +990,7 @@ test('oauth consent html page, post consent, callback login, and scanner-safe tw
 	assert.equal(directUrl.hostname, 'chatgpt.com', 'User with 0 apps skips /oauth/verify and redirects directly to clientRedirectUri')
 	assert.equal(directUrl.searchParams.get('state'), 'client-state-123')
 	const code = directUrl.searchParams.get('code')
-	assert.ok(code)
+	assert.match(code, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 	const agentUser = db.logins.findUserByAccount('agent@example.com')
 	const unexchangedSessions = db.tokens.listByUserId(agentUser.id, { provider: 'self' })
 	assert.deepEqual(unexchangedSessions, [], 'No bearer session exists before /oauth/token exchange')
@@ -4948,7 +4948,7 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		const verifyLoc = new URL(adminConsentWithApp.headers.get('location'), `http://127.0.0.1:${addr.port}`)
 		assert.equal(verifyLoc.pathname, '/oauth/verify')
 		const code = verifyLoc.searchParams.get('code')
-		assert.ok(code)
+		assert.match(code, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 		const verifyPostRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/verify`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },

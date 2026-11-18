@@ -1,7 +1,7 @@
 import { sqlite } from './index.js'
 import { userAccountSql } from './users.js'
 import { parseAccountSpec } from '../util.js'
-import { randomUUID, randomBytes } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 
 export {
 	init,
@@ -564,7 +564,7 @@ function createState (opts = {}) {
 		ip = null,
 		ttl = 15 * 60 * 1000
 	} = opts
-	const state = randomBytes(24).toString('base64url')
+	const state = randomUUID()
 	const expiresAt = Date.now() + ttl
 	create({
 		id: state,
@@ -616,7 +616,7 @@ function createAuthCode (opts = {}) {
 		codeChallenge = null,
 		codeChallengeMethod = null
 	} = opts
-	const code = randomBytes(24).toString('base64url')
+	const code = randomUUID()
 	create({
 		id: code,
 		userId,
