@@ -306,6 +306,7 @@ async function handleAuthorize (req, res, query) {
 	}
 	let linkMode = false
 	let linkAccount = null
+	let linkLogins = null
 	let mergeMode = false
 	let resolvedParams = query
 	if (query.code !== undefined) {
@@ -315,14 +316,25 @@ async function handleAuthorize (req, res, query) {
 			sendText(res, 'Access denied: invalid or expired setup code.', 403)
 			return
 		}
-		if (!enforceSso(res, () => assertSsoLink(db.logins.listByUserId(session.userId), setup.provider))) return
+		linkLogins = db.logins.listByUserId(session.userId)
+		if (setup.provider && !enforceSso(res, () => assertSsoLink(linkLogins, setup.provider))) return
 		linkMode = true
 		linkAccount = db.logins.getAccountByUserId(session.userId)
 		mergeMode = Boolean(setup.merge)
 		resolvedParams = { ...query, ...(setup.provider && { provider: setup.provider }) }
 	}
 	const clientName = deriveClientName(query.client_id, query.client_name)
-	const authProviders = listAuthProviders().map(p => ({ id: p.id, name: p.name }))
+	let authProviders = listAuthProviders().map(p => ({ id: p.id, name: p.name }))
+	if (linkMode && !resolvedParams.provider && linkLogins) {
+		authProviders = authProviders.filter(p => {
+			try {
+				assertSsoLink(linkLogins, p.id)
+				return true
+			} catch {
+				return false
+			}
+		})
+	}
 	const initData = {
 		params: resolvedParams,
 		providers: authProviders,

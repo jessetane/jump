@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { getProvider, requireAuthProvider } from '../providers/index.js'
+import { getProvider, listAuthProviders, requireAuthProvider } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
 import { validateBaseUrl, parseAccountSpec, requireBoolean } from '../util.js'
@@ -471,18 +471,23 @@ async function unlinkApp (token, opts = {}) {
 async function linkLogin (token, opts = {}) {
 	const { session, appUrl } = requireAdmin(token, opts, 'Access denied: login administration requires admin privileges')
 	const { provider, merge } = opts
-	if (!provider || typeof provider !== 'string' || !provider.trim()) {
-		const error = new Error('OAuth provider is required')
+	const cleanProvider = optionalString(provider, 'provider')
+	const shouldMerge = requireBoolean(merge, 'merge', false)
+	const existingLogins = db.logins.listByUserId(session.userId)
+	let resolvedProvider = null
+	if (cleanProvider) {
+		const providerDef = requireAuthProvider(cleanProvider)
+		assertSsoLink(existingLogins, providerDef.id)
+		resolvedProvider = providerDef.id
+	} else if (listAuthProviders().length === 0) {
+		const error = new Error('No OAuth sign-in providers are configured')
 		error.status = 400
 		throw error
 	}
-	const shouldMerge = requireBoolean(merge, 'merge', false)
-	const providerDef = requireAuthProvider(provider)
-	assertSsoLink(db.logins.listByUserId(session.userId), providerDef.id)
 	const setupCode = db.tokens.createState({
 		mode: 'setup_link',
 		sessionId: session.id,
-		provider: providerDef.id,
+		provider: resolvedProvider,
 		merge: shouldMerge,
 		ttl: 10 * 60 * 1000
 	})

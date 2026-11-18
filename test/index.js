@@ -2845,11 +2845,21 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	}, workerSession.token)
 	assert.equal(nonAdminUnlinkRes.isError, true)
 	assert.match(nonAdminUnlinkRes.content[0].text, /requires admin privileges/)
-	const missingProviderLink = await executeTool('admin', {
+	const omittedProviderLink = await executeTool('admin', {
 		action: 'link_login'
+	}, adminSession.token, `http://127.0.0.1:${addr.port}`)
+	assert.equal(omittedProviderLink.isError, undefined, 'Omitting provider on link_login succeeds and lets user pick in browser')
+	const omittedLinkData = JSON.parse(omittedProviderLink.content[0].text)
+	const omittedCode = new URL(omittedLinkData.connectUrl).searchParams.get('code')
+	assert.equal(db.tokens.getState(omittedCode).provider, null)
+	const omittedGoogleHtml = await (await fetch(omittedLinkData.connectUrl)).text()
+	assert.match(omittedGoogleHtml, /"id":"google"/)
+	const nonStringProviderLink = await executeTool('admin', {
+		action: 'link_login',
+		provider: 123
 	}, adminSession.token)
-	assert.equal(missingProviderLink.isError, true)
-	assert.match(missingProviderLink.content[0].text, /OAuth provider is required/)
+	assert.equal(nonStringProviderLink.isError, true)
+	assert.match(nonStringProviderLink.content[0].text, /provider must be a string/)
 	const invalidProviderRes = await executeTool('admin', {
 		action: 'link_login',
 		provider: 'stripe'
@@ -2898,6 +2908,9 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	assert.match(unconfiguredConsentData.error_description, /Invalid or unsupported OAuth provider: github/)
 	process.env.GITHUB_CLIENT_ID = 'gh-test-client-id'
 	process.env.GITHUB_CLIENT_SECRET = 'gh-test-client-secret'
+	const bothProvidersHtml = await (await fetch(omittedLinkData.connectUrl)).text()
+	assert.match(bothProvidersHtml, /"id":"google"/)
+	assert.match(bothProvidersHtml, /"id":"github"/)
 	const expiredAdminSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
