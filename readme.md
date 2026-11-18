@@ -23,7 +23,7 @@ For upstream OAuth providers (`google`, `github`, etc.), register `https://<host
 
 Set `SSO_DOMAINS=domain:provider[,domain:provider:strict]` to pin email domains to an authoritative OAuth provider (and optionally lock outbound sharing from that domain with `:strict`).
 
-`jump` binds to `::1` by default and derives public URLs and client IPs from `Host` / `X-Forwarded-*` headers; in production, run it behind a trusted reverse proxy that sets and overwrites `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Forwarded-For`.
+`jump` binds to `127.0.0.1` by default and derives public URLs and client IPs from `Host` / `X-Forwarded-*` headers; in production, run it behind a trusted reverse proxy that sets and overwrites `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Forwarded-For`.
 
 ## Usage
 Point an OAuth-capable MCP client at `https://<host>/mcp` and sign in as an admin:

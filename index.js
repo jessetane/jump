@@ -14,7 +14,7 @@ export { server, bootstrapLocalAdmin }
 
 const INDEX_HTML = fs.readFileSync(new URL('./public/index.html', import.meta.url), 'utf8')
 const STYLE_CSS = fs.readFileSync(new URL('./public/style.css', import.meta.url), 'utf8')
-const host = process.env.HOST || '::1'
+const host = process.env.HOST || '127.0.0.1'
 const port = process.env.PORT || '8080'
 const corsOrigin = process.env.CORS_ORIGIN || '*'
 
