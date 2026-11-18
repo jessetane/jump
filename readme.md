@@ -6,10 +6,11 @@ Giving agents access to an API usually means installing or writing a bespoke MCP
 
 ## How
 
-* Connect built-in OAuth providers (`google`, `github`) or any HTTPS API (`Bearer`, `Basic`, or `?key=val` query auth) at runtime to expose a single `<provider>_api` MCP tool and matching `/api/:provider/*` HTTP proxy.
-* Sessions are decoupled from upstream credentials: link multiple accounts (`work`, `personal`) to one session, fan one account out across many sessions, or share an app with another user (`share_app`) without sharing the secret.
-* Ordered `allow`/`deny` policies on any link or share filter requests by HTTP method, origin, URL path glob, query parameters, and request body (`json` or `form` field maps, raw globs, or `null` for empty bodies).
-* Built-in OAuth 2.1 + PKCE server for MCP clients (with optional `SSO_DOMAINS` pinning), falling back to a local bootstrap bearer token when run without OAuth providers.
+* **Client sessions**: Sign in via OAuth 2.1 + PKCE (using an identity-only Google or GitHub check, or a local bootstrap token when run standalone) to mint revocable `jump` bearer sessions. One session can link multiple accounts per provider, one account can fan out across many sessions, and apps can be shared with other users (`share_app`) without sharing the secret.
+* **Upstream apps**: Each linked provider exposes a single `<provider>_api` MCP tool and matching `/api/:provider/*` HTTP proxy (selectable via `account` when multiple accounts are linked):
+	* **OAuth** - Built-in providers (`google`, `github`) with granular read/write service scopes and automatic token refresh.
+	* **API keys** - Any HTTPS API at runtime using `Bearer`, `Basic` (`user:pass`), or query-param (`?key=val`) credentials.
+* **Request policies**: Ordered `allow`/`deny` rules on any session link or shared app filter requests by HTTP method, origin, URL path glob, query parameters, and request body (`json` or `form` field maps, raw globs, or `null` for empty bodies).
 
 ## Setup
 ```sh
@@ -20,8 +21,6 @@ $ cp .env.example .env
 ```
 
 For upstream OAuth providers (`google`, `github`, etc.), register `https://<host>/oauth/callback` as the redirect URI in the provider's developer console and set `<PROVIDER>_CLIENT_ID` and `<PROVIDER>_CLIENT_SECRET` in `.env`. If no OAuth providers are configured, `jump` bootstraps a `localhost` admin bearer token on first startup and prints it to stdout.
-
-Set `SSO_DOMAINS=domain:provider[,domain:provider:strict]` to pin email domains to an authoritative OAuth provider (and optionally lock outbound sharing from that domain with `:strict`).
 
 `jump` binds to `127.0.0.1` by default and derives public URLs and client IPs from `Host` / `X-Forwarded-*` headers; in production, run it behind a trusted reverse proxy that sets and overwrites `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Forwarded-For`.
 
