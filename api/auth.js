@@ -571,51 +571,33 @@ async function shareApp (token, opts = {}) {
 		requireAuthProvider(effectiveProvider)
 	}
 	const recipient = db.logins.findUserByAccount(cleanAccount, effectiveProvider)
-	if (recipient) {
-		if (recipient.id === session.userId) {
-			const error = new Error('Cannot share an app with yourself')
-			error.status = 400
-			throw error
-		}
-		const share = db.tokens.upsertShare({
-			userId: recipient.id,
-			account: cleanAccount,
-			authProvider: effectiveProvider,
-			appId: targetApp.id,
-			provider: targetApp.provider,
-			policy: policyCheck.policy
-		})
-		const resolvedProvider = share.credentials?.authProvider || effectiveProvider
-		return {
-			shared: true,
-			shareId: share.id,
-			appId: targetApp.id,
-			userId: recipient.id,
-			account: cleanAccount,
-			...(resolvedProvider ? { provider: resolvedProvider } : {}),
-			policy: policyCheck.policy
-		}
+	if (recipient && recipient.id === session.userId) {
+		const error = new Error('Cannot share an app with yourself')
+		error.status = 400
+		throw error
 	}
-	if (!effectiveProvider && !cleanAccount.includes('@')) {
+	if (!recipient && !effectiveProvider && !cleanAccount.includes('@')) {
 		const error = new Error(`Provider is required when sharing with bare account handle "${cleanAccount}" (e.g. provider: "github" or "github:${cleanAccount}")`)
 		error.status = 400
 		throw error
 	}
+	const userId = recipient ? recipient.id : null
 	const share = db.tokens.upsertShare({
-		userId: null,
+		userId,
 		account: cleanAccount,
 		authProvider: effectiveProvider,
 		appId: targetApp.id,
 		provider: targetApp.provider,
 		policy: policyCheck.policy
 	})
+	const resolvedProvider = share.credentials?.authProvider || effectiveProvider
 	return {
 		shared: true,
 		shareId: share.id,
 		appId: targetApp.id,
-		userId: null,
+		userId,
 		account: cleanAccount,
-		...(effectiveProvider ? { provider: effectiveProvider } : {}),
+		...(resolvedProvider ? { provider: resolvedProvider } : {}),
 		policy: policyCheck.policy
 	}
 }
