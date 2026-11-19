@@ -2,7 +2,7 @@ import * as db from '../db/index.js'
 import { getProvider, listAuthProviders, requireAuthProvider } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
-import { validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
+import { HOP_BY_HOP_HEADERS, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
 
 export {
 	whoami,
@@ -328,18 +328,10 @@ function requireValidBaseUrl (rawBase) {
 }
 
 const ALLOWED_CREDENTIAL_KEYS = new Set(['bearer', 'basic', 'headers', 'query'])
-const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
 const DISALLOWED_CREDENTIAL_HEADERS = new Set([
-	'connection',
-	'keep-alive',
-	'transfer-encoding',
-	'te',
-	'trailer',
-	'upgrade',
-	'content-length',
+	...HOP_BY_HOP_HEADERS,
 	'host',
-	'cookie',
-	'__proto__'
+	'cookie'
 ])
 
 function badRequest (message) {
@@ -348,22 +340,22 @@ function badRequest (message) {
 	return error
 }
 
-function isValidHeaderValue (val) {
-	if (typeof val !== 'string' || !val.trim()) return false
-	for (let i = 0; i < val.length; i++) {
-		const c = val.charCodeAt(i)
-		if ((c < 0x20 && c !== 0x09) || c === 0x7f || c > 0xff) return false
+function assertHeaderValue (val, label) {
+	if (typeof val !== 'string' || !val.trim() || /[\r\n]/.test(val)) {
+		throw badRequest(`${label} must be a valid non-empty HTTP header value`)
 	}
-	return true
+	try {
+		new Headers().set('x-check', val)
+	} catch {
+		throw badRequest(`${label} contains invalid HTTP header characters`)
+	}
 }
 
 function normalizeBearerToken (raw, label) {
 	if (typeof raw !== 'string' || !raw.trim()) {
 		throw badRequest(`${label} must be a non-empty string`)
 	}
-	if (!isValidHeaderValue(raw)) {
-		throw badRequest(`${label} contains invalid HTTP header characters`)
-	}
+	assertHeaderValue(raw, label)
 	const trimmed = raw.trim()
 	if (/^Bearer(?:[ \t]+|$)/i.test(trimmed)) {
 		const rest = trimmed.replace(/^Bearer/i, '').trim()
@@ -381,17 +373,16 @@ function normalizeCredentials (raw) {
 	if (!isPlainObject(raw)) {
 		throw badRequest('credentials must be a non-empty string or object')
 	}
-	const keys = Object.keys(raw)
-	for (const key of keys) {
+	for (const key of Object.keys(raw)) {
 		if (!ALLOWED_CREDENTIAL_KEYS.has(key)) {
 			throw badRequest(`Unknown credentials field "${key}"`)
 		}
 	}
-	const headers = Object.create(null)
+	const headers = new Headers()
 	let authSource = null
 	if (raw.bearer !== undefined) {
 		const token = normalizeBearerToken(raw.bearer, 'credentials.bearer')
-		headers.authorization = `Bearer ${token}`
+		headers.set('authorization', `Bearer ${token}`)
 		authSource = 'bearer'
 	}
 	if (raw.basic !== undefined) {
@@ -408,7 +399,7 @@ function normalizeCredentials (raw) {
 		if (authSource) {
 			throw badRequest('Conflicting Authorization credentials: specify only one of bearer, basic, or headers.authorization')
 		}
-		headers.authorization = `Basic ${Buffer.from(cleanBasic).toString('base64')}`
+		headers.set('authorization', `Basic ${Buffer.from(cleanBasic).toString('base64')}`)
 		authSource = 'basic'
 	}
 	if (raw.headers !== undefined) {
@@ -417,16 +408,18 @@ function normalizeCredentials (raw) {
 		}
 		for (const [rawName, val] of Object.entries(raw.headers)) {
 			const name = rawName.toLowerCase()
-			if (!HEADER_NAME_RE.test(name)) {
-				throw badRequest(`Invalid HTTP header name in credentials.headers: "${rawName}"`)
-			}
 			if (DISALLOWED_CREDENTIAL_HEADERS.has(name)) {
 				throw badRequest(`Forbidden header in credentials.headers: "${name}"`)
 			}
-			if (!isValidHeaderValue(val)) {
-				throw badRequest(`credentials.headers["${rawName}"] must be a valid non-empty HTTP header value`)
+			assertHeaderValue(val, `credentials.headers["${rawName}"]`)
+			let alreadySet = false
+			try {
+				alreadySet = headers.has(rawName)
+				if (!alreadySet) headers.set(rawName, val)
+			} catch {
+				throw badRequest(`Invalid HTTP header name in credentials.headers: "${rawName}"`)
 			}
-			if (Object.hasOwn(headers, name)) {
+			if (alreadySet) {
 				if (name === 'authorization' && authSource !== 'headers.authorization') {
 					throw badRequest('Conflicting Authorization credentials: specify only one of bearer, basic, or headers.authorization')
 				}
@@ -435,10 +428,9 @@ function normalizeCredentials (raw) {
 			if (name === 'authorization') {
 				authSource = 'headers.authorization'
 			}
-			headers[name] = val.trim()
 		}
 	}
-	const query = Object.create(null)
+	const query = {}
 	if (raw.query !== undefined) {
 		if (!isPlainObject(raw.query) || Object.keys(raw.query).length === 0) {
 			throw badRequest('credentials.query must be a non-empty object of parameter names to string values')
@@ -463,14 +455,15 @@ function normalizeCredentials (raw) {
 			query[param] = val
 		}
 	}
-	const hasHeaders = Object.keys(headers).length > 0
+	const headerMap = Object.fromEntries(headers)
+	const hasHeaders = Object.keys(headerMap).length > 0
 	const hasQuery = Object.keys(query).length > 0
 	if (!hasHeaders && !hasQuery) {
 		throw badRequest('credentials must specify at least one of bearer, basic, headers, or query')
 	}
 	return {
-		...(hasHeaders && { headers: { ...headers } }),
-		...(hasQuery && { query: { ...query } })
+		...(hasHeaders && { headers: headerMap }),
+		...(hasQuery && { query })
 	}
 }
 
@@ -679,14 +672,8 @@ async function updateApp (token, opts = {}) {
 			const existingCreds = targetApp.credentials || {}
 			const { headers: _h, query: _q, ...metaCreds } = existingCreds
 			updatedCreds = {
-				...metaCreds,
-				...(normalizedAuth !== undefined
-					? normalizedAuth
-					: {
-						...(existingCreds.headers ? { headers: existingCreds.headers } : {}),
-						...(existingCreds.query ? { query: existingCreds.query } : {})
-					}),
-				...(normalizedBaseUrl !== undefined ? { baseUrl: normalizedBaseUrl } : {})
+				...(normalizedAuth !== undefined ? { ...metaCreds, ...normalizedAuth } : existingCreds),
+				...(normalizedBaseUrl !== undefined && { baseUrl: normalizedBaseUrl })
 			}
 			if (cleanAccount !== undefined) {
 				if (cleanAccount) updatedCreds.account = cleanAccount

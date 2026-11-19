@@ -1,19 +1,9 @@
 import * as api from './api/index.js'
-import { getRawBody, getBody, getBaseUrl, sendJson, sendText } from './util.js'
+import { HOP_BY_HOP_HEADERS, getRawBody, getBody, getBaseUrl, sendJson, sendText } from './util.js'
 
 export {
 	handleRest
 }
-
-const HOP_BY_HOP_HEADERS = [
-	'connection',
-	'keep-alive',
-	'transfer-encoding',
-	'te',
-	'trailer',
-	'upgrade',
-	'content-length'
-]
 
 const STRIPPED_REQUEST_HEADERS = new Set([
 	...HOP_BY_HOP_HEADERS,

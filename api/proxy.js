@@ -43,12 +43,16 @@ async function readResponseBody (res, maxBytes) {
 }
 
 function stripQueryAuth (parsed, queryEntries) {
+	if (queryEntries.length === 0) return false
 	const secretKeysLower = new Set(queryEntries.map(([k]) => k.toLowerCase()))
+	let removed = false
 	for (const existingKey of Array.from(parsed.searchParams.keys())) {
 		if (secretKeysLower.has(existingKey.toLowerCase())) {
 			parsed.searchParams.delete(existingKey)
+			removed = true
 		}
 	}
+	return removed
 }
 
 function stripLocationAuth (rawLocation, baseUrl, queryEntries) {
@@ -61,36 +65,32 @@ function stripLocationAuth (rawLocation, baseUrl, queryEntries) {
 		err.status = 502
 		throw err
 	}
-	const before = parsed.toString()
-	stripQueryAuth(parsed, queryEntries)
-	const after = parsed.toString()
-	if (after === before) return rawLocation
+	if (!stripQueryAuth(parsed, queryEntries)) return rawLocation
 	const trimmed = rawLocation.trim()
-	if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed)) return after
+	if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed)) return parsed.toString()
 	if (trimmed.startsWith('//')) return `//${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`
 	return `${parsed.pathname}${parsed.search}${parsed.hash}`
 }
 
-function attachAuth (targetUrl, baseHeaders, authHeaders, queryEntries) {
-	const hopHeaders = Object.assign(Object.create(null), baseHeaders)
+function attachAuth (hopUrl, baseHeaders, authHeaders, queryEntries) {
+	const hopHeaders = { ...baseHeaders }
 	delete hopHeaders.authorization
 	delete hopHeaders.cookie
 	for (const [k, v] of authHeaders) {
 		hopHeaders[k] = v
 	}
 	if (queryEntries.length === 0) {
-		return { url: targetUrl, headers: hopHeaders }
+		return { url: hopUrl.toString(), headers: hopHeaders }
 	}
-	const parsed = new URL(targetUrl)
-	stripQueryAuth(parsed, queryEntries)
+	stripQueryAuth(hopUrl, queryEntries)
 	for (const [k, v] of queryEntries) {
-		parsed.searchParams.append(k, v)
+		hopUrl.searchParams.append(k, v)
 	}
-	return { url: parsed.toString(), headers: hopHeaders }
+	return { url: hopUrl.toString(), headers: hopHeaders }
 }
 
 async function executeUpstream ({ credentials, url, method = 'GET', body, headers = {}, raw = false, onStatus, onSameOriginRedirect }) {
-	const baseHeaders = Object.create(null)
+	const baseHeaders = {}
 	if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
 		for (const [k, v] of Object.entries(headers)) {
 			if (v !== undefined && v !== null) {
@@ -139,11 +139,11 @@ async function executeUpstream ({ credentials, url, method = 'GET', body, header
 		await assertUpstreamHost(hopUrl.hostname)
 		const isInitialOrigin = hopUrl.origin === initialOrigin
 		const hopReq = isInitialOrigin
-			? attachAuth(curUrl, baseHeaders, authHeaders, queryEntries)
+			? attachAuth(hopUrl, baseHeaders, authHeaders, queryEntries)
 			: { url: curUrl, headers: baseHeaders }
 		res = await fetch(hopReq.url, {
 			method: curMethod,
-			headers: Object.entries(hopReq.headers),
+			headers: hopReq.headers,
 			...(curBody !== undefined && { body: curBody }),
 			redirect: 'manual',
 			signal
@@ -376,9 +376,9 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 		}
 		checkTargetPolicy(resolvedUrl, normalizedMethod, body, contentType)
 		allowed = true
-		let freshInfo = null
+		let resolvedCreds = null
 		try {
-			freshInfo = await provider.getFreshToken(upstreamApp)
+			resolvedCreds = await provider.resolveCredentials(upstreamApp)
 		} catch (err) {
 			const hint = targetLink.app?.type === 'share'
 				? `Ask the app owner (${targetLink.app.sharedBy || 'admin'}) to re-authenticate.`
@@ -389,14 +389,14 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 			error.status = 401
 			throw error
 		}
-		if (!freshInfo?.headers && !freshInfo?.query) {
+		if (!resolvedCreds?.headers && !resolvedCreds?.query) {
 			const err = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
 			err.status = 401
 			throw err
 		}
 		let upstreamStatus = 200
 		const result = await executeUpstream({
-			credentials: freshInfo,
+			credentials: resolvedCreds,
 			url: resolvedUrl,
 			method: normalizedMethod,
 			body,

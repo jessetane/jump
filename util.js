@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import net from 'node:net'
 
 export {
+	HOP_BY_HOP_HEADERS,
 	getRawBody,
 	getBody,
 	getBaseUrl,
@@ -21,6 +22,16 @@ export {
 	tightenFileMode,
 	requireBoolean
 }
+
+const HOP_BY_HOP_HEADERS = [
+	'connection',
+	'keep-alive',
+	'transfer-encoding',
+	'te',
+	'trailer',
+	'upgrade',
+	'content-length'
+]
 
 function serializeFormBody (body) {
 	const params = new URLSearchParams()

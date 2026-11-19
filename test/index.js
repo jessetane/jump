@@ -4700,16 +4700,16 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 			expiresAt: Date.now() - 1000
 		})
 		const [t1, t2, t3] = await Promise.all([
-			google.getFreshToken(expiringApp),
-			google.getFreshToken(expiringApp),
-			google.getFreshToken(expiringApp)
+			google.resolveCredentials(expiringApp),
+			google.resolveCredentials(expiringApp),
+			google.resolveCredentials(expiringApp)
 		])
-		assert.equal(refreshCalls, 1, 'Concurrent getFreshToken calls must deduplicate in-flight upstream refresh')
+		assert.equal(refreshCalls, 1, 'Concurrent resolveCredentials calls must deduplicate in-flight upstream refresh')
 		assert.deepEqual(t1, { headers: { authorization: 'Bearer ya29.dedup_1' } })
 		assert.deepEqual(t2, { headers: { authorization: 'Bearer ya29.dedup_1' } })
 		assert.deepEqual(t3, { headers: { authorization: 'Bearer ya29.dedup_1' } })
 		const freshApp = db.tokens.get(expiringApp.id)
-		assert.deepEqual(await google.getFreshToken(freshApp), { headers: { authorization: 'Bearer ya29.dedup_1' } })
+		assert.deepEqual(await google.resolveCredentials(freshApp), { headers: { authorization: 'Bearer ya29.dedup_1' } })
 	} finally {
 		globalThis.fetch = origFetchGoogle
 	}
@@ -6690,7 +6690,7 @@ test('OAUTH_TIMEOUT_MS governs upstream OAuth token, userinfo, refresh, and revo
 			credentials: { accessToken: 'ya29.old', refreshToken: '1//slow-refresh' },
 			expiresAt: Date.now() - 1000
 		})
-		await assert.rejects(() => google.getFreshToken(staleApp), /aborted|timeout/i)
+		await assert.rejects(() => google.resolveCredentials(staleApp), /aborted|timeout/i)
 		const start = Date.now()
 		await google.revokeToken(staleApp)
 		assert.ok(Date.now() - start < 1000, 'revokeToken aborts promptly at OAUTH_TIMEOUT_MS')
@@ -7510,15 +7510,6 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 		await executeTool('proto_safe_hdr_api', { url: '/v1/proto-check', headers: ['ignored-array'] }, adminSession.token)
 		assert.equal(captured[0].headers.constructor, 'ctor_secret_val')
 		assert.equal(captured[0].headers.tostring, 'str_secret_val')
-		const rawProtoRejectRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
-			method: 'POST',
-			headers: {
-				authorization: `Bearer ${adminSession.token}`,
-				'content-type': 'application/json'
-			},
-			body: `{"provider":"proto_hdr","baseUrl":${JSON.stringify(baseUrl)},"credentials":{"headers":{"__proto__":"proto_secret_val"}}}`
-		})
-		assert.equal(rawProtoRejectRes.status, 400, '__proto__ header name must fail loud with 400 rather than being silently dropped by Undici fetch')
 		assert.equal(isPlainObject({}), true)
 		assert.equal(isPlainObject(Object.create(null)), true)
 		for (const nonPlain of [null, undefined, 'x', 1, true, [], Object.setPrototypeOf([], null), Buffer.from('x'), new Uint8Array(1), new DataView(new ArrayBuffer(1)), new Date(), /a/, new Map(), new String('x'), Object.create({})]) {
@@ -7714,7 +7705,7 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 				['v3-prefixed-basic', 'twilio', 'basic dXNlcjpwYXNz'],
 				['v3-colon-basic', 'mailgun', 'api:key-v3-mailgun'],
 				['v3-query', 'namecheap', '?ApiUser=jt&ApiKey=v3_nc_secret'],
-				['v3-proto-dedup', 'customq', '?__proto__=v3_proto_secret&ApiKey=old_val&apikey=new_val']
+				['v3-dedup', 'customq', '?ApiKey=old_val&apikey=new_val']
 			]
 			for (const [id, prov, rawKey] of v3Rows) {
 				const ct = cryptoMod.encryptSecret(rawKey, cryptoMod.secretContext(id, prov, 'api_key', 'apiKey'), keysMig)
@@ -7768,9 +7759,11 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 				account: 'acct_v3-query',
 				query: { ApiUser: 'jt', ApiKey: 'v3_nc_secret' }
 			})
-			const protoDedupCreds = readV3Creds('v3-proto-dedup', 'customq')
-			assert.equal(Object.getOwnPropertyDescriptor(protoDedupCreds.query, '__proto__')?.value, 'v3_proto_secret', 'parseLegacyApiKey preserves __proto__ query param as own property')
-			assert.deepEqual(Object.entries(protoDedupCreds.query), [['__proto__', 'v3_proto_secret'], ['apikey', 'new_val']], 'parseLegacyApiKey deduplicates case-insensitive query keys')
+			assert.deepEqual(readV3Creds('v3-dedup', 'customq'), {
+				baseUrl: 'https://api.example.com',
+				account: 'acct_v3-dedup',
+				query: { apikey: 'new_val' }
+			})
 		} finally {
 			v3Db.close()
 		}

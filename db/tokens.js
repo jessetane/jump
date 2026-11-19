@@ -98,7 +98,7 @@ function parseLegacyApiKey (raw) {
 	if (!clean) return {}
 	if (clean.startsWith('?')) {
 		const params = new URLSearchParams(clean.slice(1))
-		const query = Object.create(null)
+		const query = {}
 		const seenLower = new Map()
 		for (const [k, v] of params.entries()) {
 			const param = k.trim()
@@ -108,7 +108,7 @@ function parseLegacyApiKey (raw) {
 			seenLower.set(lower, param)
 			query[param] = v
 		}
-		return Object.keys(query).length > 0 ? { query: { ...query } } : {}
+		return Object.keys(query).length > 0 ? { query } : {}
 	}
 	if (/^(?:Bearer|Basic)\s+/i.test(clean)) {
 		const isBasic = /^basic/i.test(clean)

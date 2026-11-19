@@ -278,16 +278,14 @@ function createProvider (config) {
 				}
 			}
 		}),
-		async getFreshToken (appToken) {
+		async resolveCredentials (appToken) {
 			if (!appToken) return null
 			const creds = appToken.credentials || {}
 			if (appToken.type === 'api_key') {
-				const headers = creds.headers && typeof creds.headers === 'object' ? creds.headers : null
-				const query = creds.query && typeof creds.query === 'object' ? creds.query : null
-				if (!headers && !query) return null
+				if (!creds.headers && !creds.query) return null
 				return {
-					...(headers && { headers }),
-					...(query && { query })
+					...(creds.headers && { headers: creds.headers }),
+					...(creds.query && { query: creds.query })
 				}
 			}
 			if (oauth && creds.refreshToken && (!appToken.expiresAt || Date.now() > appToken.expiresAt - 60000)) {
