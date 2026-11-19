@@ -126,8 +126,8 @@ function getKeys () {
 	return activeKeys
 }
 
-function secretContext (id, provider, type, field) {
-	return JSON.stringify([id, provider, type, field])
+function secretContext (id, provider, type) {
+	return JSON.stringify([id, provider, type])
 }
 
 function deriveSubkey (masterKey, salt, context) {
@@ -135,9 +135,8 @@ function deriveSubkey (masterKey, salt, context) {
 }
 
 function encryptSecret (plaintext, context, keys = getKeys()) {
-	if (plaintext === undefined || plaintext === null || plaintext === '') return plaintext
-	if (typeof plaintext !== 'string') {
-		throw new Error('encryptSecret requires a string plaintext')
+	if (typeof plaintext !== 'string' || !plaintext) {
+		throw new Error('encryptSecret requires a non-empty string plaintext')
 	}
 	const masterKey = keys[0]
 	const salt = randomBytes(SALT_BYTES)
@@ -184,6 +183,5 @@ function openSecret (value, context, keys = getKeys()) {
 }
 
 function decryptSecret (value, context, keys = getKeys()) {
-	if (value === undefined || value === null || value === '') return value
 	return openSecret(value, context, keys).plaintext
 }

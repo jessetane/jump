@@ -7012,8 +7012,8 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			credentials: { accessToken: 'ya29.ALWAYS_ON_ACCESS_445566', refreshToken: '1//ALWAYS_ON_REFRESH_778899', account: 'encryption-owner@example.com' }
 		})
 		const rawStripe = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(stripeApp.id).credentials)
-		assert.match(rawStripe.headers, /^[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]+$/, 'Ciphertext uses strict 4-part base64url format with no prefix or kid')
-		assert.match(rawStripe.query, /^[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]+$/, 'Encrypted query map uses strict 4-part base64url format')
+		assert.deepEqual(Object.keys(rawStripe).sort(), ['account', 'baseUrl', 'secret'], 'Only account, baseUrl, and single secret envelope exist at rest')
+		assert.match(rawStripe.secret, /^[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]+$/, 'Ciphertext uses strict 4-part base64url format with no prefix or kid')
 		assert.equal(rawStripe.baseUrl, 'https://api.stripe.com', 'Queryable metadata baseUrl stays plaintext for json_extract')
 		assert.equal(rawStripe.account, 'acct_canary', 'Queryable metadata account stays plaintext for json_extract')
 		assert.deepEqual(stripeApp.credentials.headers, { authorization: 'Bearer sk_live_ALWAYS_ON_CANARY_112233' })
@@ -7037,22 +7037,17 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 		assert.equal(whoamiStripe.headers, undefined, 'whoami formatSession/formatApp strips secret fields')
 		assert.equal(whoamiStripe.query, undefined, 'whoami formatSession/formatApp strips secret query fields')
 		assert.equal(whoamiStripe.credentials, undefined, 'whoami formatSession/formatApp never exposes raw credentials object')
-		assert.throws(() => {
-			db.tokens.create({
-				userId: encUser.id,
-				provider: 'google',
-				type: 'oauth',
-				credentials: { accessToken: 12345 }
-			})
-		}, /string plaintext/, 'Non-string secret fields fail loud instead of storing unencrypted')
-		assert.throws(() => {
-			db.tokens.create({
-				userId: encUser.id,
-				provider: 'stripe',
-				type: 'api_key',
-				credentials: { headers: 'not-an-object', baseUrl: 'https://api.stripe.com' }
-			})
-		}, /non-empty plain object/, 'Non-object headers secret map fails loud instead of storing unencrypted')
+		const futureFieldApp = db.tokens.create({
+			userId: encUser.id,
+			provider: 'future_prov',
+			type: 'oauth',
+			credentials: { accessToken: 'tok_1', customSecretField: 'fail_closed_canary_secret', account: 'future@example.com' }
+		})
+		const rawFuture = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(futureFieldApp.id).credentials)
+		assert.deepEqual(Object.keys(rawFuture).sort(), ['account', 'secret'], 'Unlisted credential properties are encrypted inside secret by default (fail-closed)')
+		assert.equal(db.tokens.get(futureFieldApp.id).credentials.customSecretField, 'fail_closed_canary_secret')
+		assert.throws(() => cryptoMod.encryptSecret(12345, cryptoMod.secretContext('x', 'stripe', 'api_key')), /non-empty string plaintext/)
+		assert.throws(() => cryptoMod.encryptSecret('', cryptoMod.secretContext('x', 'stripe', 'api_key')), /non-empty string plaintext/)
 		const writeA = db.tokens.create({
 			userId: encUser.id,
 			provider: 'stripe',
@@ -7065,34 +7060,33 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			type: 'api_key',
 			credentials: { headers: { authorization: 'Bearer sk_same_value' }, baseUrl: 'https://api.stripe.com' }
 		})
-		const ctA = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeA.id).credentials).headers
-		const ctB = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeB.id).credentials).headers
+		const ctA = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeA.id).credentials).secret
+		const ctB = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeB.id).credentials).secret
 		assert.notEqual(ctA, ctB, 'Identical secrets produce distinct ciphertexts per write')
-		const rawGoogle = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(googleApp.id).credentials)
 		assert.throws(() => {
-			cryptoMod.decryptSecret(rawGoogle.accessToken, cryptoMod.secretContext(googleApp.id, 'google', 'oauth', 'refreshToken'))
-		}, /unable to authenticate data/i, 'Field-level AAD rejects swapping accessToken and refreshToken')
-		assert.throws(() => {
-			cryptoMod.decryptSecret(rawStripe.headers, cryptoMod.secretContext(stripeApp.id, 'stripe', 'api_key', 'query'))
-		}, /unable to authenticate data/i, 'Field-level AAD rejects swapping headers and query')
-		assert.throws(() => {
-			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeB.id, 'stripe', 'api_key', 'headers'))
+			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeB.id, 'stripe', 'api_key'))
 		}, /unable to authenticate data/i, 'Row-level AAD rejects transplanting ciphertext across rows')
+		assert.throws(() => {
+			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeA.id, 'github', 'api_key'))
+		}, /unable to authenticate data/i, 'Provider-level AAD rejects changing provider')
+		assert.throws(() => {
+			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeA.id, 'stripe', 'oauth'))
+		}, /unable to authenticate data/i, 'Type-level AAD rejects changing token type')
 		assert.notEqual(
-			cryptoMod.secretContext('a:b', 'c', 'api_key', 'headers'),
-			cryptoMod.secretContext('a', 'b:c', 'api_key', 'headers'),
+			cryptoMod.secretContext('a:b', 'c', 'api_key'),
+			cryptoMod.secretContext('a', 'b:c', 'api_key'),
 			'JSON array AAD framing prevents colon delimiter collisions'
 		)
 		const ctParts = ctA.split(':')
 		const truncatedTag = `${ctParts[0]}:${ctParts[1]}:${ctParts[2].slice(0, 8)}:${ctParts[3]}`
 		assert.throws(() => {
-			cryptoMod.decryptSecret(truncatedTag, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'headers'))
+			cryptoMod.decryptSecret(truncatedTag, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key'))
 		}, /Malformed encrypted credential parameters/, 'Truncated GCM auth tags are rejected immediately')
 		assert.throws(() => {
-			cryptoMod.decryptSecret('not-four-parts', cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'headers'))
+			cryptoMod.decryptSecret('not-four-parts', cryptoMod.secretContext(writeA.id, 'stripe', 'api_key'))
 		}, /Malformed encrypted credential envelope/, 'Non-4-part envelopes are rejected immediately')
 		assert.throws(() => {
-			cryptoMod.decryptSecret(`${ctParts[0]}:${ctParts[1]}:${ctParts[2]}:`, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'headers'))
+			cryptoMod.decryptSecret(`${ctParts[0]}:${ctParts[1]}:${ctParts[2]}:`, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key'))
 		}, /Malformed encrypted credential parameters/, 'Empty ciphertext part is rejected immediately')
 		const scopedState = db.tokens.createState({ mode: 'setup_connect', provider: 'google', sessionId: 'sess-1' })
 		const scopedStateRow = db.sqlite.prepare('SELECT id, token FROM tokens WHERE token = ?').get(db.tokens.hashSecret(scopedState))
@@ -7178,13 +7172,13 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			runMigrate(diyDb)
 			assert.equal(fs.existsSync(`${diyPath}.key`), true, 'Empty ENCRYPTION_KEY="" from .env uses auto-generated <dbPath>.key')
 			const diyKeys1 = cryptoMod.getKeys()
-			const ctx = cryptoMod.secretContext('app-1', 'stripe', 'api_key', 'headers')
-			const ctUnderOld = cryptoMod.encryptSecret(JSON.stringify({ authorization: 'Bearer sk_diy_rotate_secret' }), ctx, diyKeys1)
+			const ctx = cryptoMod.secretContext('app-1', 'stripe', 'api_key')
+			const ctUnderOld = cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_diy_rotate_secret' } }), ctx, diyKeys1)
 			const nowIso = new Date().toISOString()
 			diyDb.prepare(`
 				INSERT INTO tokens (id, provider, type, credentials, created, updated)
 				VALUES ('app-1', 'stripe', 'api_key', ?, ?, ?)
-			`).run(JSON.stringify({ headers: ctUnderOld, baseUrl: 'https://api.stripe.com' }), nowIso, nowIso)
+			`).run(JSON.stringify({ secret: ctUnderOld, baseUrl: 'https://api.stripe.com' }), nowIso, nowIso)
 			diyDb.exec('PRAGMA wal_checkpoint(FULL);')
 			assert.equal(fs.readFileSync(diyPath).includes(ctUnderOld), true)
 			fs.renameSync(`${diyPath}.key`, `${diyPath}.key.old`)
@@ -7201,8 +7195,8 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			fs.chmodSync(`${diyPath}.key`, 0o400)
 			runMigrate(diyDb)
 			assert.equal(fs.statSync(`${diyPath}.key`).mode & 0o777, 0o400, 'Read-only 0400 key file is accepted without forcing chmod 0600')
-			const rotatedRaw = JSON.parse(diyDb.prepare("SELECT credentials FROM tokens WHERE id = 'app-1'").get().credentials).headers
-			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(rotatedRaw, ctx)), { authorization: 'Bearer sk_diy_rotate_secret' }, 'Rotated DIY DB decrypts cleanly after .key.old is deleted')
+			const rotatedRaw = JSON.parse(diyDb.prepare("SELECT credentials FROM tokens WHERE id = 'app-1'").get().credentials).secret
+			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(rotatedRaw, ctx)), { headers: { authorization: 'Bearer sk_diy_rotate_secret' } }, 'Rotated DIY DB decrypts cleanly after .key.old is deleted')
 			fs.chmodSync(`${diyPath}.key`, 0o600)
 			fs.rmSync(`${diyPath}.key`)
 			assert.throws(() => runMigrate(diyDb), /Missing encryption key file/, 'Encrypted DB fails loud if .key is missing without .key.old')
@@ -7224,20 +7218,20 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
 			runMigrate(tpmDb)
 			assert.equal(fs.existsSync(`${tpmDbPath}.key`), false, 'systemd jump.key mode never writes <dbPath>.key to disk')
-			const ctx = cryptoMod.secretContext('tpm-app-1', 'stripe', 'api_key', 'headers')
-			const tpmCt1 = cryptoMod.encryptSecret(JSON.stringify({ authorization: 'Bearer sk_tpm_sealed_secret' }), ctx)
+			const ctx = cryptoMod.secretContext('tpm-app-1', 'stripe', 'api_key')
+			const tpmCt1 = cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_tpm_sealed_secret' } }), ctx)
 			const nowIso = new Date().toISOString()
 			tpmDb.prepare(`
 				INSERT INTO tokens (id, provider, type, credentials, created, updated)
 				VALUES ('tpm-app-1', 'stripe', 'api_key', ?, ?, ?)
-			`).run(JSON.stringify({ headers: tpmCt1 }), nowIso, nowIso)
+			`).run(JSON.stringify({ secret: tpmCt1 }), nowIso, nowIso)
 			fs.renameSync(path.join(credDir, 'jump.key'), path.join(credDir, 'jump.key.old'))
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k2}\n`, { mode: 0o600 })
 			runMigrate(tpmDb)
 			fs.rmSync(path.join(credDir, 'jump.key.old'))
 			runMigrate(tpmDb)
-			const tpmRotatedCt = JSON.parse(tpmDb.prepare("SELECT credentials FROM tokens WHERE id = 'tpm-app-1'").get().credentials).headers
-			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(tpmRotatedCt, ctx)), { authorization: 'Bearer sk_tpm_sealed_secret' }, 'systemd jump.key + jump.key.old rotates cleanly onto new key')
+			const tpmRotatedCt = JSON.parse(tpmDb.prepare("SELECT credentials FROM tokens WHERE id = 'tpm-app-1'").get().credentials).secret
+			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(tpmRotatedCt, ctx)), { headers: { authorization: 'Bearer sk_tpm_sealed_secret' } }, 'systemd jump.key + jump.key.old rotates cleanly onto new key')
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
 			assert.throws(() => runMigrate(tpmDb), /unable to authenticate data/i, 'Booting with wrong systemd jump.key fails loud immediately at startup')
 		} finally {
@@ -7252,18 +7246,18 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			process.env.ENCRYPTION_KEY = k1
 			runMigrate(envDb)
 			assert.equal(fs.existsSync(`${envDbPath}.key`), false, 'ENCRYPTION_KEY mode never writes <dbPath>.key to disk')
-			const ctx = cryptoMod.secretContext('env-app-1', 'stripe', 'api_key', 'headers')
+			const ctx = cryptoMod.secretContext('env-app-1', 'stripe', 'api_key')
 			const nowIso = new Date().toISOString()
 			envDb.prepare(`
 				INSERT INTO tokens (id, provider, type, credentials, created, updated)
 				VALUES ('env-app-1', 'stripe', 'api_key', ?, ?, ?)
-			`).run(JSON.stringify({ headers: cryptoMod.encryptSecret(JSON.stringify({ authorization: 'Bearer sk_env_secret' }), ctx) }), nowIso, nowIso)
+			`).run(JSON.stringify({ secret: cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_env_secret' } }), ctx) }), nowIso, nowIso)
 			process.env.ENCRYPTION_KEY = `${k2},${k1}`
 			runMigrate(envDb)
 			process.env.ENCRYPTION_KEY = k2
 			runMigrate(envDb)
-			const envRotatedCt = JSON.parse(envDb.prepare("SELECT credentials FROM tokens WHERE id = 'env-app-1'").get().credentials).headers
-			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(envRotatedCt, ctx)), { authorization: 'Bearer sk_env_secret' }, 'ENCRYPTION_KEY=<new>,<old> rotates cleanly onto <new>')
+			const envRotatedCt = JSON.parse(envDb.prepare("SELECT credentials FROM tokens WHERE id = 'env-app-1'").get().credentials).secret
+			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(envRotatedCt, ctx)), { headers: { authorization: 'Bearer sk_env_secret' } }, 'ENCRYPTION_KEY=<new>,<old> rotates cleanly onto <new>')
 		} finally {
 			envDb.close()
 		}
@@ -7515,14 +7509,6 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 		for (const nonPlain of [null, undefined, 'x', 1, true, [], Object.setPrototypeOf([], null), Buffer.from('x'), new Uint8Array(1), new DataView(new ArrayBuffer(1)), new Date(), /a/, new Map(), new String('x'), Object.create({})]) {
 			assert.equal(isPlainObject(nonPlain), false)
 		}
-		assert.throws(() => {
-			db.tokens.create({
-				userId: owner.id,
-				provider: 'boxed_str',
-				type: 'api_key',
-				credentials: { headers: new String('bad'), baseUrl }
-			})
-		}, /non-empty plain object/, 'Boxed String object must be rejected by isPlainSecretMap')
 		const oauthForReauthErr = db.tokens.create({
 			userId: owner.id,
 			provider: 'google',
@@ -7708,7 +7694,7 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 				['v3-dedup', 'customq', '?ApiKey=old_val&apikey=new_val']
 			]
 			for (const [id, prov, rawKey] of v3Rows) {
-				const ct = cryptoMod.encryptSecret(rawKey, cryptoMod.secretContext(id, prov, 'api_key', 'apiKey'), keysMig)
+				const ct = cryptoMod.encryptSecret(rawKey, JSON.stringify([id, prov, 'api_key', 'apiKey']), keysMig)
 				v3Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
 					id,
 					prov,
@@ -7718,25 +7704,27 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 					nowIso
 				)
 			}
-			const oauthAccCt = cryptoMod.encryptSecret('ya29.v3_oauth', cryptoMod.secretContext('v3-oauth', 'google', 'oauth', 'accessToken'), keysMig)
+			const oauthAccCt = cryptoMod.encryptSecret('ya29.v3_oauth', JSON.stringify(['v3-oauth', 'google', 'oauth', 'accessToken']), keysMig)
+			const oauthRefCt = cryptoMod.encryptSecret('1//v3_refresh', JSON.stringify(['v3-oauth', 'google', 'oauth', 'refreshToken']), keysMig)
 			v3Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
 				'v3-oauth',
 				'google',
 				'oauth',
-				JSON.stringify({ accessToken: oauthAccCt, account: 'u@example.com' }),
+				JSON.stringify({ accessToken: oauthAccCt, refreshToken: oauthRefCt, account: 'u@example.com' }),
 				nowIso,
 				nowIso
 			)
 			runMigrate(v3Db)
 			assert.equal(v3Db.prepare('PRAGMA user_version').get().user_version, 4)
-			const readV3Creds = (id, prov) => {
+			const readV3Creds = (id, prov, type = 'api_key') => {
 				const raw = JSON.parse(v3Db.prepare('SELECT credentials FROM tokens WHERE id = ?').get(id).credentials)
 				assert.equal('apiKey' in raw, false, `Migrated row ${id} must delete legacy apiKey`)
+				assert.equal('accessToken' in raw, false, `Migrated row ${id} must move accessToken into secret`)
+				assert.equal('refreshToken' in raw, false, `Migrated row ${id} must move refreshToken into secret`)
+				const { secret, ...meta } = raw
 				return {
-					baseUrl: raw.baseUrl,
-					account: raw.account,
-					...(raw.headers && { headers: JSON.parse(cryptoMod.decryptSecret(raw.headers, cryptoMod.secretContext(id, prov, 'api_key', 'headers'), keysMig)) }),
-					...(raw.query && { query: JSON.parse(cryptoMod.decryptSecret(raw.query, cryptoMod.secretContext(id, prov, 'api_key', 'query'), keysMig)) })
+					...meta,
+					...(secret && JSON.parse(cryptoMod.decryptSecret(secret, cryptoMod.secretContext(id, prov, type), keysMig)))
 				}
 			}
 			assert.deepEqual(readV3Creds('v3-bearer', 'stripe'), {
@@ -7763,6 +7751,11 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 				baseUrl: 'https://api.example.com',
 				account: 'acct_v3-dedup',
 				query: { apikey: 'new_val' }
+			})
+			assert.deepEqual(readV3Creds('v3-oauth', 'google', 'oauth'), {
+				account: 'u@example.com',
+				accessToken: 'ya29.v3_oauth',
+				refreshToken: '1//v3_refresh'
 			})
 		} finally {
 			v3Db.close()
@@ -7797,14 +7790,14 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 			const rawV2Bearer = JSON.parse(v2Db.prepare("SELECT credentials FROM tokens WHERE id = 'v2-bearer'").get().credentials)
 			assert.equal('apiKey' in rawV2Bearer, false)
 			assert.deepEqual(
-				JSON.parse(cryptoMod.decryptSecret(rawV2Bearer.headers, cryptoMod.secretContext('v2-bearer', 'stripe', 'api_key', 'headers'), keysMig)),
-				{ authorization: `Bearer ${v2PlainSecret}` }
+				JSON.parse(cryptoMod.decryptSecret(rawV2Bearer.secret, cryptoMod.secretContext('v2-bearer', 'stripe', 'api_key'), keysMig)),
+				{ headers: { authorization: `Bearer ${v2PlainSecret}` } }
 			)
 			const rawV2Query = JSON.parse(v2Db.prepare("SELECT credentials FROM tokens WHERE id = 'v2-query'").get().credentials)
 			assert.equal('apiKey' in rawV2Query, false)
 			assert.deepEqual(
-				JSON.parse(cryptoMod.decryptSecret(rawV2Query.query, cryptoMod.secretContext('v2-query', 'namecheap', 'api_key', 'query'), keysMig)),
-				{ ApiKey: 'v2_q_canary_334455' }
+				JSON.parse(cryptoMod.decryptSecret(rawV2Query.secret, cryptoMod.secretContext('v2-query', 'namecheap', 'api_key'), keysMig)),
+				{ query: { ApiKey: 'v2_q_canary_334455' } }
 			)
 			for (const ext of ['', '-wal']) {
 				const f = `${v2Path}${ext}`

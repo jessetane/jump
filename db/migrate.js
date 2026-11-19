@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import * as users from './users.js'
-import { hashSecret, UPSTREAM_SECRET_FIELDS, UPSTREAM_OBJECT_SECRET_FIELDS, parseLegacyApiKey } from './tokens.js'
+import { hashSecret, encryptUpstreamCredentials, parseLegacyApiKey } from './tokens.js'
 import { loadKeys, secretContext, encryptSecret, openSecret, decryptSecret } from '../crypto.js'
 
 export {
@@ -9,6 +9,7 @@ export {
 
 const SCHEMA_VERSION = 4
 const ENCRYPTED_SCHEMA_VERSION = 3
+const LEGACY_V3_SECRET_FIELDS = ['accessToken', 'refreshToken', 'apiKey']
 
 function migrateUsersEmail (sqlite) {
 	const userCols = sqlite.prepare('PRAGMA table_info(users)').all()
@@ -102,7 +103,7 @@ function migrateSelfTokenHashes (sqlite) {
 	}
 }
 
-function migrateUpstreamEncryption (sqlite, keys) {
+function migrateUpstreamSecrets (sqlite, keys, fromVersion) {
 	sqlite.exec('BEGIN IMMEDIATE;')
 	try {
 		const rows = sqlite.prepare(`
@@ -113,68 +114,23 @@ function migrateUpstreamEncryption (sqlite, keys) {
 		const stmt = sqlite.prepare('UPDATE tokens SET credentials = ? WHERE id = ?')
 		let changedCount = 0
 		for (const row of rows) {
-			const creds = JSON.parse(row.credentials)
-			if (!creds || typeof creds !== 'object') continue
-			let rowChanged = false
-			if (row.type === 'api_key' && 'apiKey' in creds) {
-				const rawApiKey = creds.apiKey
-				delete creds.apiKey
-				const normalized = parseLegacyApiKey(rawApiKey)
-				Object.assign(creds, normalized)
-				rowChanged = true
-			}
-			for (const field of UPSTREAM_SECRET_FIELDS) {
-				const val = creds[field]
-				if (val === undefined || val === null || val === '') continue
-				creds[field] = encryptSecret(val, secretContext(row.id, row.provider, row.type, field), keys)
-				rowChanged = true
-			}
-			for (const field of UPSTREAM_OBJECT_SECRET_FIELDS) {
-				const val = creds[field]
-				if (val === undefined || val === null || val === '') continue
-				const serialized = typeof val === 'string' ? val : JSON.stringify(val)
-				creds[field] = encryptSecret(serialized, secretContext(row.id, row.provider, row.type, field), keys)
-				rowChanged = true
-			}
-			if (rowChanged) {
-				stmt.run(JSON.stringify(creds), row.id)
-				changedCount++
-			}
-		}
-		sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
-		sqlite.exec('COMMIT;')
-		return changedCount > 0
-	} catch (err) {
-		sqlite.exec('ROLLBACK;')
-		throw err
-	}
-}
-
-function migrateLegacyApiKeyCredentials (sqlite, keys) {
-	sqlite.exec('BEGIN IMMEDIATE;')
-	try {
-		const rows = sqlite.prepare(`
-			SELECT id, provider, type, credentials
-			FROM tokens
-			WHERE provider != 'self' AND type = 'api_key' AND credentials IS NOT NULL
-		`).all()
-		const stmt = sqlite.prepare('UPDATE tokens SET credentials = ? WHERE id = ?')
-		let changedCount = 0
-		for (const row of rows) {
-			const creds = JSON.parse(row.credentials)
-			if (!creds || typeof creds !== 'object' || !('apiKey' in creds)) continue
-			const encryptedApiKey = creds.apiKey
-			delete creds.apiKey
-			if (encryptedApiKey !== undefined && encryptedApiKey !== null && encryptedApiKey !== '') {
-				const rawApiKey = decryptSecret(encryptedApiKey, secretContext(row.id, row.provider, row.type, 'apiKey'), keys)
-				const normalized = parseLegacyApiKey(rawApiKey)
-				for (const field of UPSTREAM_OBJECT_SECRET_FIELDS) {
-					if (normalized[field]) {
-						creds[field] = encryptSecret(JSON.stringify(normalized[field]), secretContext(row.id, row.provider, row.type, field), keys)
+			const rawCreds = JSON.parse(row.credentials)
+			if (!rawCreds || typeof rawCreds !== 'object') continue
+			const creds = { ...rawCreds }
+			if (fromVersion === 3) {
+				for (const field of LEGACY_V3_SECRET_FIELDS) {
+					const val = creds[field]
+					if (val !== undefined && val !== null && val !== '') {
+						creds[field] = decryptSecret(val, JSON.stringify([row.id, row.provider, row.type, field]), keys)
 					}
 				}
 			}
-			stmt.run(JSON.stringify(creds), row.id)
+			if (row.type === 'api_key' && 'apiKey' in creds) {
+				const rawApiKey = creds.apiKey
+				delete creds.apiKey
+				Object.assign(creds, parseLegacyApiKey(rawApiKey))
+			}
+			stmt.run(JSON.stringify(encryptUpstreamCredentials(creds, row, keys)), row.id)
 			changedCount++
 		}
 		sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
@@ -192,23 +148,14 @@ function verifyAndRotateUpstreamEncryption (sqlite, keys) {
 		FROM tokens
 		WHERE provider != 'self' AND type IN ('oauth', 'api_key') AND credentials IS NOT NULL
 	`).all()
-	const allSecretFields = [...UPSTREAM_SECRET_FIELDS, ...UPSTREAM_OBJECT_SECRET_FIELDS]
 	const updates = []
 	for (const row of rows) {
 		const creds = JSON.parse(row.credentials)
-		if (!creds || typeof creds !== 'object') continue
-		let rowChanged = false
-		for (const field of allSecretFields) {
-			const val = creds[field]
-			if (val === undefined || val === null || val === '') continue
-			const context = secretContext(row.id, row.provider, row.type, field)
-			const { plaintext, keyIndex } = openSecret(val, context, keys)
-			if (keyIndex > 0) {
-				creds[field] = encryptSecret(plaintext, context, keys)
-				rowChanged = true
-			}
-		}
-		if (rowChanged) {
+		if (!creds?.secret) continue
+		const context = secretContext(row.id, row.provider, row.type)
+		const { plaintext, keyIndex } = openSecret(creds.secret, context, keys)
+		if (keyIndex > 0) {
+			creds.secret = encryptSecret(plaintext, context, keys)
 			updates.push({ id: row.id, credentials: JSON.stringify(creds) })
 		}
 	}
@@ -250,15 +197,10 @@ function migrate (sqlite) {
 	if (version < 2 && migrateSelfTokenHashes(sqlite)) {
 		dirty = true
 	}
-	if (version < 3) {
-		if (migrateUpstreamEncryption(sqlite, keys)) dirty = true
-	} else {
-		if (version < 4 && migrateLegacyApiKeyCredentials(sqlite, keys)) {
-			dirty = true
-		}
-		if (verifyAndRotateUpstreamEncryption(sqlite, keys)) {
-			dirty = true
-		}
+	if (version < 4) {
+		if (migrateUpstreamSecrets(sqlite, keys, version)) dirty = true
+	} else if (verifyAndRotateUpstreamEncryption(sqlite, keys)) {
+		dirty = true
 	}
 	if (dirty) {
 		vacuumDatabase(sqlite)

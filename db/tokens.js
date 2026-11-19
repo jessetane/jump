@@ -7,8 +7,7 @@ import { createHash, randomUUID } from 'node:crypto'
 export {
 	init,
 	hashSecret,
-	UPSTREAM_SECRET_FIELDS,
-	UPSTREAM_OBJECT_SECRET_FIELDS,
+	encryptUpstreamCredentials,
 	parseLegacyApiKey,
 	create,
 	get,
@@ -90,9 +89,6 @@ const UPSTREAM_JOIN = `
 	LEFT JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
 `
 
-const UPSTREAM_SECRET_FIELDS = ['accessToken', 'refreshToken']
-const UPSTREAM_OBJECT_SECRET_FIELDS = ['headers', 'query']
-
 function parseLegacyApiKey (raw) {
 	const clean = typeof raw === 'string' ? raw.trim() : ''
 	if (!clean) return {}
@@ -134,45 +130,23 @@ function isEncryptedTokenRow (provider, type) {
 	return provider !== 'self' && (type === 'oauth' || type === 'api_key')
 }
 
-function isPlainSecretMap (val) {
-	if (!isPlainObject(val)) return false
-	const entries = Object.entries(val)
-	return entries.length > 0 && entries.every(([k, v]) => k.length > 0 && typeof v === 'string')
-}
-
-function encryptUpstreamCredentials (creds, { id, provider, type }) {
-	if (!creds || typeof creds !== 'object' || !isEncryptedTokenRow(provider, type)) return creds
-	const out = { ...creds }
-	for (const field of UPSTREAM_SECRET_FIELDS) {
-		if (out[field] !== undefined && out[field] !== null && out[field] !== '') {
-			out[field] = encryptSecret(out[field], secretContext(id, provider, type, field))
-		}
+function encryptUpstreamCredentials (creds, { id, provider, type }, keys) {
+	if (!isPlainObject(creds) || !isEncryptedTokenRow(provider, type)) return creds
+	const { account, baseUrl, ...secrets } = creds
+	return {
+		...(account !== undefined && { account }),
+		...(baseUrl !== undefined && { baseUrl }),
+		...(Object.keys(secrets).length > 0 && {
+			secret: encryptSecret(JSON.stringify(secrets), secretContext(id, provider, type), keys)
+		})
 	}
-	for (const field of UPSTREAM_OBJECT_SECRET_FIELDS) {
-		const val = out[field]
-		if (val === undefined || val === null) continue
-		if (!isPlainSecretMap(val)) {
-			throw new Error(`encryptUpstreamCredentials requires ${field} to be a non-empty plain object of string values`)
-		}
-		out[field] = encryptSecret(JSON.stringify(val), secretContext(id, provider, type, field))
-	}
-	return out
 }
 
 function decryptUpstreamCredentials (creds, { id, provider, type }) {
-	if (!creds || typeof creds !== 'object' || !isEncryptedTokenRow(provider, type)) return creds
-	const out = { ...creds }
-	for (const field of UPSTREAM_SECRET_FIELDS) {
-		if (out[field] !== undefined && out[field] !== null && out[field] !== '') {
-			out[field] = decryptSecret(out[field], secretContext(id, provider, type, field))
-		}
-	}
-	for (const field of UPSTREAM_OBJECT_SECRET_FIELDS) {
-		if (out[field] !== undefined && out[field] !== null && out[field] !== '') {
-			out[field] = JSON.parse(decryptSecret(out[field], secretContext(id, provider, type, field)))
-		}
-	}
-	return out
+	if (!isPlainObject(creds) || !isEncryptedTokenRow(provider, type)) return creds
+	const { secret, ...meta } = creds
+	if (!secret) return meta
+	return { ...meta, ...JSON.parse(decryptSecret(secret, secretContext(id, provider, type))) }
 }
 
 function serializeCredentials (credentials, meta) {
