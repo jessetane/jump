@@ -3,5 +3,7 @@ tmp/
 .env
 *.db
 *.db-*
+*.key
+*.key.old
 *.swp
 *.swo

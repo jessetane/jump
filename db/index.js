@@ -10,20 +10,6 @@ import { migrate as runMigrate } from './migrate.js'
 const dbPath = process.env.DB_PATH || './data.db'
 const PRUNE_INTERVAL_MS = 15 * 60 * 1000
 
-const prevUmask = process.umask(0o077)
-const sqlite = new DatabaseSync(dbPath)
-process.umask(prevUmask)
-
-sqlite.exec('PRAGMA journal_mode = WAL;')
-sqlite.exec('PRAGMA foreign_keys = ON;')
-sqlite.exec('PRAGMA recursive_triggers = ON;')
-sqlite.exec('PRAGMA busy_timeout = 5000;')
-
-for (const ext of ['', '-wal', '-shm']) {
-	const file = `${dbPath}${ext}`
-	if (fs.existsSync(file)) fs.chmodSync(file, 0o600)
-}
-
 function migrate () {
 	runMigrate(sqlite)
 }
@@ -42,7 +28,30 @@ function init () {
 	migrate()
 }
 
-init()
+function tightenFileMode (filePath) {
+	if (fs.existsSync(filePath) && (fs.statSync(filePath).mode & 0o077) !== 0) {
+		fs.chmodSync(filePath, 0o600)
+	}
+}
+
+const prevUmask = process.umask(0o077)
+let sqlite
+try {
+	tightenFileMode(dbPath)
+	sqlite = new DatabaseSync(dbPath)
+	sqlite.exec('PRAGMA journal_mode = WAL;')
+	sqlite.exec('PRAGMA secure_delete = ON;')
+	sqlite.exec('PRAGMA foreign_keys = ON;')
+	sqlite.exec('PRAGMA recursive_triggers = ON;')
+	sqlite.exec('PRAGMA busy_timeout = 5000;')
+	init()
+	for (const ext of ['', '-wal', '-shm']) {
+		tightenFileMode(`${dbPath}${ext}`)
+	}
+} finally {
+	process.umask(prevUmask)
+}
+
 prune()
 setInterval(prune, PRUNE_INTERVAL_MS).unref()
 

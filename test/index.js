@@ -18,6 +18,8 @@ process.env.ALLOWED_REDIRECT_DOMAINS = 'chatgpt.com,*.antigravity.google,antigra
 fs.rmSync(testDbPath, { force: true })
 fs.rmSync(`${testDbPath}-wal`, { force: true })
 fs.rmSync(`${testDbPath}-shm`, { force: true })
+fs.rmSync(`${testDbPath}.key`, { force: true })
+fs.rmSync(`${testDbPath}.key.old`, { force: true })
 
 const { server, bootstrapLocalAdmin } = await import('../index.js')
 const db = await import('../db/index.js')
@@ -5028,17 +5030,17 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		INSERT INTO tokens (id, user_id, provider, type, name, token, admin, created, updated)
 		VALUES (?, ?, 'self', 'bearer', 'Legacy Real User Session', ?, 1, ?, ?)
 	`).run(legacyAdminSessionId, legacyUserId, legacyAdminBearer, now, now)
-	const legacyGoogleApp = db.tokens.create({
-		userId: legacyUserId,
-		provider: 'google',
-		type: 'oauth',
-		name: 'Google',
-		credentials: { accessToken: 'ya29.legacy', refreshToken: '1//legacy', account: 'legacy@gmail.com' }
-	})
-	db.links.create({
-		sessionId: legacyAdminSessionId,
-		appId: legacyGoogleApp.id
-	})
+	const legacyGoogleAppId = 'legacy-google-app-1'
+	const legacyPlainAccess = 'ya29.legacy_plain_canary_887766'
+	const legacyPlainGoogleRefresh = '1//legacy_plain_canary_554433'
+	db.sqlite.prepare(`
+		INSERT INTO tokens (id, user_id, provider, type, name, credentials, created, updated)
+		VALUES (?, ?, 'google', 'oauth', 'Google', ?, ?, ?)
+	`).run(legacyGoogleAppId, legacyUserId, JSON.stringify({ accessToken: legacyPlainAccess, refreshToken: legacyPlainGoogleRefresh, account: 'legacy@gmail.com' }), now, now)
+	db.sqlite.prepare(`
+		INSERT INTO links (session_id, app_id, policy, created, updated)
+		VALUES (?, ?, NULL, ?, ?)
+	`).run(legacyAdminSessionId, legacyGoogleAppId, now, now)
 	db.sqlite.prepare('INSERT INTO users (id, email, name, picture, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
 		legacyDupUserId,
 		'LEGACY@gmail.com',
@@ -5076,9 +5078,21 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		INSERT INTO tokens (id, user_id, provider, type, name, token, credentials, expires_at, admin, created, updated)
 		VALUES (?, ?, 'self', 'bearer', 'Legacy Unhashed OAuth Session', ?, ?, ?, 1, ?, ?)
 	`).run(legacyUnmigratedSessionId, legacyUserId, legacyPlainToken, JSON.stringify({ refreshToken: legacyPlainRefresh }), Date.now() + 3600000, now, now)
+	db.sqlite.exec('PRAGMA wal_checkpoint(FULL);')
 	db.init()
-	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 2)
-	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after users.email and token hash migrations')
+	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 3)
+	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after users.email, token hash, and encryption migrations')
+	for (const ext of ['', '-wal']) {
+		const p = `${testDbPath}${ext}`
+		if (fs.existsSync(p)) {
+			const rawBytes = fs.readFileSync(p)
+			assert.equal(rawBytes.includes(legacyPlainToken), false, `Migration VACUUM scrubs plaintext bearer token from ${p}`)
+			assert.equal(rawBytes.includes(legacyPlainRefresh), false, `Migration VACUUM scrubs plaintext refresh token from ${p}`)
+			assert.equal(rawBytes.includes(legacyPlainAccess), false, `Migration VACUUM scrubs plaintext upstream accessToken from ${p}`)
+			assert.equal(rawBytes.includes(legacyPlainGoogleRefresh), false, `Migration VACUUM scrubs plaintext upstream refreshToken from ${p}`)
+		}
+	}
+	assert.equal(db.tokens.get(legacyGoogleAppId).credentials.accessToken, legacyPlainAccess, 'SCHEMA_VERSION 3 encrypts legacy upstream credentials and decrypts cleanly')
 	const migratedTokenRow = db.sqlite.prepare('SELECT token, credentials FROM tokens WHERE id = ?').get(legacyUnmigratedSessionId)
 	assert.equal(migratedTokenRow.token, db.tokens.hashSecret(legacyPlainToken), 'SCHEMA_VERSION 2 hashes existing plaintext self bearer tokens in-place')
 	assert.equal(JSON.parse(migratedTokenRow.credentials).refreshToken, db.tokens.hashSecret(legacyPlainRefresh), 'SCHEMA_VERSION 2 hashes existing plaintext self refreshTokens in-place')
@@ -6217,6 +6231,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 	assert.equal(clearedNameUpdData.app.name, null, 'Whitespace-only name clears name to null in single updateCredentials write')
 	assert.equal(clearedNameUpdData.app.account, 'acct_single_write')
 	assert.equal(db.tokens.get(updApp.id).name, null)
+	assert.equal(db.tokens.get(updApp.id).credentials.apiKey, 'sk_keep_intact', 'Updating account without apiKey preserves encrypted apiKey')
 })
 
 test('linear-time glob matching, strict form body validation, SSRF host checks, form Origin CSRF guard, DCR client_name, and REST response headers', async () => {
@@ -6742,6 +6757,7 @@ test('graceful SIGTERM shutdown finishes in-flight requests despite duplicate si
 		fs.rmSync(subDbPath, { force: true })
 		fs.rmSync(`${subDbPath}-wal`, { force: true })
 		fs.rmSync(`${subDbPath}-shm`, { force: true })
+		fs.rmSync(`${subDbPath}.key`, { force: true })
 	}
 })
 
@@ -6782,6 +6798,13 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 		db.links.create({ sessionId: olderSession.id, appId: olderApp.id })
 		const newerUser = db.logins.resolveUser('github', 'accidental-new-gh')
 		const newerSession = db.tokens.create({ userId: newerUser.id, provider: 'self', name: 'Newer GH Session', admin: 1 })
+		const absorbedApp = db.tokens.create({
+			userId: newerUser.id,
+			provider: 'linear',
+			type: 'api_key',
+			name: 'Absorbed Linear',
+			credentials: { apiKey: 'lin_api_absorbed_secret_99', baseUrl: 'https://api.linear.app' }
+		})
 		db.logs.create({
 			userId: newerUser.id,
 			sessionId: newerSession.id,
@@ -6882,6 +6905,8 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 		assert.match(await postMergeVerify.text(), /Accounts Merged/)
 		assert.equal(db.users.get(newerUser.id), null, 'Newer user row is removed after merge into older user')
 		assert.ok(db.users.get(olderUser.id), 'Older user row survives merge')
+		assert.equal(db.tokens.get(absorbedApp.id).userId, olderUser.id, 'Absorbed upstream app is re-parented to surviving user')
+		assert.equal(db.tokens.get(absorbedApp.id).credentials.apiKey, 'lin_api_absorbed_secret_99', 'Re-parented encrypted app decrypts cleanly after mergeUsers')
 		const whoamiFromNewerSession = JSON.parse((await executeTool('admin', { action: 'whoami' }, newerSession.token)).content[0].text)
 		assert.equal(whoamiFromNewerSession.user.id, olderUser.id, 'Newer session seamlessly points to surviving older user')
 		assert.equal(whoamiFromNewerSession.user.account, 'primary-owner@example.com')
@@ -6938,11 +6963,308 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 	}
 })
 
+test('encryption at rest, key sources & rotation, transparent decryption, and VACUUM scrubbing', async () => {
+	const cryptoMod = await import('../crypto.js')
+	const { randomBytes } = await import('node:crypto')
+	const os = await import('node:os')
+	const { DatabaseSync } = await import('node:sqlite')
+	const { migrate: runMigrate } = await import('../db/migrate.js')
+	const origKey = process.env.ENCRYPTION_KEY
+	const origCredDir = process.env.CREDENTIALS_DIRECTORY
+	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jump-crypto-'))
+	assert.equal(db.sqlite.prepare('PRAGMA secure_delete').get().secure_delete, 1, 'SQLite secure_delete must be enabled')
+	assert.equal(fs.existsSync(`${testDbPath}.key`), true, 'Local boot auto-generates <dbPath>.key')
+	assert.equal(fs.statSync(`${testDbPath}.key`).mode & 0o777, 0o600, 'Auto-generated <dbPath>.key has 0600 permissions')
+	assert.throws(() => cryptoMod.parseKey('short'), /43 chars/, 'Short keys must fail loud')
+	assert.throws(() => cryptoMod.parseKey(randomBytes(32).toString('hex')), /43 chars/, 'Hex keys are rejected in favor of canonical 43-char base64url')
+	assert.throws(() => cryptoMod.parseKey(randomBytes(32).toString('base64')), /43 chars/, 'Padded standard base64 keys are rejected')
+	assert.throws(() => cryptoMod.parseKey(`${'A'.repeat(42)}B`), /canonical 32-byte base64url/, 'Non-canonical trailing padding bits in 43-char key are rejected')
+	const k1 = cryptoMod.generateKey()
+	const k2 = cryptoMod.generateKey()
+	assert.throws(() => cryptoMod.parseKeyList(`${k1},`), /empty key entry/, 'Trailing comma in ENCRYPTION_KEY fails loud')
+	assert.throws(() => cryptoMod.parseKeyList(`${k1},${k1}`), /duplicate encryption key/, 'Duplicate keys in ENCRYPTION_KEY fail loud')
+	try {
+		const encUser = db.logins.resolveUser('google', 'encryption-owner@example.com')
+		const stripeApp = db.tokens.create({
+			userId: encUser.id,
+			provider: 'stripe',
+			type: 'api_key',
+			name: 'Canary Stripe',
+			credentials: { apiKey: 'sk_live_ALWAYS_ON_CANARY_112233', baseUrl: 'https://api.stripe.com', account: 'acct_canary' }
+		})
+		const googleApp = db.tokens.create({
+			userId: encUser.id,
+			provider: 'google',
+			type: 'oauth',
+			name: 'Canary Google',
+			credentials: { accessToken: 'ya29.ALWAYS_ON_ACCESS_445566', refreshToken: '1//ALWAYS_ON_REFRESH_778899', account: 'encryption-owner@example.com' }
+		})
+		const rawStripe = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(stripeApp.id).credentials)
+		assert.match(rawStripe.apiKey, /^[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]+$/, 'Ciphertext uses strict 4-part base64url format with no prefix or kid')
+		assert.equal(rawStripe.baseUrl, 'https://api.stripe.com', 'Queryable metadata baseUrl stays plaintext for json_extract')
+		assert.equal(rawStripe.account, 'acct_canary', 'Queryable metadata account stays plaintext for json_extract')
+		assert.equal(stripeApp.credentials.apiKey, 'sk_live_ALWAYS_ON_CANARY_112233')
+		assert.equal(db.tokens.get(stripeApp.id).credentials.apiKey, 'sk_live_ALWAYS_ON_CANARY_112233')
+		assert.equal(db.tokens.get(googleApp.id).credentials.accessToken, 'ya29.ALWAYS_ON_ACCESS_445566')
+		assert.equal(db.tokens.get(googleApp.id).credentials.refreshToken, '1//ALWAYS_ON_REFRESH_778899')
+		assert.equal(db.tokens.listByUserId(encUser.id).find(t => t.id === stripeApp.id).credentials.apiKey, 'sk_live_ALWAYS_ON_CANARY_112233')
+		const encAdmin = db.tokens.create({ userId: encUser.id, provider: 'self', admin: 1 })
+		assert.match(db.tokens.hashSecret(encAdmin.token), /^[0-9a-f]{64}$/, 'hashSecret produces bare 64-char hex SHA-256 digest without prefix')
+		db.links.create({ sessionId: encAdmin.id, appId: stripeApp.id })
+		assert.equal(db.links.get(encAdmin.id, stripeApp.id).app.credentials.apiKey, 'sk_live_ALWAYS_ON_CANARY_112233', 'db.links transparently decrypts linked app credentials')
+		const listRes = JSON.parse((await executeTool('admin', { action: 'list_apps' }, encAdmin.token)).content[0].text)
+		const listedStripe = listRes.apps.find(a => a.id === stripeApp.id)
+		assert.equal(listedStripe.apiKey, undefined, 'API boundary formatApp strips secret fields')
+		assert.equal(listedStripe.credentials, undefined, 'API boundary formatApp never exposes raw credentials object')
+		const whoamiRes = JSON.parse((await executeTool('admin', { action: 'whoami' }, encAdmin.token)).content[0].text)
+		const whoamiStripe = whoamiRes.session.apps.find(a => a.id === stripeApp.id)
+		assert.equal(whoamiStripe.apiKey, undefined, 'whoami formatSession/formatApp strips secret fields')
+		assert.equal(whoamiStripe.credentials, undefined, 'whoami formatSession/formatApp never exposes raw credentials object')
+		assert.throws(() => {
+			db.tokens.create({
+				userId: encUser.id,
+				provider: 'stripe',
+				type: 'api_key',
+				credentials: { apiKey: 12345, baseUrl: 'https://api.stripe.com' }
+			})
+		}, /string plaintext/, 'Non-string secret fields fail loud instead of storing unencrypted')
+		const writeA = db.tokens.create({
+			userId: encUser.id,
+			provider: 'stripe',
+			type: 'api_key',
+			credentials: { apiKey: 'sk_same_value', baseUrl: 'https://api.stripe.com' }
+		})
+		const writeB = db.tokens.create({
+			userId: encUser.id,
+			provider: 'stripe',
+			type: 'api_key',
+			credentials: { apiKey: 'sk_same_value', baseUrl: 'https://api.stripe.com' }
+		})
+		const ctA = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeA.id).credentials).apiKey
+		const ctB = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeB.id).credentials).apiKey
+		assert.notEqual(ctA, ctB, 'Identical secrets produce distinct ciphertexts per write')
+		const rawGoogle = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(googleApp.id).credentials)
+		assert.throws(() => {
+			cryptoMod.decryptSecret(rawGoogle.accessToken, cryptoMod.secretContext(googleApp.id, 'google', 'oauth', 'refreshToken'))
+		}, /unable to authenticate data/i, 'Field-level AAD rejects swapping accessToken and refreshToken')
+		assert.throws(() => {
+			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeB.id, 'stripe', 'api_key', 'apiKey'))
+		}, /unable to authenticate data/i, 'Row-level AAD rejects transplanting ciphertext across rows')
+		assert.notEqual(
+			cryptoMod.secretContext('a:b', 'c', 'api_key', 'apiKey'),
+			cryptoMod.secretContext('a', 'b:c', 'api_key', 'apiKey'),
+			'JSON array AAD framing prevents colon delimiter collisions'
+		)
+		const ctParts = ctA.split(':')
+		const truncatedTag = `${ctParts[0]}:${ctParts[1]}:${ctParts[2].slice(0, 8)}:${ctParts[3]}`
+		assert.throws(() => {
+			cryptoMod.decryptSecret(truncatedTag, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'apiKey'))
+		}, /Malformed encrypted credential parameters/, 'Truncated GCM auth tags are rejected immediately')
+		assert.throws(() => {
+			cryptoMod.decryptSecret('not-four-parts', cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'apiKey'))
+		}, /Malformed encrypted credential envelope/, 'Non-4-part envelopes are rejected immediately')
+		assert.throws(() => {
+			cryptoMod.decryptSecret(`${ctParts[0]}:${ctParts[1]}:${ctParts[2]}:`, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'apiKey'))
+		}, /Malformed encrypted credential parameters/, 'Empty ciphertext part is rejected immediately')
+		const scopedState = db.tokens.createState({ mode: 'setup_connect', provider: 'google', sessionId: 'sess-1' })
+		const scopedStateRow = db.sqlite.prepare('SELECT id, token FROM tokens WHERE token = ?').get(db.tokens.hashSecret(scopedState))
+		assert.ok(scopedStateRow, 'Provider-scoped oauth_state stores hashed token')
+		assert.equal(db.tokens.get(scopedStateRow.id).token, null, 'formatToken strips hashed token even when provider is not self')
+		const selfSess = db.tokens.create({ userId: encUser.id, provider: 'self', type: 'bearer', credentials: { refreshToken: 'rt-initial-1' } })
+		const updSelf = db.tokens.updateCredentials(selfSess.id, { credentials: { refreshToken: 'rt-updated-2' } })
+		assert.equal(updSelf.credentials.refreshToken, 'rt-updated-2', 'updateCredentials returns raw refreshToken once on self bearer update')
+		const rawSelfCreds = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(selfSess.id).credentials)
+		assert.equal(rawSelfCreds.refreshToken, db.tokens.hashSecret('rt-updated-2'), 'updateCredentials hashes refreshToken at rest on self bearer rows')
+		const TOKEN_DDL = `
+			CREATE TABLE tokens (
+				id TEXT PRIMARY KEY,
+				user_id TEXT,
+				provider TEXT NOT NULL,
+				type TEXT NOT NULL,
+				name TEXT,
+				token TEXT UNIQUE,
+				credentials TEXT,
+				expires_at INTEGER,
+				scopes TEXT,
+				admin INTEGER DEFAULT 0,
+				ip TEXT,
+				ua TEXT,
+				created TEXT NOT NULL,
+				updated TEXT NOT NULL
+			);
+		`
+		const v1OnlySelfPath = path.join(tmpDir, 'v1-self-only.db')
+		const v1OnlySelfDb = new DatabaseSync(v1OnlySelfPath)
+		try {
+			v1OnlySelfDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
+			v1OnlySelfDb.exec(`${TOKEN_DDL} PRAGMA user_version = 1;`)
+			const v1CanaryBearer = 'v1-plaintext-session-canary-99887766'
+			const v1CanaryRefresh = 'v1-plaintext-refresh-canary-55443322'
+			const nowIso = new Date().toISOString()
+			v1OnlySelfDb.prepare(`
+				INSERT INTO tokens (id, provider, type, token, credentials, created, updated)
+				VALUES ('s1', 'self', 'bearer', ?, ?, ?, ?)
+			`).run(v1CanaryBearer, JSON.stringify({ refreshToken: v1CanaryRefresh }), nowIso, nowIso)
+			v1OnlySelfDb.exec('PRAGMA wal_checkpoint(FULL);')
+			assert.equal(fs.readFileSync(v1OnlySelfPath).includes(v1CanaryBearer), true)
+			process.env.ENCRYPTION_KEY = ''
+			delete process.env.CREDENTIALS_DIRECTORY
+			runMigrate(v1OnlySelfDb)
+			for (const ext of ['', '-wal']) {
+				const f = `${v1OnlySelfPath}${ext}`
+				if (fs.existsSync(f)) {
+					const bytes = fs.readFileSync(f)
+					assert.equal(bytes.includes(v1CanaryBearer), false, `v1->v2 self token hash migration scrubs bearer token from ${f} even with 0 upstream apps`)
+					assert.equal(bytes.includes(v1CanaryRefresh), false, `v1->v2 self token hash migration scrubs refresh token from ${f} even with 0 upstream apps`)
+				}
+			}
+		} finally {
+			v1OnlySelfDb.close()
+		}
+		const v2FreelistPath = path.join(tmpDir, 'v2-freelist.db')
+		const v2FreelistDb = new DatabaseSync(v2FreelistPath)
+		try {
+			v2FreelistDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = OFF;')
+			v2FreelistDb.exec(`${TOKEN_DDL} PRAGMA user_version = 2;`)
+			const freelistCanary = 'sk_live_DELETED_FREELIST_REMNANT_77665544'
+			const nowIso = new Date().toISOString()
+			v2FreelistDb.prepare(`
+				INSERT INTO tokens (id, provider, type, credentials, created, updated)
+				VALUES ('del-1', 'stripe', 'api_key', ?, ?, ?)
+			`).run(JSON.stringify({ apiKey: freelistCanary }), nowIso, nowIso)
+			v2FreelistDb.exec("PRAGMA wal_checkpoint(FULL); DELETE FROM tokens WHERE id = 'del-1'; PRAGMA wal_checkpoint(FULL);")
+			assert.equal(fs.readFileSync(v2FreelistPath).includes(freelistCanary), true, 'Sanity check: deleted secret remains in SQLite freelist when secure_delete was OFF')
+			v2FreelistDb.exec('PRAGMA secure_delete = ON;')
+			runMigrate(v2FreelistDb)
+			assert.equal(fs.readFileSync(v2FreelistPath).includes(freelistCanary), false, 'v2->v3 upgrade VACUUM scrubs historical freelist remnants even when 0 active rows exist')
+		} finally {
+			v2FreelistDb.close()
+		}
+		const diyPath = path.join(tmpDir, 'diy.db')
+		const diyDb = new DatabaseSync(diyPath)
+		try {
+			diyDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
+			diyDb.exec(TOKEN_DDL)
+			process.env.ENCRYPTION_KEY = ''
+			delete process.env.CREDENTIALS_DIRECTORY
+			runMigrate(diyDb)
+			assert.equal(fs.existsSync(`${diyPath}.key`), true, 'Empty ENCRYPTION_KEY="" from .env uses auto-generated <dbPath>.key')
+			const diyKeys1 = cryptoMod.getKeys()
+			const ctx = cryptoMod.secretContext('app-1', 'stripe', 'api_key', 'apiKey')
+			const ctUnderOld = cryptoMod.encryptSecret('sk_diy_rotate_secret', ctx, diyKeys1)
+			const nowIso = new Date().toISOString()
+			diyDb.prepare(`
+				INSERT INTO tokens (id, provider, type, credentials, created, updated)
+				VALUES ('app-1', 'stripe', 'api_key', ?, ?, ?)
+			`).run(JSON.stringify({ apiKey: ctUnderOld, baseUrl: 'https://api.stripe.com' }), nowIso, nowIso)
+			diyDb.exec('PRAGMA wal_checkpoint(FULL);')
+			assert.equal(fs.readFileSync(diyPath).includes(ctUnderOld), true)
+			fs.renameSync(`${diyPath}.key`, `${diyPath}.key.old`)
+			runMigrate(diyDb)
+			assert.equal(fs.existsSync(`${diyPath}.key`), true, 'DIY rotation auto-generates fresh <dbPath>.key when .key.old is present')
+			runMigrate(diyDb)
+			for (const ext of ['', '-wal']) {
+				const f = `${diyPath}${ext}`
+				if (fs.existsSync(f)) {
+					assert.equal(fs.readFileSync(f).includes(ctUnderOld), false, `Key rotation VACUUM scrubs old ciphertext from ${f}`)
+				}
+			}
+			fs.rmSync(`${diyPath}.key.old`)
+			fs.chmodSync(`${diyPath}.key`, 0o400)
+			runMigrate(diyDb)
+			assert.equal(fs.statSync(`${diyPath}.key`).mode & 0o777, 0o400, 'Read-only 0400 key file is accepted without forcing chmod 0600')
+			const rotatedRaw = JSON.parse(diyDb.prepare("SELECT credentials FROM tokens WHERE id = 'app-1'").get().credentials).apiKey
+			assert.equal(cryptoMod.decryptSecret(rotatedRaw, ctx), 'sk_diy_rotate_secret', 'Rotated DIY DB decrypts cleanly after .key.old is deleted')
+			fs.chmodSync(`${diyPath}.key`, 0o600)
+			fs.rmSync(`${diyPath}.key`)
+			assert.throws(() => runMigrate(diyDb), /Missing encryption key file/, 'Encrypted DB fails loud if .key is missing without .key.old')
+			assert.equal(fs.existsSync(`${diyPath}.key`), false, 'Failed boot on missing key never creates an orphan .key file')
+		} finally {
+			diyDb.close()
+		}
+		const credDir = path.join(tmpDir, 'systemd-creds')
+		fs.mkdirSync(credDir, { mode: 0o700 })
+		const tpmDbPath = path.join(tmpDir, 'tpm.db')
+		const tpmDb = new DatabaseSync(tpmDbPath)
+		try {
+			tpmDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
+			tpmDb.exec(TOKEN_DDL)
+			delete process.env.ENCRYPTION_KEY
+			process.env.CREDENTIALS_DIRECTORY = credDir
+			assert.throws(() => runMigrate(tpmDb), /Missing systemd credential/, 'CREDENTIALS_DIRECTORY without jump.key fails loud')
+			assert.equal(fs.existsSync(`${tpmDbPath}.key`), false, 'CREDENTIALS_DIRECTORY mode never falls back to creating <dbPath>.key')
+			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
+			runMigrate(tpmDb)
+			assert.equal(fs.existsSync(`${tpmDbPath}.key`), false, 'systemd jump.key mode never writes <dbPath>.key to disk')
+			const ctx = cryptoMod.secretContext('tpm-app-1', 'stripe', 'api_key', 'apiKey')
+			const tpmCt1 = cryptoMod.encryptSecret('sk_tpm_sealed_secret', ctx)
+			const nowIso = new Date().toISOString()
+			tpmDb.prepare(`
+				INSERT INTO tokens (id, provider, type, credentials, created, updated)
+				VALUES ('tpm-app-1', 'stripe', 'api_key', ?, ?, ?)
+			`).run(JSON.stringify({ apiKey: tpmCt1 }), nowIso, nowIso)
+			fs.renameSync(path.join(credDir, 'jump.key'), path.join(credDir, 'jump.key.old'))
+			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k2}\n`, { mode: 0o600 })
+			runMigrate(tpmDb)
+			fs.rmSync(path.join(credDir, 'jump.key.old'))
+			runMigrate(tpmDb)
+			const tpmRotatedCt = JSON.parse(tpmDb.prepare("SELECT credentials FROM tokens WHERE id = 'tpm-app-1'").get().credentials).apiKey
+			assert.equal(cryptoMod.decryptSecret(tpmRotatedCt, ctx), 'sk_tpm_sealed_secret', 'systemd jump.key + jump.key.old rotates cleanly onto new key')
+			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
+			assert.throws(() => runMigrate(tpmDb), /unable to authenticate data/i, 'Booting with wrong systemd jump.key fails loud immediately at startup')
+		} finally {
+			tpmDb.close()
+		}
+		const envDbPath = path.join(tmpDir, 'env.db')
+		const envDb = new DatabaseSync(envDbPath)
+		try {
+			envDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
+			envDb.exec(TOKEN_DDL)
+			delete process.env.CREDENTIALS_DIRECTORY
+			process.env.ENCRYPTION_KEY = k1
+			runMigrate(envDb)
+			assert.equal(fs.existsSync(`${envDbPath}.key`), false, 'ENCRYPTION_KEY mode never writes <dbPath>.key to disk')
+			const ctx = cryptoMod.secretContext('env-app-1', 'stripe', 'api_key', 'apiKey')
+			const nowIso = new Date().toISOString()
+			envDb.prepare(`
+				INSERT INTO tokens (id, provider, type, credentials, created, updated)
+				VALUES ('env-app-1', 'stripe', 'api_key', ?, ?, ?)
+			`).run(JSON.stringify({ apiKey: cryptoMod.encryptSecret('sk_env_secret', ctx) }), nowIso, nowIso)
+			process.env.ENCRYPTION_KEY = `${k2},${k1}`
+			runMigrate(envDb)
+			process.env.ENCRYPTION_KEY = k2
+			runMigrate(envDb)
+			const envRotatedCt = JSON.parse(envDb.prepare("SELECT credentials FROM tokens WHERE id = 'env-app-1'").get().credentials).apiKey
+			assert.equal(cryptoMod.decryptSecret(envRotatedCt, ctx), 'sk_env_secret', 'ENCRYPTION_KEY=<new>,<old> rotates cleanly onto <new>')
+		} finally {
+			envDb.close()
+		}
+		delete process.env.CREDENTIALS_DIRECTORY
+		const sharedDbOldKey = fs.readFileSync(`${testDbPath}.key`, 'utf8').trim()
+		process.env.ENCRYPTION_KEY = `${k2},${sharedDbOldKey}`
+		db.init()
+		process.env.ENCRYPTION_KEY = k2
+		db.init()
+		assert.equal(db.tokens.get(stripeApp.id).credentials.apiKey, 'sk_live_ALWAYS_ON_CANARY_112233', 'Full test DB rotates cleanly onto new key with zero double-encrypted rows')
+		process.env.ENCRYPTION_KEY = `${sharedDbOldKey},${k2}`
+		db.init()
+	} finally {
+		if (origKey === undefined) delete process.env.ENCRYPTION_KEY
+		else process.env.ENCRYPTION_KEY = origKey
+		if (origCredDir === undefined) delete process.env.CREDENTIALS_DIRECTORY
+		else process.env.CREDENTIALS_DIRECTORY = origCredDir
+		cryptoMod.loadKeys({ dbPath: testDbPath, encrypted: true })
+		fs.rmSync(tmpDir, { recursive: true, force: true })
+	}
+})
+
 test('teardown server', (t, done) => {
 	server.close(() => {
 		fs.rmSync(testDbPath, { force: true })
 		fs.rmSync(`${testDbPath}-wal`, { force: true })
 		fs.rmSync(`${testDbPath}-shm`, { force: true })
+		fs.rmSync(`${testDbPath}.key`, { force: true })
+		fs.rmSync(`${testDbPath}.key.old`, { force: true })
 		done()
 	})
 })

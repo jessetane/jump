@@ -1,17 +1,18 @@
 import { randomUUID } from 'node:crypto'
 import * as users from './users.js'
-import { hashSecret } from './tokens.js'
+import { hashSecret, UPSTREAM_SECRET_FIELDS } from './tokens.js'
+import { loadKeys, secretContext, encryptSecret, openSecret } from '../crypto.js'
 
 export {
 	migrate
 }
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 function migrateUsersEmail (sqlite) {
 	const userCols = sqlite.prepare('PRAGMA table_info(users)').all()
 	const hasEmail = userCols.some(c => c.name === 'email')
-	if (!hasEmail) return
+	if (!hasEmail) return false
 	sqlite.exec('PRAGMA foreign_keys = OFF;')
 	try {
 		sqlite.exec('BEGIN IMMEDIATE;')
@@ -45,6 +46,7 @@ function migrateUsersEmail (sqlite) {
 				sqlite.prepare('DELETE FROM users WHERE id = ?').run(dropId)
 			}
 			sqlite.exec('COMMIT;')
+			return true
 		} catch (err) {
 			sqlite.exec('ROLLBACK;')
 			throw err
@@ -63,6 +65,7 @@ function migrateSelfTokenHashes (sqlite) {
 			WHERE provider = 'self' OR type IN ('oauth_state', 'oauth_code')
 		`).all()
 		const updateStmt = sqlite.prepare('UPDATE tokens SET id = ?, token = ?, credentials = ? WHERE id = ?')
+		let changedCount = 0
 		for (const row of rows) {
 			let nextId = row.id
 			let nextToken = row.token
@@ -86,23 +89,120 @@ function migrateSelfTokenHashes (sqlite) {
 			}
 			if (changed) {
 				updateStmt.run(nextId, nextToken, nextCreds, row.id)
+				changedCount++
 			}
 		}
-		sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
+		sqlite.exec('PRAGMA user_version = 2;')
 		sqlite.exec('COMMIT;')
+		return changedCount > 0
 	} catch (err) {
 		sqlite.exec('ROLLBACK;')
 		throw err
 	}
 }
 
+function migrateUpstreamEncryption (sqlite, keys) {
+	sqlite.exec('BEGIN IMMEDIATE;')
+	try {
+		const rows = sqlite.prepare(`
+			SELECT id, provider, type, credentials
+			FROM tokens
+			WHERE provider != 'self' AND type IN ('oauth', 'api_key') AND credentials IS NOT NULL
+		`).all()
+		const stmt = sqlite.prepare('UPDATE tokens SET credentials = ? WHERE id = ?')
+		let changedCount = 0
+		for (const row of rows) {
+			const creds = JSON.parse(row.credentials)
+			if (!creds || typeof creds !== 'object') continue
+			let rowChanged = false
+			for (const field of UPSTREAM_SECRET_FIELDS) {
+				const val = creds[field]
+				if (val === undefined || val === null || val === '') continue
+				creds[field] = encryptSecret(val, secretContext(row.id, row.provider, row.type, field), keys)
+				rowChanged = true
+			}
+			if (rowChanged) {
+				stmt.run(JSON.stringify(creds), row.id)
+				changedCount++
+			}
+		}
+		sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
+		sqlite.exec('COMMIT;')
+		return changedCount > 0
+	} catch (err) {
+		sqlite.exec('ROLLBACK;')
+		throw err
+	}
+}
+
+function verifyAndRotateUpstreamEncryption (sqlite, keys) {
+	const rows = sqlite.prepare(`
+		SELECT id, provider, type, credentials
+		FROM tokens
+		WHERE provider != 'self' AND type IN ('oauth', 'api_key') AND credentials IS NOT NULL
+	`).all()
+	const updates = []
+	for (const row of rows) {
+		const creds = JSON.parse(row.credentials)
+		if (!creds || typeof creds !== 'object') continue
+		let rowChanged = false
+		for (const field of UPSTREAM_SECRET_FIELDS) {
+			const val = creds[field]
+			if (val === undefined || val === null || val === '') continue
+			const context = secretContext(row.id, row.provider, row.type, field)
+			const { plaintext, keyIndex } = openSecret(val, context, keys)
+			if (keyIndex > 0) {
+				creds[field] = encryptSecret(plaintext, context, keys)
+				rowChanged = true
+			}
+		}
+		if (rowChanged) {
+			updates.push({ id: row.id, credentials: JSON.stringify(creds) })
+		}
+	}
+	if (updates.length === 0) return false
+	sqlite.exec('BEGIN IMMEDIATE;')
+	try {
+		const stmt = sqlite.prepare('UPDATE tokens SET credentials = ? WHERE id = ?')
+		for (const u of updates) {
+			stmt.run(u.credentials, u.id)
+		}
+		sqlite.exec('COMMIT;')
+	} catch (err) {
+		sqlite.exec('ROLLBACK;')
+		throw err
+	}
+	return true
+}
+
+function vacuumDatabase (sqlite) {
+	if (sqlite.isTransaction) return
+	const prevUmask = process.umask(0o077)
+	try {
+		sqlite.exec('VACUUM;')
+		sqlite.exec('PRAGMA wal_checkpoint(TRUNCATE);')
+	} finally {
+		process.umask(prevUmask)
+	}
+}
+
 function migrate (sqlite) {
 	const version = sqlite.prepare('PRAGMA user_version').get()?.user_version || 0
-	if (version >= SCHEMA_VERSION) return
-	if (version < 1) {
-		migrateUsersEmail(sqlite)
+	const dbPath = sqlite.prepare('PRAGMA database_list').get()?.file || process.env.DB_PATH || './data.db'
+	const keys = loadKeys({ dbPath, encrypted: version >= SCHEMA_VERSION })
+	let dirty = version > 0 && version < SCHEMA_VERSION
+	if (version < 1 && migrateUsersEmail(sqlite)) {
+		dirty = true
 	}
-	if (version < 2) {
-		migrateSelfTokenHashes(sqlite)
+	if (version < 2 && migrateSelfTokenHashes(sqlite)) {
+		dirty = true
+	}
+	if (version < 3) {
+		if (migrateUpstreamEncryption(sqlite, keys)) dirty = true
+	} else if (verifyAndRotateUpstreamEncryption(sqlite, keys)) {
+		dirty = true
+	}
+	if (dirty) {
+		vacuumDatabase(sqlite)
 	}
 }

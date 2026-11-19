@@ -1,11 +1,13 @@
 import { sqlite } from './index.js'
 import { userAccountSql } from './users.js'
 import { parseAccountSpec } from '../util.js'
+import { secretContext, encryptSecret, decryptSecret } from '../crypto.js'
 import { createHash, randomUUID } from 'node:crypto'
 
 export {
 	init,
 	hashSecret,
+	UPSTREAM_SECRET_FIELDS,
 	create,
 	get,
 	getActiveSession,
@@ -85,6 +87,8 @@ const UPSTREAM_JOIN = `
 	LEFT JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
 `
 
+const UPSTREAM_SECRET_FIELDS = ['apiKey', 'accessToken', 'refreshToken']
+
 function hashSecret (secret) {
 	if (!secret || typeof secret !== 'string') return null
 	return createHash('sha256').update(secret).digest('hex')
@@ -92,6 +96,32 @@ function hashSecret (secret) {
 
 function isHashedToken (provider, type) {
 	return (provider === 'self' && type === 'bearer') || type === 'oauth_state' || type === 'oauth_code'
+}
+
+function isEncryptedTokenRow (provider, type) {
+	return provider !== 'self' && (type === 'oauth' || type === 'api_key')
+}
+
+function encryptUpstreamCredentials (creds, { id, provider, type }) {
+	if (!creds || typeof creds !== 'object' || !isEncryptedTokenRow(provider, type)) return creds
+	const out = { ...creds }
+	for (const field of UPSTREAM_SECRET_FIELDS) {
+		if (out[field] !== undefined && out[field] !== null && out[field] !== '') {
+			out[field] = encryptSecret(out[field], secretContext(id, provider, type, field))
+		}
+	}
+	return out
+}
+
+function decryptUpstreamCredentials (creds, { id, provider, type }) {
+	if (!creds || typeof creds !== 'object' || !isEncryptedTokenRow(provider, type)) return creds
+	const out = { ...creds }
+	for (const field of UPSTREAM_SECRET_FIELDS) {
+		if (out[field] !== undefined && out[field] !== null && out[field] !== '') {
+			out[field] = decryptSecret(out[field], secretContext(id, provider, type, field))
+		}
+	}
+	return out
 }
 
 function pruneRecentRefreshes (now = Date.now()) {
@@ -122,6 +152,8 @@ function formatToken (row) {
 	if (isSelf && rawCreds && typeof rawCreds === 'object' && 'refreshToken' in rawCreds) {
 		const { refreshToken: _rt, ...rest } = rawCreds
 		credentials = Object.keys(rest).length > 0 ? rest : null
+	} else if (isEncryptedTokenRow(row.provider, row.type) && rawCreds) {
+		credentials = decryptUpstreamCredentials(rawCreds, row)
 	}
 	const isShare = row.type === 'share'
 	const resolvedAccount = isShare ? (row.name || row.account || null) : (row.user_id ? (row.account || null) : null)
@@ -172,7 +204,7 @@ function create (opts = {}) {
 		: null
 	const storedCreds = rawRefreshToken
 		? { ...credentials, refreshToken: hashSecret(rawRefreshToken) }
-		: credentials
+		: encryptUpstreamCredentials(credentials, { id, provider, type })
 	const now = new Date().toISOString()
 	const credsJson = storedCreds && typeof storedCreds === 'object' ? JSON.stringify(storedCreds) : storedCreds
 	sqlite.prepare(`
@@ -274,26 +306,26 @@ function refreshOauthSession (refreshToken) {
 	`).get(refreshHash, minUpdated)
 	const session = formatToken(row)
 	if (!session) return null
-	const nowIso = new Date(now).toISOString()
 	const cached = recentRefreshes.get(session.id)
-	const isFresh = Boolean(
-		cached &&
-		cached.tokenHash === row.token &&
-		session.expiresAt &&
-		(session.expiresAt - now > (3600 * 1000 - REFRESH_DEDUP_MS))
-	)
-	const accessToken = isFresh ? cached.token : randomUUID()
-	const tokenHash = isFresh ? cached.tokenHash : hashSecret(accessToken)
-	const expiresAt = isFresh ? session.expiresAt : now + 3600 * 1000
-	sqlite.prepare(`
-		UPDATE tokens
-		SET token = ?, expires_at = ?, updated = ?
-		WHERE id = ?
-	`).run(tokenHash, expiresAt, nowIso, session.id)
-	if (!isFresh) {
+	const isFresh = Boolean(cached && cached.dedupUntil > now && cached.tokenHash === row.token && cached.expiresAt === session.expiresAt)
+	let accessToken
+	if (isFresh) {
+		accessToken = cached.token
+		touch(session.id)
+	} else {
+		accessToken = randomUUID()
+		const tokenHash = hashSecret(accessToken)
+		const expiresAt = now + 3600 * 1000
+		const nowIso = new Date(now).toISOString()
+		sqlite.prepare(`
+			UPDATE tokens
+			SET token = ?, expires_at = ?, updated = ?
+			WHERE id = ?
+		`).run(tokenHash, expiresAt, nowIso, session.id)
 		recentRefreshes.set(session.id, {
 			token: accessToken,
 			tokenHash,
+			expiresAt,
 			dedupUntil: now + REFRESH_DEDUP_MS
 		})
 	}
@@ -521,11 +553,15 @@ function updateCredentials (id, opts = {}) {
 	let rawSelfRefresh = null
 	if (opts.credentials !== undefined) {
 		let nextCreds = opts.credentials
-		if (nextCreds && typeof nextCreds === 'object' && typeof nextCreds.refreshToken === 'string') {
+		if (nextCreds && typeof nextCreds === 'object') {
 			const meta = sqlite.prepare('SELECT provider, type FROM tokens WHERE id = ?').get(id)
-			if (meta?.provider === 'self' && meta.type === 'bearer') {
-				rawSelfRefresh = nextCreds.refreshToken
-				nextCreds = { ...nextCreds, refreshToken: hashSecret(rawSelfRefresh) }
+			if (meta) {
+				if (meta.provider === 'self' && meta.type === 'bearer' && typeof nextCreds.refreshToken === 'string') {
+					rawSelfRefresh = nextCreds.refreshToken
+					nextCreds = { ...nextCreds, refreshToken: hashSecret(rawSelfRefresh) }
+				} else {
+					nextCreds = encryptUpstreamCredentials(nextCreds, { id, provider: meta.provider, type: meta.type })
+				}
 			}
 		}
 		const credsJson = nextCreds && typeof nextCreds === 'object' ? JSON.stringify(nextCreds) : nextCreds

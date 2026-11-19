@@ -283,8 +283,7 @@ function createProvider (config) {
 			const creds = appToken.credentials || {}
 			if (appToken.type === 'api_key') {
 				return {
-					token: creds.apiKey || '',
-					app: appToken
+					token: creds.apiKey || ''
 				}
 			}
 			if (oauth && creds.refreshToken && (!appToken.expiresAt || Date.now() > appToken.expiresAt - 60000)) {
@@ -316,14 +315,13 @@ function createProvider (config) {
 						accessToken: data.access_token,
 						refreshToken: data.refresh_token || creds.refreshToken
 					}
-					const updated = db.tokens.updateCredentials(appToken.id, {
+					db.tokens.updateCredentials(appToken.id, {
 						credentials: updatedCreds,
 						expiresAt,
 						scopes: data.scope || appToken.scopes
 					})
 					return {
-						token: data.access_token,
-						app: updated
+						token: data.access_token
 					}
 				})()
 				inflightRefreshes.set(appToken.id, refreshPromise)
@@ -334,8 +332,7 @@ function createProvider (config) {
 				}
 			}
 			return {
-				token: creds.accessToken || null,
-				app: appToken
+				token: creds.accessToken || null
 			}
 		},
 		normalizeTargetUrl (targetUrl, appToken) {
