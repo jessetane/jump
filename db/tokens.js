@@ -1,10 +1,11 @@
 import { sqlite } from './index.js'
 import { userAccountSql } from './users.js'
 import { parseAccountSpec } from '../util.js'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 export {
 	init,
+	hashSecret,
 	create,
 	get,
 	getActiveSession,
@@ -66,6 +67,8 @@ const CREATE_TOKENS_SQL = `
 `
 
 const DORMANT_MS = 30 * 24 * 60 * 60 * 1000
+const REFRESH_DEDUP_MS = 60 * 1000
+const recentRefreshes = new Map()
 
 const USER_ACCOUNT_SQL = userAccountSql('tokens.user_id')
 
@@ -81,6 +84,21 @@ const UPSTREAM_SELECT = `
 const UPSTREAM_JOIN = `
 	LEFT JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
 `
+
+function hashSecret (secret) {
+	if (!secret || typeof secret !== 'string') return null
+	return createHash('sha256').update(secret).digest('hex')
+}
+
+function isHashedToken (provider, type) {
+	return (provider === 'self' && type === 'bearer') || type === 'oauth_state' || type === 'oauth_code'
+}
+
+function pruneRecentRefreshes (now = Date.now()) {
+	for (const [sid, entry] of recentRefreshes) {
+		if (entry.dedupUntil <= now) recentRefreshes.delete(sid)
+	}
+}
 
 function init () {
 	sqlite.exec(CREATE_TOKENS_SQL)
@@ -98,7 +116,13 @@ function isUpstreamApp (tok, { allowShare = false } = {}) {
 
 function formatToken (row) {
 	if (!row) return null
-	const credentials = row.credentials ? JSON.parse(row.credentials) : null
+	const rawCreds = row.credentials ? JSON.parse(row.credentials) : null
+	const isSelf = row.provider === 'self'
+	let credentials = rawCreds
+	if (isSelf && rawCreds && typeof rawCreds === 'object' && 'refreshToken' in rawCreds) {
+		const { refreshToken: _rt, ...rest } = rawCreds
+		credentials = Object.keys(rest).length > 0 ? rest : null
+	}
 	const isShare = row.type === 'share'
 	const resolvedAccount = isShare ? (row.name || row.account || null) : (row.user_id ? (row.account || null) : null)
 	return {
@@ -107,7 +131,7 @@ function formatToken (row) {
 		provider: row.provider,
 		type: row.type,
 		name: isShare ? (row.upstream_name || null) : row.name,
-		token: row.token,
+		token: isHashedToken(row.provider, row.type) ? null : row.token,
 		credentials: isShare && credentials ? {
 			...credentials,
 			...(row.upstream_account ? { account: row.upstream_account } : {}),
@@ -139,14 +163,29 @@ function create (opts = {}) {
 		ip = null,
 		ua = null
 	} = opts
-	const token = opts.token || ((provider === 'self' && type === 'bearer') ? randomUUID() : null)
+	const isSelfBearer = provider === 'self' && type === 'bearer'
+	const hashedToken = isHashedToken(provider, type)
+	const rawToken = hashedToken ? (opts.token || randomUUID()) : (opts.token || null)
+	const storedToken = hashedToken ? hashSecret(rawToken) : rawToken
+	const rawRefreshToken = isSelfBearer && credentials && typeof credentials === 'object' && typeof credentials.refreshToken === 'string'
+		? credentials.refreshToken
+		: null
+	const storedCreds = rawRefreshToken
+		? { ...credentials, refreshToken: hashSecret(rawRefreshToken) }
+		: credentials
 	const now = new Date().toISOString()
-	const credsJson = credentials && typeof credentials === 'object' ? JSON.stringify(credentials) : credentials
+	const credsJson = storedCreds && typeof storedCreds === 'object' ? JSON.stringify(storedCreds) : storedCreds
 	sqlite.prepare(`
 		INSERT INTO tokens (id, user_id, provider, type, name, token, credentials, expires_at, scopes, admin, ip, ua, created, updated)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`).run(id, userId, provider, type, name, token, credsJson, expiresAt, scopes, admin ? 1 : 0, ip, ua, now, now)
-	return get(id)
+	`).run(id, userId, provider, type, name, storedToken, credsJson, expiresAt, scopes, admin ? 1 : 0, ip, ua, now, now)
+	const created = get(id)
+	if (!hashedToken || !created) return created
+	return {
+		...created,
+		token: rawToken,
+		...(rawRefreshToken ? { credentials: { ...(created.credentials || {}), refreshToken: rawRefreshToken } } : {})
+	}
 }
 
 function get (id) {
@@ -188,7 +227,8 @@ function hasActiveAdmin () {
 }
 
 function getByToken (token) {
-	if (!token) return null
+	const tokenHash = hashSecret(token)
+	if (!tokenHash) return null
 	const now = Date.now()
 	const minUpdated = new Date(now - DORMANT_MS).toISOString()
 	const row = sqlite.prepare(`
@@ -197,7 +237,7 @@ function getByToken (token) {
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.token = ? AND tokens.provider = 'self' AND tokens.type = 'bearer'
 			AND (tokens.expires_at IS NULL OR (tokens.expires_at > ? AND tokens.updated >= ?))
-	`).get(token, now, minUpdated)
+	`).get(tokenHash, now, minUpdated)
 	if (!row) return null
 	if (touch(row.id)) {
 		row.updated = new Date().toISOString()
@@ -206,20 +246,23 @@ function getByToken (token) {
 }
 
 function findRevocable (token) {
-	if (!token || typeof token !== 'string') return null
+	const tokenHash = hashSecret(token)
+	if (!tokenHash) return null
 	const row = sqlite.prepare(`
 		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		WHERE tokens.provider = 'self' AND tokens.type = 'bearer'
 			AND (tokens.token = ? OR json_extract(tokens.credentials, '$.refreshToken') = ?)
-	`).get(token, token)
+	`).get(tokenHash, tokenHash)
 	return formatToken(row)
 }
 
 function refreshOauthSession (refreshToken) {
-	if (!refreshToken) return null
+	const refreshHash = hashSecret(refreshToken)
+	if (!refreshHash) return null
 	const now = Date.now()
+	pruneRecentRefreshes(now)
 	const minUpdated = new Date(now - DORMANT_MS).toISOString()
 	const row = sqlite.prepare(`
 		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account
@@ -228,19 +271,39 @@ function refreshOauthSession (refreshToken) {
 		WHERE tokens.provider = 'self' AND tokens.type = 'bearer'
 			AND json_extract(tokens.credentials, '$.refreshToken') = ?
 			AND (tokens.expires_at IS NULL OR tokens.updated >= ?)
-	`).get(refreshToken, minUpdated)
+	`).get(refreshHash, minUpdated)
 	const session = formatToken(row)
 	if (!session) return null
 	const nowIso = new Date(now).toISOString()
-	const isFresh = Boolean(session.token && session.expiresAt && (session.expiresAt - now > (3600 - 60) * 1000))
-	const accessToken = isFresh ? session.token : randomUUID()
+	const cached = recentRefreshes.get(session.id)
+	const isFresh = Boolean(
+		cached &&
+		cached.tokenHash === row.token &&
+		session.expiresAt &&
+		(session.expiresAt - now > (3600 * 1000 - REFRESH_DEDUP_MS))
+	)
+	const accessToken = isFresh ? cached.token : randomUUID()
+	const tokenHash = isFresh ? cached.tokenHash : hashSecret(accessToken)
 	const expiresAt = isFresh ? session.expiresAt : now + 3600 * 1000
 	sqlite.prepare(`
 		UPDATE tokens
 		SET token = ?, expires_at = ?, updated = ?
 		WHERE id = ?
-	`).run(accessToken, expiresAt, nowIso, session.id)
-	return get(session.id)
+	`).run(tokenHash, expiresAt, nowIso, session.id)
+	if (!isFresh) {
+		recentRefreshes.set(session.id, {
+			token: accessToken,
+			tokenHash,
+			dedupUntil: now + REFRESH_DEDUP_MS
+		})
+	}
+	const updated = get(session.id)
+	if (!updated) return null
+	return {
+		...updated,
+		token: accessToken,
+		credentials: { ...(updated.credentials || {}), refreshToken }
+	}
 }
 
 function touch (id) {
@@ -455,8 +518,17 @@ function removeShare ({ account = null, provider = null, appId }) {
 function updateCredentials (id, opts = {}) {
 	const sets = []
 	const params = []
+	let rawSelfRefresh = null
 	if (opts.credentials !== undefined) {
-		const credsJson = opts.credentials && typeof opts.credentials === 'object' ? JSON.stringify(opts.credentials) : opts.credentials
+		let nextCreds = opts.credentials
+		if (nextCreds && typeof nextCreds === 'object' && typeof nextCreds.refreshToken === 'string') {
+			const meta = sqlite.prepare('SELECT provider, type FROM tokens WHERE id = ?').get(id)
+			if (meta?.provider === 'self' && meta.type === 'bearer') {
+				rawSelfRefresh = nextCreds.refreshToken
+				nextCreds = { ...nextCreds, refreshToken: hashSecret(rawSelfRefresh) }
+			}
+		}
+		const credsJson = nextCreds && typeof nextCreds === 'object' ? JSON.stringify(nextCreds) : nextCreds
 		sets.push('credentials = ?')
 		params.push(credsJson)
 	}
@@ -476,7 +548,12 @@ function updateCredentials (id, opts = {}) {
 	sets.push('updated = ?')
 	params.push(now, id)
 	sqlite.prepare(`UPDATE tokens SET ${sets.join(', ')} WHERE id = ?`).run(...params)
-	return get(id)
+	const updated = get(id)
+	if (!rawSelfRefresh || !updated) return updated
+	return {
+		...updated,
+		credentials: { ...(updated.credentials || {}), refreshToken: rawSelfRefresh }
+	}
 }
 
 function updateSession (id, { name, admin, rotateToken = false } = {}) {
@@ -485,6 +562,7 @@ function updateSession (id, { name, admin, rotateToken = false } = {}) {
 	const now = new Date(nowMs).toISOString()
 	const sets = []
 	const params = []
+	let rotatedToken = null
 	if (name !== undefined) {
 		sets.push('name = ?')
 		params.push(name ? String(name).trim() : null)
@@ -494,8 +572,10 @@ function updateSession (id, { name, admin, rotateToken = false } = {}) {
 		params.push(admin ? 1 : 0)
 	}
 	if (rotateToken) {
+		rotatedToken = randomUUID()
+		recentRefreshes.delete(id)
 		sets.push('token = ?')
-		params.push(randomUUID())
+		params.push(hashSecret(rotatedToken))
 		sets.push('expires_at = CASE WHEN expires_at IS NOT NULL THEN ? ELSE NULL END')
 		params.push(nowMs + 3600 * 1000)
 	}
@@ -504,28 +584,33 @@ function updateSession (id, { name, admin, rotateToken = false } = {}) {
 		params.push(now, id)
 		sqlite.prepare(`UPDATE tokens SET ${sets.join(', ')} WHERE id = ? AND provider = 'self' AND type = 'bearer'`).run(...params)
 	}
-	return get(id)
+	const updated = get(id)
+	if (!updated || !rotatedToken) return updated
+	return { ...updated, token: rotatedToken }
 }
 
 function remove (id) {
 	if (!id) return false
+	recentRefreshes.delete(id)
 	const res = sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(id)
 	return res.changes > 0
 }
 
 function prune (maxAgeMs = DORMANT_MS) {
 	const now = Date.now()
+	pruneRecentRefreshes(now)
 	const minDate = new Date(now - maxAgeMs).toISOString()
 	sqlite.prepare("DELETE FROM tokens WHERE type IN ('oauth_state', 'oauth_code') AND expires_at IS NOT NULL AND expires_at <= ?").run(now)
 	sqlite.prepare("DELETE FROM tokens WHERE provider = 'self' AND type = 'bearer' AND expires_at IS NOT NULL AND updated < ?").run(minDate)
 }
 
-function formatState (row) {
+function formatState (row, rawState = null) {
 	if (!row) return null
 	const tok = formatToken(row)
 	const meta = tok.credentials || {}
 	return {
-		state: tok.id,
+		id: tok.id,
+		state: rawState,
 		userId: tok.userId,
 		mode: meta.mode || null,
 		clientId: meta.clientId || null,
@@ -564,10 +649,8 @@ function createState (opts = {}) {
 		ip = null,
 		ttl = 15 * 60 * 1000
 	} = opts
-	const state = randomUUID()
 	const expiresAt = Date.now() + ttl
-	create({
-		id: state,
+	const created = create({
 		userId,
 		provider: provider || 'self',
 		type: 'oauth_state',
@@ -588,19 +671,21 @@ function createState (opts = {}) {
 		admin,
 		ip
 	})
-	return state
+	return created.token
 }
 
 function getState (state) {
-	if (!state) return null
-	const row = sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?)").get(state, Date.now())
-	return formatState(row)
+	const tokenHash = hashSecret(state)
+	if (!tokenHash) return null
+	const row = sqlite.prepare("SELECT * FROM tokens WHERE token = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?)").get(tokenHash, Date.now())
+	return formatState(row, state)
 }
 
 function consumeState (state) {
-	if (!state) return null
-	const row = sqlite.prepare("DELETE FROM tokens WHERE id = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?) RETURNING *").get(state, Date.now())
-	return formatState(row)
+	const tokenHash = hashSecret(state)
+	if (!tokenHash) return null
+	const row = sqlite.prepare("DELETE FROM tokens WHERE token = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?) RETURNING *").get(tokenHash, Date.now())
+	return formatState(row, state)
 }
 
 function createAuthCode (opts = {}) {
@@ -616,9 +701,7 @@ function createAuthCode (opts = {}) {
 		codeChallenge = null,
 		codeChallengeMethod = null
 	} = opts
-	const code = randomUUID()
-	create({
-		id: code,
+	const created = create({
 		userId,
 		provider: 'self',
 		type: 'oauth_code',
@@ -635,17 +718,19 @@ function createAuthCode (opts = {}) {
 		ip,
 		ua
 	})
-	return code
+	return created.token
 }
 
 function consumeAuthCode (code) {
-	if (!code) return null
-	const row = sqlite.prepare("DELETE FROM tokens WHERE id = ? AND type = 'oauth_code' AND (expires_at IS NULL OR expires_at > ?) RETURNING *").get(code, Date.now())
+	const tokenHash = hashSecret(code)
+	if (!tokenHash) return null
+	const row = sqlite.prepare("DELETE FROM tokens WHERE token = ? AND type = 'oauth_code' AND (expires_at IS NULL OR expires_at > ?) RETURNING *").get(tokenHash, Date.now())
 	if (!row) return null
 	const tok = formatToken(row)
 	const meta = tok.credentials || {}
 	return {
-		code: tok.id,
+		id: tok.id,
+		code,
 		userId: tok.userId,
 		name: tok.name,
 		admin: tok.admin,

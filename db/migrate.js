@@ -1,21 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import * as users from './users.js'
+import { hashSecret } from './tokens.js'
 
 export {
 	migrate
 }
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
-function migrate (sqlite) {
-	const version = sqlite.prepare('PRAGMA user_version').get()?.user_version || 0
-	if (version >= SCHEMA_VERSION) return
+function migrateUsersEmail (sqlite) {
 	const userCols = sqlite.prepare('PRAGMA table_info(users)').all()
 	const hasEmail = userCols.some(c => c.name === 'email')
-	if (!hasEmail) {
-		sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
-		return
-	}
+	if (!hasEmail) return
 	sqlite.exec('PRAGMA foreign_keys = OFF;')
 	try {
 		sqlite.exec('BEGIN IMMEDIATE;')
@@ -48,7 +44,6 @@ function migrate (sqlite) {
 			for (const dropId of dropUserIds) {
 				sqlite.prepare('DELETE FROM users WHERE id = ?').run(dropId)
 			}
-			sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 			sqlite.exec('COMMIT;')
 		} catch (err) {
 			sqlite.exec('ROLLBACK;')
@@ -56,5 +51,58 @@ function migrate (sqlite) {
 		}
 	} finally {
 		sqlite.exec('PRAGMA foreign_keys = ON;')
+	}
+}
+
+function migrateSelfTokenHashes (sqlite) {
+	sqlite.exec('BEGIN IMMEDIATE;')
+	try {
+		const rows = sqlite.prepare(`
+			SELECT id, type, token, credentials
+			FROM tokens
+			WHERE provider = 'self' OR type IN ('oauth_state', 'oauth_code')
+		`).all()
+		const updateStmt = sqlite.prepare('UPDATE tokens SET id = ?, token = ?, credentials = ? WHERE id = ?')
+		for (const row of rows) {
+			let nextId = row.id
+			let nextToken = row.token
+			let changed = false
+			if (typeof row.token === 'string' && row.token) {
+				nextToken = hashSecret(row.token)
+				changed = true
+			} else if ((row.type === 'oauth_state' || row.type === 'oauth_code') && !row.token) {
+				nextId = randomUUID()
+				nextToken = hashSecret(row.id)
+				changed = true
+			}
+			let nextCreds = row.credentials
+			if (row.type === 'bearer' && row.credentials) {
+				const parsed = JSON.parse(row.credentials)
+				if (parsed && typeof parsed === 'object' && typeof parsed.refreshToken === 'string' && parsed.refreshToken) {
+					parsed.refreshToken = hashSecret(parsed.refreshToken)
+					nextCreds = JSON.stringify(parsed)
+					changed = true
+				}
+			}
+			if (changed) {
+				updateStmt.run(nextId, nextToken, nextCreds, row.id)
+			}
+		}
+		sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
+		sqlite.exec('COMMIT;')
+	} catch (err) {
+		sqlite.exec('ROLLBACK;')
+		throw err
+	}
+}
+
+function migrate (sqlite) {
+	const version = sqlite.prepare('PRAGMA user_version').get()?.user_version || 0
+	if (version >= SCHEMA_VERSION) return
+	if (version < 1) {
+		migrateUsersEmail(sqlite)
+	}
+	if (version < 2) {
+		migrateSelfTokenHashes(sqlite)
 	}
 }

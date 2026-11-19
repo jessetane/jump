@@ -399,6 +399,9 @@ test('oauth state flow', async () => {
 		ip: '127.0.0.1'
 	})
 	assert.match(state, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+	assert.equal(db.sqlite.prepare("SELECT 1 FROM tokens WHERE id = ? OR token = ?").get(state, state), undefined, 'Plaintext oauth_state must never be stored in SQLite')
+	const stateRow = db.sqlite.prepare("SELECT * FROM tokens WHERE token = ? AND type = 'oauth_state'").get(db.tokens.hashSecret(state))
+	assert.ok(stateRow, 'oauth_state must be indexed by sha256 hash in tokens.token')
 	const consumed = db.tokens.consumeState(state)
 	assert.equal(consumed.clientState, 'random-state')
 	assert.equal(consumed.clientRedirectUri, 'https://example.com/oauth/return')
@@ -456,7 +459,13 @@ test('oauth code exchange flow', async () => {
 	assert.equal(issuedSession.userId, session.userId)
 	assert.equal(issuedSession.name, 'Test OAuth Session')
 	assert.ok(issuedSession.expiresAt > Date.now())
-	assert.equal(issuedSession.credentials.refreshToken, data.refresh_token)
+	assert.equal(issuedSession.token, null, 'Read back session must never expose token hash as plaintext token')
+	assert.equal(issuedSession.credentials, null, 'Read back session must never expose refreshToken hash')
+	const rawIssuedRow = db.sqlite.prepare('SELECT token, credentials FROM tokens WHERE id = ?').get(issuedSession.id)
+	assert.equal(rawIssuedRow.token, db.tokens.hashSecret(data.access_token), 'Access token must be hashed at rest')
+	assert.equal(JSON.parse(rawIssuedRow.credentials).refreshToken, db.tokens.hashSecret(data.refresh_token), 'Refresh token must be hashed at rest')
+	assert.equal(db.tokens.getByToken(rawIssuedRow.token), null, 'Database hash stolen from SQLite must never authenticate as a Bearer token')
+	assert.equal(db.tokens.refreshOauthSession(JSON.parse(rawIssuedRow.credentials).refreshToken), null, 'Database refresh hash stolen from SQLite must never refresh a session')
 	const issuedLinks = db.links.listBySessionId(issuedSession.id)
 	assert.equal(issuedLinks.length, 1)
 	assert.equal(issuedLinks[0].appId, app.id)
@@ -995,7 +1004,8 @@ test('oauth consent html page, post consent, callback login, and scanner-safe tw
 	const unexchangedSessions = db.tokens.listByUserId(agentUser.id, { provider: 'self' })
 	assert.deepEqual(unexchangedSessions, [], 'No bearer session exists before /oauth/token exchange')
 	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS count FROM tokens WHERE user_id = ? AND type = 'bearer'").get(agentUser.id).count, 0, 'Unexchanged OAuth flow must not create bearer row until /oauth/token')
-	const codeRow = db.sqlite.prepare("SELECT * FROM tokens WHERE id = ? AND type = 'oauth_code'").get(code)
+	assert.equal(db.sqlite.prepare("SELECT 1 FROM tokens WHERE id = ? OR token = ?").get(code, code), undefined, 'Plaintext oauth_code must never be stored in SQLite')
+	const codeRow = db.sqlite.prepare("SELECT * FROM tokens WHERE token = ? AND type = 'oauth_code'").get(db.tokens.hashSecret(code))
 	assert.equal(codeRow.user_id, agentUser.id)
 	assert.equal(codeRow.name, 'Coding Agent')
 	assert.ok(codeRow.expires_at > Date.now(), 'oauth_code must have 10m expiresAt')
@@ -1421,9 +1431,10 @@ test('mcp auth whoami, list_sessions, and revoke_session', async () => {
 	assert.equal(revokeAppAsSessionResult.revoked, false, 'api.auth.revokeSession must reject non-self app IDs')
 	assert.ok(db.tokens.get(app.id), 'api.auth.revokeSession must not delete upstream app token')
 	const ephemeralCode = db.tokens.createAuthCode({ userId: user.id, clientRedirectUri: 'https://chatgpt.com/callback' })
-	const revokeCodeAsSessionResult = await api.auth.revokeSession(session1.token, { sessionId: ephemeralCode })
+	const ephemeralCodeRow = db.sqlite.prepare("SELECT id FROM tokens WHERE token = ? AND type = 'oauth_code'").get(db.tokens.hashSecret(ephemeralCode))
+	const revokeCodeAsSessionResult = await api.auth.revokeSession(session1.token, { sessionId: ephemeralCodeRow.id })
 	assert.equal(revokeCodeAsSessionResult.revoked, false, 'api.auth.revokeSession must reject non-bearer self rows (oauth_code / oauth_state)')
-	assert.ok(db.tokens.get(ephemeralCode), 'api.auth.revokeSession must not delete oauth_code row')
+	assert.ok(db.tokens.get(ephemeralCodeRow.id), 'api.auth.revokeSession must not delete oauth_code row')
 	const revokeOtherResult = await executeTool('admin', { action: 'revoke_session', allOthers: true }, session1.token)
 	assert.equal(revokeOtherResult.isError, undefined)
 	const revokeOtherParsed = JSON.parse(revokeOtherResult.content[0].text)
@@ -2259,7 +2270,8 @@ test('oauth consent flow with admin parameter', async () => {
 	})
 	assert.equal(consentAdminRes.status, 302)
 	const stateAdminToken = new URL(consentAdminRes.headers.get('location')).searchParams.get('state')
-	const rowAdmin = db.tokens.get(stateAdminToken)
+	assert.equal(db.tokens.get(stateAdminToken), null, 'State parameter must not match unhashed tokens.id')
+	const rowAdmin = db.tokens.getState(stateAdminToken)
 	assert.ok(rowAdmin)
 	assert.equal(rowAdmin.admin, true)
 	const consentNoAdmin = new URLSearchParams({
@@ -2277,7 +2289,7 @@ test('oauth consent flow with admin parameter', async () => {
 	})
 	assert.equal(consentNoAdminRes.status, 302)
 	const stateNoAdminToken = new URL(consentNoAdminRes.headers.get('location')).searchParams.get('state')
-	const rowNoAdmin = db.tokens.get(stateNoAdminToken)
+	const rowNoAdmin = db.tokens.getState(stateNoAdminToken)
 	assert.ok(rowNoAdmin)
 	assert.equal(rowNoAdmin.admin, false)
 })
@@ -2398,7 +2410,9 @@ test('30-day dormancy pruning scopes only expiring self sessions and exempts sta
 	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(oldDate, upstreamApp.id)
 	const expState = db.tokens.createState({ mode: 'login' })
 	const expCode = db.tokens.createAuthCode({ userId: user.id, clientRedirectUri: 'https://chatgpt.com/callback' })
-	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id IN (?, ?)').run(Date.now() - 1000, expState, expCode)
+	const expStateRow = db.sqlite.prepare('SELECT id FROM tokens WHERE token = ?').get(db.tokens.hashSecret(expState))
+	const expCodeRow = db.sqlite.prepare('SELECT id FROM tokens WHERE token = ?').get(db.tokens.hashSecret(expCode))
+	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id IN (?, ?)').run(Date.now() - 1000, expStateRow.id, expCodeRow.id)
 	assert.equal(db.tokens.getState(expState), null, 'Expired oauth_state is rejected at read time before prune')
 	assert.equal(db.tokens.consumeState(expState), null, 'Expired oauth_state cannot be consumed before prune')
 	assert.equal(db.tokens.consumeAuthCode(expCode), null, 'Expired oauth_code cannot be consumed before prune')
@@ -2407,8 +2421,8 @@ test('30-day dormancy pruning scopes only expiring self sessions and exempts sta
 	assert.ok(!db.tokens.listByUserId(user.id).some(t => t.id === dormantSession.id), 'Dormant bearer session is excluded from listByUserId before prune')
 	db.tokens.prune(30 * 24 * 60 * 60 * 1000)
 	assert.equal(db.tokens.get(dormantSession.id), null)
-	assert.equal(db.tokens.get(expState), null)
-	assert.equal(db.tokens.get(expCode), null)
+	assert.equal(db.tokens.get(expStateRow.id), null)
+	assert.equal(db.tokens.get(expCodeRow.id), null)
 	assert.ok(db.tokens.get(activeSession.id))
 	assert.ok(db.tokens.get(staticSession.id), 'Static bearer sessions (expires_at IS NULL) must not be pruned by dormancy')
 	assert.ok(db.tokens.get(upstreamApp.id), 'Upstream apps must not be pruned by dormancy')
@@ -2738,8 +2752,8 @@ test('in-place upstream re-auth flow enforces admin, ownership, and account cont
 	const reloadedApp = db.tokens.get(app.id)
 	assert.equal(reloadedApp.credentials.accessToken, 'ya29.new-fresh-token')
 	assert.equal(reloadedApp.credentials.account, 'reauth@example.com')
-	const reloadedSession = db.tokens.get(session.id)
-	assert.equal(reloadedSession.token, initialSessionToken, 'Session token remains unchanged across upstream re-auth')
+	const reloadedSession = db.tokens.getByToken(initialSessionToken)
+	assert.equal(reloadedSession?.id, session.id, 'Session token remains unchanged across upstream re-auth')
 })
 
 test('rest api /api/apps and /api/links endpoints', async () => {
@@ -4016,12 +4030,16 @@ test('admin update_session action', async () => {
 	const newAuthData = JSON.parse(newAuthCheck.content[0].text)
 	assert.equal(newAuthData.authenticated, true, 'New token authenticates successfully')
 	assert.equal(newAuthData.session.expiresAt, null, 'Rotating embedded session token keeps expiresAt: null')
+	const oauthRefreshToken = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 	const oauthSession = db.tokens.create({
 		userId: user.id,
 		provider: 'self',
 		name: 'Expiring OAuth Session',
+		credentials: { refreshToken: oauthRefreshToken },
 		expiresAt: Date.now() - 5000
 	})
+	const refreshedBeforeRotate = db.tokens.refreshOauthSession(oauthRefreshToken)
+	assert.ok(refreshedBeforeRotate?.token)
 	const rotateOauthRes = await executeTool('admin', {
 		action: 'update_session',
 		sessionId: oauthSession.id,
@@ -4030,7 +4048,10 @@ test('admin update_session action', async () => {
 	assert.equal(rotateOauthRes.isError, undefined)
 	const rotateOauthData = JSON.parse(rotateOauthRes.content[0].text)
 	assert.ok(rotateOauthData.session.token)
+	assert.notEqual(rotateOauthData.session.token, refreshedBeforeRotate.token)
 	assert.ok(rotateOauthData.session.expiresAt > Date.now() + 3500 * 1000, 'Rotating an expiring/expired OAuth session extends expiresAt by 1h')
+	const refreshedAfterRotate = db.tokens.refreshOauthSession(oauthRefreshToken)
+	assert.notEqual(refreshedAfterRotate?.token, refreshedBeforeRotate.token, 'Manual rotateToken evicts 60s refresh dedup cache so old cached token is never re-served')
 })
 
 test('provider_api fail-loud on unlinked session or missing appId', async () => {
@@ -4974,6 +4995,7 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	const legacyDupUserId = 'legacy-dup-user-1'
 	const legacyDormantLogsId = 'legacy-dormant-logs-1'
 	db.sqlite.exec('PRAGMA foreign_keys = OFF;')
+	db.sqlite.exec('DELETE FROM links; DELETE FROM tokens; DELETE FROM logins; DELETE FROM logs; DELETE FROM users;')
 	db.sqlite.exec(`
 		PRAGMA user_version = 0;
 		CREATE TEMP TABLE users_mig_tmp AS SELECT id, created, updated FROM users;
@@ -5000,12 +5022,12 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		now,
 		now
 	)
-	const legacyAdminSession = db.tokens.create({
-		userId: legacyUserId,
-		provider: 'self',
-		name: 'Legacy Real User Session',
-		admin: 1
-	})
+	const legacyAdminSessionId = 'legacy-admin-session-1'
+	const legacyAdminBearer = '11111111-2222-4333-8444-555555555555'
+	db.sqlite.prepare(`
+		INSERT INTO tokens (id, user_id, provider, type, name, token, admin, created, updated)
+		VALUES (?, ?, 'self', 'bearer', 'Legacy Real User Session', ?, 1, ?, ?)
+	`).run(legacyAdminSessionId, legacyUserId, legacyAdminBearer, now, now)
 	const legacyGoogleApp = db.tokens.create({
 		userId: legacyUserId,
 		provider: 'google',
@@ -5014,7 +5036,7 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		credentials: { accessToken: 'ya29.legacy', refreshToken: '1//legacy', account: 'legacy@gmail.com' }
 	})
 	db.links.create({
-		sessionId: legacyAdminSession.id,
+		sessionId: legacyAdminSessionId,
 		appId: legacyGoogleApp.id
 	})
 	db.sqlite.prepare('INSERT INTO users (id, email, name, picture, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
@@ -5025,12 +5047,11 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		now,
 		now
 	)
-	const dupSession = db.tokens.create({
-		userId: legacyDupUserId,
-		provider: 'self',
-		name: 'Duplicate Case Session',
-		admin: 0
-	})
+	const dupSessionId = 'legacy-dup-session-1'
+	db.sqlite.prepare(`
+		INSERT INTO tokens (id, user_id, provider, type, name, token, admin, created, updated)
+		VALUES (?, ?, 'self', 'bearer', 'Duplicate Case Session', '22222222-3333-4444-8555-666666666666', 0, ?, ?)
+	`).run(dupSessionId, legacyDupUserId, now, now)
 	db.sqlite.prepare('INSERT INTO users (id, email, name, picture, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
 		legacyDormantLogsId,
 		'dormant-logs@gmail.com',
@@ -5048,18 +5069,31 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		status: 200,
 		duration: 12
 	})
+	const legacyUnmigratedSessionId = 'legacy-unhashed-session-1'
+	const legacyPlainToken = '00000000-1111-4222-8333-444444444444'
+	const legacyPlainRefresh = '55555555-6666-4777-8888-999999999999'
+	db.sqlite.prepare(`
+		INSERT INTO tokens (id, user_id, provider, type, name, token, credentials, expires_at, admin, created, updated)
+		VALUES (?, ?, 'self', 'bearer', 'Legacy Unhashed OAuth Session', ?, ?, ?, 1, ?, ?)
+	`).run(legacyUnmigratedSessionId, legacyUserId, legacyPlainToken, JSON.stringify({ refreshToken: legacyPlainRefresh }), Date.now() + 3600000, now, now)
 	db.init()
-	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 1)
-	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after users.email migration')
+	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 2)
+	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after users.email and token hash migrations')
+	const migratedTokenRow = db.sqlite.prepare('SELECT token, credentials FROM tokens WHERE id = ?').get(legacyUnmigratedSessionId)
+	assert.equal(migratedTokenRow.token, db.tokens.hashSecret(legacyPlainToken), 'SCHEMA_VERSION 2 hashes existing plaintext self bearer tokens in-place')
+	assert.equal(JSON.parse(migratedTokenRow.credentials).refreshToken, db.tokens.hashSecret(legacyPlainRefresh), 'SCHEMA_VERSION 2 hashes existing plaintext self refreshTokens in-place')
+	assert.equal(db.tokens.getByToken(legacyPlainToken)?.id, legacyUnmigratedSessionId, 'Migrated legacy bearer token continues to authenticate')
+	const migratedRefreshed = db.tokens.refreshOauthSession(legacyPlainRefresh)
+	assert.equal(migratedRefreshed?.id, legacyUnmigratedSessionId, 'Migrated legacy refresh token continues to refresh session')
 	const migratedEmailMaster = db.sqlite.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE tbl_name = 'users' ORDER BY type, name").all()
 	assert.deepEqual(migratedEmailMaster, freshMaster, 'Migrated users.email DB matches fresh pure-anchor DDL with no leftover columns or indexes')
 	const migratedUser = db.users.get(legacyUserId)
 	assert.ok(migratedUser)
 	assert.deepEqual(Object.keys(migratedUser).sort(), ['created', 'id', 'updated'])
-	assert.equal(db.tokens.getByToken(legacyAdminSession.token)?.userId, legacyUserId, 'Existing bearer sessions remain active after migration')
-	assert.equal(db.links.listBySessionId(legacyAdminSession.id).length, 1, 'Existing session-to-app links survive users table rebuild without CASCADE deletion')
+	assert.equal(db.tokens.getByToken(legacyAdminBearer)?.userId, legacyUserId, 'Existing bearer sessions remain active after migration')
+	assert.equal(db.links.listBySessionId(legacyAdminSessionId).length, 1, 'Existing session-to-app links survive users table rebuild without CASCADE deletion')
 	assert.equal(db.users.get(legacyDupUserId), null, 'Case-insensitive duplicate legacy user row is merged into survivor')
-	assert.equal(db.tokens.get(dupSession.id).userId, legacyUserId, 'Duplicate legacy user session is re-parented to surviving user')
+	assert.equal(db.tokens.get(dupSessionId).userId, legacyUserId, 'Duplicate legacy user session is re-parented to surviving user')
 	assert.ok(db.users.get(legacyDormantLogsId), 'Zero-session legacy user with historical logs is preserved as real user')
 	assert.equal(db.logins.getAccountByUserId(legacyDormantLogsId), 'dormant-logs@gmail.com')
 	assert.equal(db.logs.listByUserId(legacyDormantLogsId).length, 1, 'Historical logs for zero-session legacy user are preserved')
