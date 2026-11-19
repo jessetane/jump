@@ -42,6 +42,37 @@ async function readResponseBody (res, maxBytes) {
 	return Buffer.concat(chunks)
 }
 
+function stripQueryAuth (parsed, cleanToken) {
+	const secretParams = new URLSearchParams(cleanToken.slice(1))
+	const secretKeysLower = new Set(Array.from(secretParams.keys(), k => k.toLowerCase()))
+	for (const existingKey of Array.from(parsed.searchParams.keys())) {
+		if (secretKeysLower.has(existingKey.toLowerCase())) {
+			parsed.searchParams.delete(existingKey)
+		}
+	}
+	return secretParams
+}
+
+function stripLocationAuth (rawLocation, baseUrl, cleanToken) {
+	if (!cleanToken.startsWith('?')) return rawLocation
+	let parsed
+	try {
+		parsed = new URL(rawLocation, baseUrl)
+	} catch {
+		const err = new Error('Invalid upstream redirect Location')
+		err.status = 502
+		throw err
+	}
+	const before = parsed.toString()
+	stripQueryAuth(parsed, cleanToken)
+	const after = parsed.toString()
+	if (after === before) return rawLocation
+	const trimmed = rawLocation.trim()
+	if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed)) return after
+	if (trimmed.startsWith('//')) return `//${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`
+	return `${parsed.pathname}${parsed.search}${parsed.hash}`
+}
+
 function attachAuth (targetUrl, baseHeaders, token) {
 	const hopHeaders = { ...baseHeaders }
 	delete hopHeaders.authorization
@@ -50,13 +81,7 @@ function attachAuth (targetUrl, baseHeaders, token) {
 	if (!cleanToken) return { url: targetUrl, headers: hopHeaders }
 	if (cleanToken.startsWith('?')) {
 		const parsed = new URL(targetUrl)
-		const secretParams = new URLSearchParams(cleanToken.slice(1))
-		const secretKeysLower = new Set(Array.from(secretParams.keys(), k => k.toLowerCase()))
-		for (const existingKey of Array.from(parsed.searchParams.keys())) {
-			if (secretKeysLower.has(existingKey.toLowerCase())) {
-				parsed.searchParams.delete(existingKey)
-			}
-		}
+		const secretParams = stripQueryAuth(parsed, cleanToken)
 		for (const [k, v] of secretParams.entries()) {
 			parsed.searchParams.append(k, v)
 		}
@@ -106,6 +131,7 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 			}
 		}
 	}
+	const cleanToken = typeof token === 'string' ? token.trim() : ''
 	const initialOrigin = new URL(url).origin
 	let curMethod = method.toUpperCase()
 	let curUrl = url
@@ -117,7 +143,7 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 		await assertUpstreamHost(hopUrl.hostname)
 		const isInitialOrigin = hopUrl.origin === initialOrigin
 		const hopReq = isInitialOrigin
-			? attachAuth(curUrl, baseHeaders, token)
+			? attachAuth(curUrl, baseHeaders, cleanToken)
 			: { url: curUrl, headers: { ...baseHeaders } }
 		res = await fetch(hopReq.url, {
 			method: curMethod,
@@ -139,7 +165,7 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 		try {
 			nextParsed = new URL(location, curUrl)
 		} catch {
-			const err = new Error(`Invalid upstream redirect Location: ${location}`)
+			const err = new Error('Invalid upstream redirect Location')
 			err.status = 502
 			throw err
 		}
@@ -153,6 +179,9 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 			curBody = undefined
 			delete baseHeaders['content-type']
 			delete baseHeaders['content-length']
+		}
+		if (cleanToken.startsWith('?')) {
+			stripQueryAuth(nextParsed, cleanToken)
 		}
 		curUrl = nextParsed.toString()
 		if (nextParsed.origin === initialOrigin && onSameOriginRedirect) {
@@ -173,9 +202,16 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 	const rawContentType = res.headers.get('content-type') || ''
 	const buf = await readResponseBody(res, maxFileSizeBytes)
 	if (raw) {
+		const rawLocation = res.headers.get('location')
+		const cleanedLocation = rawLocation ? stripLocationAuth(rawLocation, curUrl, cleanToken) : rawLocation
+		let outHeaders = res.headers
+		if (cleanedLocation !== rawLocation) {
+			outHeaders = new Headers(res.headers)
+			outHeaders.set('location', cleanedLocation)
+		}
 		return {
 			status: res.status,
-			headers: res.headers,
+			headers: outHeaders,
 			body: buf
 		}
 	}

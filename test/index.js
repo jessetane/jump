@@ -7254,6 +7254,119 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 	}
 })
 
+test('proxy strips query-param API keys on upstream redirects', async () => {
+	const addr = server.address()
+	const origFetch = globalThis.fetch
+	const qSecret = 'SUPER_SECRET_QUERY_KEY_998877'
+	const qOwner = db.logins.resolveUser('google', 'query-scrub@example.com')
+	const qSession = db.tokens.create({ userId: qOwner.id, provider: 'self', admin: 1 })
+	const qApp = db.tokens.create({
+		userId: qOwner.id,
+		provider: 'customq',
+		type: 'api_key',
+		name: 'Query Key App',
+		credentials: { apiKey: `?ApiKey=${qSecret}`, baseUrl: 'http://127.0.0.1:19999' }
+	})
+	db.links.create({
+		sessionId: qSession.id,
+		appId: qApp.id,
+		policy: [{ action: 'allow', query: { ApiKey: null } }]
+	})
+	const seenUrls = []
+	globalThis.fetch = async (input) => {
+		const u = String(input)
+		seenUrls.push(u)
+		if (u.startsWith('http://127.0.0.1:19999/v1/items')) {
+			return new Response(null, {
+				status: 302,
+				headers: { location: `http://127.0.0.1:19999/v2/items?ApiKey=${qSecret}&page=2` }
+			})
+		}
+		if (u.startsWith('http://127.0.0.1:19999/v2/items')) {
+			return new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			})
+		}
+		if (u.startsWith('http://127.0.0.1:19999/cross-hop')) {
+			return new Response(null, {
+				status: 302,
+				headers: { location: `http://127.0.0.1:20000/cdn?apikey=${qSecret}&asset=1` }
+			})
+		}
+		if (u.startsWith('http://127.0.0.1:20000/cdn')) {
+			return new Response(JSON.stringify({ cdn: true }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			})
+		}
+		if (u.startsWith('http://127.0.0.1:19999/raw-rel')) {
+			return new Response(null, {
+				status: 302,
+				headers: { location: `/v2/next?apikey=${qSecret}&ok=1#sec` }
+			})
+		}
+		if (u.startsWith('http://127.0.0.1:19999/raw-abs')) {
+			return new Response(null, {
+				status: 302,
+				headers: { location: `https://cdn.example.com/dl?ApiKey=${qSecret}&file=1` }
+			})
+		}
+		if (u.startsWith('http://127.0.0.1:19999/raw-bad-loc')) {
+			return new Response(null, {
+				status: 302,
+				headers: { location: `http://[::1:bad/?ApiKey=${qSecret}` }
+			})
+		}
+		return origFetch(input)
+	}
+	try {
+		const sameOriginRes = await executeTool('customq_api', { url: '/v1/items' }, qSession.token)
+		assert.equal(sameOriginRes.isError, undefined, 'Same-origin redirect strips echoed query secret before policy check and re-attaches on hop 2')
+		assert.equal(seenUrls[1], `http://127.0.0.1:19999/v2/items?page=2&ApiKey=${qSecret}`)
+		const crossOriginRes = await executeTool('customq_api', { url: '/cross-hop' }, qSession.token)
+		assert.equal(crossOriginRes.isError, undefined)
+		assert.equal(seenUrls[3], 'http://127.0.0.1:20000/cdn?asset=1', 'Cross-origin redirect strips query-param API key before hop')
+		const rawRelRes = await origFetch(`http://127.0.0.1:${addr.port}/api/customq/raw-rel`, {
+			headers: { authorization: `Bearer ${qSession.token}` },
+			redirect: 'manual'
+		})
+		assert.equal(rawRelRes.status, 302)
+		assert.equal(rawRelRes.headers.get('location'), '/v2/next?ok=1#sec', 'Raw REST proxy strips echoed query secret from relative Location header')
+		const rawAbsRes = await origFetch(`http://127.0.0.1:${addr.port}/api/customq/raw-abs`, {
+			headers: { authorization: `Bearer ${qSession.token}` },
+			redirect: 'manual'
+		})
+		assert.equal(rawAbsRes.status, 302)
+		assert.equal(rawAbsRes.headers.get('location'), 'https://cdn.example.com/dl?file=1', 'Raw REST proxy strips echoed query secret from absolute Location header')
+		const origConsoleError = console.error
+		let loggedConsoleErrors = ''
+		console.error = (...args) => {
+			loggedConsoleErrors += args.map(String).join(' ')
+		}
+		let rawBadLocRes
+		try {
+			rawBadLocRes = await origFetch(`http://127.0.0.1:${addr.port}/api/customq/raw-bad-loc`, {
+				headers: { authorization: `Bearer ${qSession.token}` },
+				redirect: 'manual'
+			})
+		} finally {
+			console.error = origConsoleError
+		}
+		assert.equal(rawBadLocRes.status, 502, 'Malformed upstream Location header fails closed with 502 without leaking query secret')
+		assert.equal(loggedConsoleErrors.includes(qSecret), false, 'Server error log never echoes raw malformed Location query secret')
+		const rawBadLocBody = await rawBadLocRes.text()
+		assert.equal(rawBadLocBody.includes(qSecret), false)
+		const qLogs = db.logs.listByUserId(qOwner.id)
+		const itemLog = qLogs.find(l => l.url.includes('/v2/items'))
+		assert.equal(itemLog.url, 'http://127.0.0.1:19999/v2/items?page=2', 'Redirected logs.url never records query-param API key')
+		db.sqlite.exec('PRAGMA wal_checkpoint(FULL);')
+		assert.equal(fs.readFileSync(testDbPath).includes(qSecret), false, 'Query-param API key never appears in plaintext anywhere in SQLite')
+	} finally {
+		globalThis.fetch = origFetch
+	}
+})
+
 test('teardown server', (t, done) => {
 	server.close(() => {
 		fs.rmSync(testDbPath, { force: true })
