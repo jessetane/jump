@@ -348,25 +348,12 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 		try {
 			freshInfo = await provider.getFreshToken(upstreamApp)
 		} catch (err) {
-			if (targetLink.app?.type === 'share') {
-				const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. Ask the app owner (${targetLink.app.sharedBy || 'admin'}) to re-authenticate.`)
-				error.status = 401
-				throw error
-			}
-			if (!session.admin) {
-				const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. Ask an admin to re-authenticate.`)
-				error.status = 401
-				throw error
-			}
-			const setupCode = db.tokens.createState({
-				mode: 'setup_connect',
-				sessionId: session.id,
-				provider: provider.id,
-				reauthAppId: upstreamApp.id,
-				ttl: 10 * 60 * 1000
-			})
-			const reauthUrl = `${appUrl}/providers/${provider.id}/connect?code=${encodeURIComponent(setupCode)}`
-			const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. Re-authenticate: ${reauthUrl}`)
+			const hint = targetLink.app?.type === 'share'
+				? `Ask the app owner (${targetLink.app.sharedBy || 'admin'}) to re-authenticate.`
+				: session.admin
+					? `Use connect_app with appId "${upstreamApp.id}" to re-authenticate.`
+					: 'Ask an admin to re-authenticate.'
+			const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. ${hint}`)
 			error.status = 401
 			throw error
 		}

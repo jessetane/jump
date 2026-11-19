@@ -2720,20 +2720,16 @@ test('in-place upstream re-auth flow enforces admin, ownership, and account cont
 		return origFetch(input, init)
 	}
 	try {
+		const stateCountBefore = db.sqlite.prepare("SELECT COUNT(*) AS n FROM tokens WHERE type = 'oauth_state'").get().n
 		const nonAdminProxyErr = await executeTool('google_api', { url: 'https://www.googleapis.com/drive/v3/files' }, session.token, `http://127.0.0.1:${addr.port}`)
 		assert.equal(nonAdminProxyErr.isError, true)
 		assert.match(nonAdminProxyErr.content[0].text, /Ask an admin to re-authenticate/)
 		assert.doesNotMatch(nonAdminProxyErr.content[0].text, /reauth_app_id/, 'Non-admin proxy refresh failure must not leak reauth URL')
 		const adminProxyErr = await executeTool('google_api', { url: 'https://www.googleapis.com/drive/v3/files' }, adminSession.token, `http://127.0.0.1:${addr.port}`)
 		assert.equal(adminProxyErr.isError, true)
-		const reauthUrlMatch = adminProxyErr.content[0].text.match(/Re-authenticate:\s*(http\S+)/)
-		assert.ok(reauthUrlMatch, 'Admin proxy refresh failure includes clickable reauth URL')
-		const parsedProxyReauth = new URL(reauthUrlMatch[1])
-		assert.equal(parsedProxyReauth.searchParams.get('session_id'), null, 'Proxy reauth URL never leaks raw session_id')
-		const proxySetupState = db.tokens.getState(parsedProxyReauth.searchParams.get('code'))
-		assert.equal(proxySetupState?.mode, 'setup_connect')
-		assert.equal(proxySetupState?.reauthAppId, app.id)
-		assert.equal(proxySetupState?.sessionId, adminSession.id)
+		assert.match(adminProxyErr.content[0].text, new RegExp(`Use connect_app with appId "${app.id}" to re-authenticate\\.`))
+		const stateCountAfter = db.sqlite.prepare("SELECT COUNT(*) AS n FROM tokens WHERE type = 'oauth_state'").get().n
+		assert.equal(stateCountAfter, stateCountBefore, 'Failed proxy refresh must not mint oauth_state rows in DB')
 		const nonAdminCbState = db.tokens.createState({ sessionId: session.id, reauthAppId: app.id, provider: 'google' })
 		const nonAdminCbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=g-code&state=${nonAdminCbState}`)
 		assert.equal(nonAdminCbRes.status, 403, 'Callback rejects non-admin session on reauth_app_id')
