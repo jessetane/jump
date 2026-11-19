@@ -240,7 +240,8 @@ function vacuumDatabase (sqlite) {
 
 function migrate (sqlite) {
 	const version = sqlite.prepare('PRAGMA user_version').get()?.user_version || 0
-	const dbPath = sqlite.prepare('PRAGMA database_list').get()?.file || process.env.DB_PATH || './data.db'
+	const dbList = sqlite.prepare('PRAGMA database_list').get()
+	const dbPath = dbList && 'file' in dbList ? (dbList.file || ':memory:') : (process.env.DB_PATH || './data.db')
 	const keys = loadKeys({ dbPath, encrypted: version >= ENCRYPTED_SCHEMA_VERSION })
 	let dirty = version > 0 && version < SCHEMA_VERSION
 	if (version < 1 && migrateUsersEmail(sqlite)) {

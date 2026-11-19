@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
-import fs from 'node:fs'
+import { tightenFileMode } from '../util.js'
 import * as users from './users.js'
 import * as logins from './logins.js'
 import * as tokens from './tokens.js'
@@ -28,16 +28,10 @@ function init () {
 	migrate()
 }
 
-function tightenFileMode (filePath) {
-	if (fs.existsSync(filePath) && (fs.statSync(filePath).mode & 0o077) !== 0) {
-		fs.chmodSync(filePath, 0o600)
-	}
-}
-
 const prevUmask = process.umask(0o077)
 let sqlite
 try {
-	tightenFileMode(dbPath)
+	if (dbPath !== ':memory:') tightenFileMode(dbPath)
 	sqlite = new DatabaseSync(dbPath)
 	sqlite.exec('PRAGMA journal_mode = WAL;')
 	sqlite.exec('PRAGMA secure_delete = ON;')
@@ -45,8 +39,10 @@ try {
 	sqlite.exec('PRAGMA recursive_triggers = ON;')
 	sqlite.exec('PRAGMA busy_timeout = 5000;')
 	init()
-	for (const ext of ['', '-wal', '-shm']) {
-		tightenFileMode(`${dbPath}${ext}`)
+	if (dbPath !== ':memory:') {
+		for (const ext of ['', '-wal', '-shm']) {
+			tightenFileMode(`${dbPath}${ext}`)
+		}
 	}
 } finally {
 	process.umask(prevUmask)

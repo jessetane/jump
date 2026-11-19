@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { tightenFileMode } from './util.js'
 
 export {
 	generateKey,
@@ -60,12 +61,6 @@ function parseKeyList (raw, label = 'ENCRYPTION_KEY') {
 	return keys
 }
 
-function tightenKeyMode (filePath) {
-	if ((fs.statSync(filePath).mode & 0o077) !== 0) {
-		fs.chmodSync(filePath, 0o600)
-	}
-}
-
 function writeKeyFile (filePath) {
 	const key = generateKey()
 	const prevUmask = process.umask(0o077)
@@ -77,21 +72,29 @@ function writeKeyFile (filePath) {
 	return key
 }
 
+function loadKeyPair (keyPath, oldKeyPath, { autoCreate = false, tighten = false, missingMessage } = {}) {
+	const hasKey = fs.existsSync(keyPath)
+	const hasOldKey = fs.existsSync(oldKeyPath)
+	if (!hasKey && !autoCreate) {
+		throw new Error(missingMessage)
+	}
+	const oldKey = hasOldKey ? parseKey(fs.readFileSync(oldKeyPath, 'utf8'), oldKeyPath) : null
+	if (hasOldKey && tighten) tightenFileMode(oldKeyPath)
+	const rawCurrent = hasKey ? fs.readFileSync(keyPath, 'utf8') : writeKeyFile(keyPath)
+	if (hasKey && tighten) tightenFileMode(keyPath)
+	const currentKey = parseKey(rawCurrent, keyPath)
+	const keys = [currentKey]
+	if (oldKey && !oldKey.equals(currentKey)) keys.push(oldKey)
+	return keys
+}
+
 function loadKeys ({ dbPath = process.env.DB_PATH || './data.db', encrypted = false } = {}) {
 	const credDir = process.env.CREDENTIALS_DIRECTORY?.trim()
 	if (credDir) {
 		const keyPath = path.join(credDir, 'jump.key')
-		if (!fs.existsSync(keyPath)) {
-			throw new Error(`Missing systemd credential: ${keyPath}`)
-		}
-		const currentKey = parseKey(fs.readFileSync(keyPath, 'utf8'), keyPath)
-		const keys = [currentKey]
-		const oldKeyPath = path.join(credDir, 'jump.key.old')
-		if (fs.existsSync(oldKeyPath)) {
-			const oldKey = parseKey(fs.readFileSync(oldKeyPath, 'utf8'), oldKeyPath)
-			if (!oldKey.equals(currentKey)) keys.push(oldKey)
-		}
-		activeKeys = keys
+		activeKeys = loadKeyPair(keyPath, path.join(credDir, 'jump.key.old'), {
+			missingMessage: `Missing systemd credential: ${keyPath}`
+		})
 		return activeKeys
 	}
 	const envKey = process.env.ENCRYPTION_KEY?.trim()
@@ -99,21 +102,20 @@ function loadKeys ({ dbPath = process.env.DB_PATH || './data.db', encrypted = fa
 		activeKeys = parseKeyList(envKey, 'ENCRYPTION_KEY')
 		return activeKeys
 	}
+	if (!dbPath || dbPath === ':memory:') {
+		if (encrypted) {
+			throw new Error('Missing encryption key for encrypted in-memory database')
+		}
+		activeKeys = [parseKey(generateKey())]
+		return activeKeys
+	}
 	const keyPath = `${dbPath}.key`
 	const oldKeyPath = `${dbPath}.key.old`
-	const hasKey = fs.existsSync(keyPath)
-	const hasOldKey = fs.existsSync(oldKeyPath)
-	if (!hasKey && encrypted && !hasOldKey) {
-		throw new Error(`Missing encryption key file "${keyPath}" for encrypted database`)
-	}
-	const oldKey = hasOldKey ? parseKey(fs.readFileSync(oldKeyPath, 'utf8'), oldKeyPath) : null
-	if (hasOldKey) tightenKeyMode(oldKeyPath)
-	const rawCurrent = hasKey ? fs.readFileSync(keyPath, 'utf8') : writeKeyFile(keyPath)
-	if (hasKey) tightenKeyMode(keyPath)
-	const currentKey = parseKey(rawCurrent, keyPath)
-	const keys = [currentKey]
-	if (oldKey && !oldKey.equals(currentKey)) keys.push(oldKey)
-	activeKeys = keys
+	activeKeys = loadKeyPair(keyPath, oldKeyPath, {
+		autoCreate: !encrypted || fs.existsSync(oldKeyPath),
+		tighten: true,
+		missingMessage: `Missing encryption key file "${keyPath}" for encrypted database`
+	})
 	return activeKeys
 }
 

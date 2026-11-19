@@ -1,4 +1,5 @@
 import dns from 'node:dns'
+import fs from 'node:fs'
 import net from 'node:net'
 
 export {
@@ -17,6 +18,7 @@ export {
 	hasPathTraversal,
 	parseAccountSpec,
 	isPlainObject,
+	tightenFileMode,
 	requireBoolean
 }
 
@@ -41,6 +43,12 @@ function isPlainObject (val) {
 	if (!val || typeof val !== 'object' || Array.isArray(val) || ArrayBuffer.isView(val)) return false
 	const proto = Object.getPrototypeOf(val)
 	return proto === Object.prototype || proto === null
+}
+
+function tightenFileMode (filePath) {
+	if (fs.existsSync(filePath) && (fs.statSync(filePath).mode & 0o077) !== 0) {
+		fs.chmodSync(filePath, 0o600)
+	}
 }
 
 function requireBoolean (val, name, defaultValue = undefined) {

@@ -7267,6 +7267,17 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 		} finally {
 			envDb.close()
 		}
+		const memDb = new DatabaseSync(':memory:')
+		try {
+			memDb.exec(TOKEN_DDL)
+			delete process.env.CREDENTIALS_DIRECTORY
+			delete process.env.ENCRYPTION_KEY
+			runMigrate(memDb)
+			assert.equal(fs.existsSync(':memory:.key'), false, ':memory: DB never writes :memory:.key to disk')
+			assert.throws(() => runMigrate(memDb), /Missing encryption key for encrypted in-memory database/, 'Encrypted :memory: DB without env key fails loud')
+		} finally {
+			memDb.close()
+		}
 		delete process.env.CREDENTIALS_DIRECTORY
 		const sharedDbOldKey = fs.readFileSync(`${testDbPath}.key`, 'utf8').trim()
 		process.env.ENCRYPTION_KEY = `${k2},${sharedDbOldKey}`
