@@ -1,6 +1,6 @@
 import { sqlite } from './index.js'
 import { userAccountSql } from './users.js'
-import { parseAccountSpec } from '../util.js'
+import { parseAccountSpec, isPlainObject } from '../util.js'
 import { secretContext, encryptSecret, decryptSecret } from '../crypto.js'
 import { createHash, randomUUID } from 'node:crypto'
 
@@ -8,6 +8,8 @@ export {
 	init,
 	hashSecret,
 	UPSTREAM_SECRET_FIELDS,
+	UPSTREAM_OBJECT_SECRET_FIELDS,
+	parseLegacyApiKey,
 	create,
 	get,
 	getActiveSession,
@@ -87,7 +89,36 @@ const UPSTREAM_JOIN = `
 	LEFT JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
 `
 
-const UPSTREAM_SECRET_FIELDS = ['apiKey', 'accessToken', 'refreshToken']
+const UPSTREAM_SECRET_FIELDS = ['accessToken', 'refreshToken']
+const UPSTREAM_OBJECT_SECRET_FIELDS = ['headers', 'query']
+
+function parseLegacyApiKey (raw) {
+	const clean = typeof raw === 'string' ? raw.trim() : ''
+	if (!clean) return {}
+	if (clean.startsWith('?')) {
+		const params = new URLSearchParams(clean.slice(1))
+		const query = Object.create(null)
+		const seenLower = new Map()
+		for (const [k, v] of params.entries()) {
+			const param = k.trim()
+			if (!param) continue
+			const lower = param.toLowerCase()
+			if (seenLower.has(lower)) delete query[seenLower.get(lower)]
+			seenLower.set(lower, param)
+			query[param] = v
+		}
+		return Object.keys(query).length > 0 ? { query: { ...query } } : {}
+	}
+	if (/^(?:Bearer|Basic)\s+/i.test(clean)) {
+		const isBasic = /^basic/i.test(clean)
+		const rest = clean.replace(/^(?:Bearer|Basic)\s+/i, '').trim()
+		return rest ? { headers: { authorization: `${isBasic ? 'Basic' : 'Bearer'} ${rest}` } } : {}
+	}
+	if (clean.includes(':')) {
+		return { headers: { authorization: `Basic ${Buffer.from(clean).toString('base64')}` } }
+	}
+	return { headers: { authorization: `Bearer ${clean}` } }
+}
 
 function hashSecret (secret) {
 	if (!secret || typeof secret !== 'string') return null
@@ -102,6 +133,12 @@ function isEncryptedTokenRow (provider, type) {
 	return provider !== 'self' && (type === 'oauth' || type === 'api_key')
 }
 
+function isPlainSecretMap (val) {
+	if (!isPlainObject(val)) return false
+	const entries = Object.entries(val)
+	return entries.length > 0 && entries.every(([k, v]) => k.length > 0 && typeof v === 'string')
+}
+
 function encryptUpstreamCredentials (creds, { id, provider, type }) {
 	if (!creds || typeof creds !== 'object' || !isEncryptedTokenRow(provider, type)) return creds
 	const out = { ...creds }
@@ -109,6 +146,14 @@ function encryptUpstreamCredentials (creds, { id, provider, type }) {
 		if (out[field] !== undefined && out[field] !== null && out[field] !== '') {
 			out[field] = encryptSecret(out[field], secretContext(id, provider, type, field))
 		}
+	}
+	for (const field of UPSTREAM_OBJECT_SECRET_FIELDS) {
+		const val = out[field]
+		if (val === undefined || val === null) continue
+		if (!isPlainSecretMap(val)) {
+			throw new Error(`encryptUpstreamCredentials requires ${field} to be a non-empty plain object of string values`)
+		}
+		out[field] = encryptSecret(JSON.stringify(val), secretContext(id, provider, type, field))
 	}
 	return out
 }
@@ -119,6 +164,15 @@ function decryptUpstreamCredentials (creds, { id, provider, type }) {
 	for (const field of UPSTREAM_SECRET_FIELDS) {
 		if (out[field] !== undefined && out[field] !== null && out[field] !== '') {
 			out[field] = decryptSecret(out[field], secretContext(id, provider, type, field))
+		}
+	}
+	for (const field of UPSTREAM_OBJECT_SECRET_FIELDS) {
+		if (out[field] !== undefined && out[field] !== null && out[field] !== '') {
+			const parsed = JSON.parse(decryptSecret(out[field], secretContext(id, provider, type, field)))
+			if (!isPlainSecretMap(parsed)) {
+				throw new Error(`Malformed decrypted ${field} credential map`)
+			}
+			out[field] = parsed
 		}
 	}
 	return out

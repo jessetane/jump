@@ -282,8 +282,12 @@ function createProvider (config) {
 			if (!appToken) return null
 			const creds = appToken.credentials || {}
 			if (appToken.type === 'api_key') {
+				const headers = creds.headers && typeof creds.headers === 'object' ? creds.headers : null
+				const query = creds.query && typeof creds.query === 'object' ? creds.query : null
+				if (!headers && !query) return null
 				return {
-					token: creds.apiKey || ''
+					...(headers && { headers }),
+					...(query && { query })
 				}
 			}
 			if (oauth && creds.refreshToken && (!appToken.expiresAt || Date.now() > appToken.expiresAt - 60000)) {
@@ -321,7 +325,7 @@ function createProvider (config) {
 						scopes: data.scope || appToken.scopes
 					})
 					return {
-						token: data.access_token
+						headers: { authorization: `Bearer ${data.access_token}` }
 					}
 				})()
 				inflightRefreshes.set(appToken.id, refreshPromise)
@@ -331,8 +335,9 @@ function createProvider (config) {
 					inflightRefreshes.delete(appToken.id)
 				}
 			}
+			if (!creds.accessToken) return null
 			return {
-				token: creds.accessToken || null
+				headers: { authorization: `Bearer ${creds.accessToken}` }
 			}
 		},
 		normalizeTargetUrl (targetUrl, appToken) {

@@ -32,7 +32,7 @@ const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
 const { parseSsoDomains, shouldClaimUnscoped } = await import('../sso.js')
-const { getBaseUrl, validateBaseUrl, resolveTargetUrl, hasPathTraversal } = await import('../util.js')
+const { getBaseUrl, validateBaseUrl, resolveTargetUrl, hasPathTraversal, isPlainObject } = await import('../util.js')
 
 function createTestSession (opts = {}) {
 	const {
@@ -1016,7 +1016,7 @@ test('oauth consent html page, post consent, callback login, and scanner-safe tw
 		provider: 'stripe',
 		type: 'api_key',
 		name: 'Agent Stripe',
-		credentials: { apiKey: 'sk_agent', baseUrl: 'https://api.stripe.com' }
+		credentials: { headers: { authorization: 'Bearer sk_agent' }, baseUrl: 'https://api.stripe.com' }
 	})
 	const secondConsentRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 		method: 'POST',
@@ -2448,7 +2448,7 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 		action: 'connect_app',
 		provider: 'stripe',
 		name: 'Stripe Missing Base',
-		apiKey: 'sk_test_12345'
+		credentials: 'sk_test_12345'
 	}, adminSession.token)
 	assert.equal(missingBaseRes.isError, true)
 	assert.match(missingBaseRes.content[0].text, /Valid https:\/\/ baseUrl is required/)
@@ -2456,7 +2456,7 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 		const ssrfRes = await executeTool('admin', {
 			action: 'connect_app',
 			provider: 'custom',
-			apiKey: 'sk_ssrf',
+			credentials: 'sk_ssrf',
 			baseUrl: ssrfUrl
 		}, adminSession.token)
 		assert.equal(ssrfRes.isError, true, `Must reject private/metadata baseUrl: ${ssrfUrl}`)
@@ -2467,7 +2467,7 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 		provider: 'stripe',
 		name: 'Stripe Prod',
 		account: 'acct_stripe_prod_123',
-		apiKey: 'sk_test_12345',
+		credentials: 'sk_test_12345',
 		baseUrl: 'https://api.stripe.com/'
 	}, adminSession.token)
 	assert.equal(connectRes.isError, undefined)
@@ -2691,7 +2691,7 @@ test('in-place upstream re-auth flow enforces admin, ownership, and account cont
 		provider: 'google',
 		type: 'api_key',
 		name: 'API Key App',
-		credentials: { apiKey: 'key_123', baseUrl: 'https://www.googleapis.com' }
+		credentials: { headers: { authorization: 'Bearer key_123' }, baseUrl: 'https://www.googleapis.com' }
 	})
 	const apiKeyReauthSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSession.id, provider: 'google', reauthAppId: apiKeyApp.id })
 	const apiKeyReauthConsent = await fetch(`http://127.0.0.1:${addr.port}/providers/google/consent`, {
@@ -2771,7 +2771,7 @@ test('rest api /api/apps and /api/links endpoints', async () => {
 		body: JSON.stringify({
 			provider: 'anthropic',
 			name: 'Anthropic Key',
-			apiKey: 'sk-ant-12345',
+			credentials: { headers: { 'x-api-key': 'sk-ant-12345', 'anthropic-version': '2023-06-01' } },
 			baseUrl: 'https://api.anthropic.com'
 		})
 	})
@@ -2960,14 +2960,14 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		type: 'api_key',
 		name: 'Shay Pre-Shared Stripe',
-		credentials: { apiKey: 'sk_test_preshared', baseUrl: 'https://api.stripe.com' }
+		credentials: { headers: { authorization: 'Bearer sk_test_preshared' }, baseUrl: 'https://api.stripe.com' }
 	})
 	const shayApp2 = db.tokens.create({
 		userId: shay.id,
 		provider: 'stripe',
 		type: 'api_key',
 		name: 'Shay Overlap Stripe',
-		credentials: { apiKey: 'sk_test_overlap', baseUrl: 'https://api.stripe.com' }
+		credentials: { headers: { authorization: 'Bearer sk_test_overlap' }, baseUrl: 'https://api.stripe.com' }
 	})
 	const bareHandleNoProvRes = await executeTool('admin', {
 		action: 'share_app',
@@ -3020,7 +3020,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		type: 'api_key',
 		name: 'Shay Precedence Stripe',
-		credentials: { apiKey: 'sk_prec', baseUrl: 'https://api.stripe.com' }
+		credentials: { headers: { authorization: 'Bearer sk_prec' }, baseUrl: 'https://api.stripe.com' }
 	})
 	db.tokens.upsertShare({
 		userId: null,
@@ -3049,7 +3049,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		type: 'api_key',
 		name: 'Shay Sequential Precedence Stripe',
-		credentials: { apiKey: 'sk_seq', baseUrl: 'https://api.stripe.com' }
+		credentials: { headers: { authorization: 'Bearer sk_seq' }, baseUrl: 'https://api.stripe.com' }
 	})
 	const unscopedSeqPending = db.tokens.upsertShare({
 		userId: null,
@@ -3098,7 +3098,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		type: 'api_key',
 		name: 'Shay Stale Pending Guard Stripe',
-		credentials: { apiKey: 'sk_stale', baseUrl: 'https://api.stripe.com' }
+		credentials: { headers: { authorization: 'Bearer sk_stale' }, baseUrl: 'https://api.stripe.com' }
 	})
 	const staleGhPending = db.tokens.upsertShare({
 		userId: null,
@@ -3169,7 +3169,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		provider: 'stripe',
 		type: 'api_key',
 		name: 'User Own App',
-		credentials: { apiKey: 'sk_own', baseUrl: 'https://api.stripe.com' }
+		credentials: { headers: { authorization: 'Bearer sk_own' }, baseUrl: 'https://api.stripe.com' }
 	})
 	db.tokens.upsertShare({
 		userId: null,
@@ -3407,7 +3407,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 			provider: 'stripe',
 			type: 'api_key',
 			name: 'Conflict Side-Effect Guard App',
-			credentials: { apiKey: 'sk_conflict', baseUrl: 'https://api.stripe.com' }
+			credentials: { headers: { authorization: 'Bearer sk_conflict' }, baseUrl: 'https://api.stripe.com' }
 		})
 		const conflictPendingShare = db.tokens.upsertShare({
 			userId: null,
@@ -3598,7 +3598,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 			provider: 'stripe',
 			type: 'api_key',
 			name: 'Encoded App',
-			credentials: { apiKey: 'sk_enc', baseUrl: 'https://api.stripe.com' }
+			credentials: { headers: { authorization: 'Bearer sk_enc' }, baseUrl: 'https://api.stripe.com' }
 		})
 		const encSessionGet = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${encodeURIComponent(specialSession.id)}`, {
 			headers: { authorization: `Bearer ${adminSession.token}` }
@@ -3728,7 +3728,7 @@ test('SSO_DOMAINS pinning, login isolation, strict outbound sharing, and verifie
 			provider: 'stripe',
 			type: 'api_key',
 			name: 'Flex Stripe',
-			credentials: { apiKey: 'sk_flex', baseUrl: 'https://api.stripe.com' }
+			credentials: { headers: { authorization: 'Bearer sk_flex' }, baseUrl: 'https://api.stripe.com' }
 		})
 		const conflictPinnedRestShare = await fetch(`http://127.0.0.1:${addr.port}/api/shares`, {
 			method: 'POST',
@@ -3821,7 +3821,7 @@ test('SSO_DOMAINS pinning, login isolation, strict outbound sharing, and verifie
 			provider: 'stripe',
 			type: 'api_key',
 			name: 'Non-Strict Corp Stripe',
-			credentials: { apiKey: 'sk_corp', baseUrl: 'https://api.stripe.com' }
+			credentials: { headers: { authorization: 'Bearer sk_corp' }, baseUrl: 'https://api.stripe.com' }
 		})
 		const nonStrictCrossShare = JSON.parse((await executeTool('admin', {
 			action: 'share_app',
@@ -3848,7 +3848,7 @@ test('SSO_DOMAINS pinning, login isolation, strict outbound sharing, and verifie
 			provider: 'stripe',
 			type: 'api_key',
 			name: 'Strict Corp Stripe',
-			credentials: { apiKey: 'sk_strict', baseUrl: 'https://api.stripe.com' }
+			credentials: { headers: { authorization: 'Bearer sk_strict' }, baseUrl: 'https://api.stripe.com' }
 		})
 		const strictCrossShare = await executeTool('admin', {
 			action: 'share_app',
@@ -3959,7 +3959,7 @@ test('admin update_app action', async () => {
 	assert.equal(updateData.app.account, 'owner@gmail.com')
 	const dbApp = db.tokens.get(app.id)
 	assert.equal(dbApp.name, 'Personal Google Workspace')
-	for (const forbiddenPatch of [{ account: 'spoofed@gmail.com' }, { apiKey: 'sk_injected' }, { baseUrl: 'https://api.stripe.com' }]) {
+	for (const forbiddenPatch of [{ account: 'spoofed@gmail.com' }, { credentials: 'sk_injected' }, { baseUrl: 'https://api.stripe.com' }]) {
 		const res = await executeTool('admin', {
 			action: 'update_app',
 			appId: app.id,
@@ -4175,7 +4175,7 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 			provider: 'stripe',
 			name: 'Stripe Test',
 			account: 'acct_test_1',
-			apiKey: 'sk_test_mock_999',
+			credentials: 'sk_test_mock_999',
 			baseUrl
 		}, session.token)
 		assert.equal(connectRes.isError, undefined)
@@ -4290,7 +4290,7 @@ test('usage logging: 30-day rolling window, proxy log capture, MCP list_logs, an
 			provider: 'stripe',
 			type: 'api_key',
 			name: 'Stripe Logs App',
-			credentials: { apiKey: 'sk_test_logs', baseUrl }
+			credentials: { headers: { authorization: 'Bearer sk_test_logs' }, baseUrl }
 		})
 		db.links.create({
 			sessionId: workerSession.id,
@@ -4428,7 +4428,7 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 			action: 'connect_app',
 			provider: 'mailgun',
 			name: 'Mailgun Basic',
-			apiKey: '  api:key-mailgun-secret  ',
+			credentials: { basic: '  api:key-mailgun-secret  ' },
 			baseUrl
 		}, session.token)
 		const mailgunAppId = JSON.parse(mailgunConnect.content[0].text).app.id
@@ -4497,7 +4497,7 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 			provider: 'twilio',
 			type: 'api_key',
 			name: 'Twilio Preformatted',
-			credentials: { apiKey: 'basic dXNlcm5hbWU6cGFzc3dvcmQ=', baseUrl }
+			credentials: { headers: { authorization: 'Basic dXNlcm5hbWU6cGFzc3dvcmQ=' }, baseUrl }
 		})
 		db.links.create({ sessionId: session.id, appId: preformattedBasicApp.id, policy: [{ action: 'allow' }] })
 		const twilioRes = await executeTool('twilio_api', { url: '/2010-04-01/Accounts' }, session.token)
@@ -4507,7 +4507,14 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 			action: 'connect_app',
 			provider: 'namecheap',
 			name: 'Namecheap XML',
-			apiKey: ' ?ApiUser=jtane&ApiKey=topsecret123&UserName=jtane&ClientIp=1.2.3.4 ',
+			credentials: {
+				query: {
+					ApiUser: 'jtane',
+					ApiKey: 'topsecret123',
+					UserName: 'jtane',
+					ClientIp: '1.2.3.4'
+				}
+			},
 			baseUrl
 		}, session.token)
 		const ncAppId = JSON.parse(ncConnect.content[0].text).app.id
@@ -4542,7 +4549,14 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 		const updateKeyRes = await executeTool('admin', {
 			action: 'update_app',
 			appId: ncAppId,
-			apiKey: '?ApiUser=jtane&ApiKey=rotatedsecret456&UserName=jtane&ClientIp=5.6.7.8'
+			credentials: {
+				query: {
+					ApiUser: 'jtane',
+					ApiKey: 'rotatedsecret456',
+					UserName: 'jtane',
+					ClientIp: '5.6.7.8'
+				}
+			}
 		}, session.token)
 		assert.equal(updateKeyRes.isError, undefined)
 		captured.length = 0
@@ -4691,9 +4705,11 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 			google.getFreshToken(expiringApp)
 		])
 		assert.equal(refreshCalls, 1, 'Concurrent getFreshToken calls must deduplicate in-flight upstream refresh')
-		assert.equal(t1.token, 'ya29.dedup_1')
-		assert.equal(t2.token, 'ya29.dedup_1')
-		assert.equal(t3.token, 'ya29.dedup_1')
+		assert.deepEqual(t1, { headers: { authorization: 'Bearer ya29.dedup_1' } })
+		assert.deepEqual(t2, { headers: { authorization: 'Bearer ya29.dedup_1' } })
+		assert.deepEqual(t3, { headers: { authorization: 'Bearer ya29.dedup_1' } })
+		const freshApp = db.tokens.get(expiringApp.id)
+		assert.deepEqual(await google.getFreshToken(freshApp), { headers: { authorization: 'Bearer ya29.dedup_1' } })
 	} finally {
 		globalThis.fetch = origFetchGoogle
 	}
@@ -4859,7 +4875,7 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 			provider: 'github',
 			name: 'GitHub PAT',
 			account: 'jessetane',
-			apiKey: 'ghp_personal_access_token_123',
+			credentials: 'ghp_personal_access_token_123',
 			baseUrl: mockGhUrl
 		}, adminSession.token)
 		assert.equal(patConnectRes.isError, undefined)
@@ -4955,7 +4971,7 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 			provider: 'stripe',
 			type: 'api_key',
 			name: 'Local Stripe',
-			credentials: { apiKey: 'sk_local', baseUrl: 'https://api.stripe.com' }
+			credentials: { headers: { authorization: 'Bearer sk_local' }, baseUrl: 'https://api.stripe.com' }
 		})
 		const adminConsentWithApp = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize/consent`, {
 			method: 'POST',
@@ -5076,7 +5092,7 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 	`).run(legacyUnmigratedSessionId, legacyUserId, legacyPlainToken, JSON.stringify({ refreshToken: legacyPlainRefresh }), Date.now() + 3600000, now, now)
 	db.sqlite.exec('PRAGMA wal_checkpoint(FULL);')
 	db.init()
-	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 3)
+	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 4)
 	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after users.email, token hash, and encryption migrations')
 	for (const ext of ['', '-wal']) {
 		const p = `${testDbPath}${ext}`
@@ -5143,7 +5159,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 			provider: 'stripe',
 			name: 'Acme Stripe',
 			account: 'acct_acme_main',
-			apiKey: 'sk_live_sarah_secret_123',
+			credentials: 'sk_live_sarah_secret_123',
 			baseUrl
 		}, sarahAdmin.token)
 		assert.equal(connectRes.isError, undefined)
@@ -5365,7 +5381,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 			provider: 'stripe',
 			name: 'Sarah Privacy Stripe',
 			account: 'acct_sarah_privacy',
-			apiKey: 'sk_live_sarah_privacy_456',
+			credentials: 'sk_live_sarah_privacy_456',
 			baseUrl
 		}, sarahAdmin.token)
 		const sarahPrivacyApp = JSON.parse(sarahPrivacyAppRes.content[0].text).app
@@ -5634,7 +5650,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 			provider: 'stripe',
 			type: 'api_key',
 			name: 'Temp Owner Stripe',
-			credentials: { apiKey: 'sk_temp', baseUrl }
+			credentials: { headers: { authorization: 'Bearer sk_temp' }, baseUrl }
 		})
 		const tempShare = db.tokens.upsertShare({
 			userId: dan.id,
@@ -5686,8 +5702,8 @@ test('redactLogArgs scrubs credentials and auth headers without mutating input',
 	const raw = {
 		action: 'connect_app',
 		provider: 'stripe',
-		apiKey: 'sk_live_secret_123',
-		credentials: { accessToken: 'tok_abc' },
+		apiKey: 'sk_live_legacy_hallucinated_123',
+		credentials: { bearer: 'sk_live_secret_123' },
 		token: 'bearer_xyz',
 		headers: {
 			Authorization: 'Bearer secret',
@@ -5708,7 +5724,8 @@ test('redactLogArgs scrubs credentials and auth headers without mutating input',
 	assert.equal(redacted.headers.Cookie, '[REDACTED]')
 	assert.equal(redacted.headers['Content-Type'], 'application/json')
 	assert.deepEqual(redacted.body, { amount: 500 })
-	assert.equal(raw.apiKey, 'sk_live_secret_123', 'Original args must not be mutated')
+	assert.equal(raw.apiKey, 'sk_live_legacy_hallucinated_123', 'Original args must not be mutated')
+	assert.deepEqual(raw.credentials, { bearer: 'sk_live_secret_123' }, 'Original args must not be mutated')
 	assert.equal(raw.headers.Authorization, 'Bearer secret', 'Original headers must not be mutated')
 })
 
@@ -5994,7 +6011,7 @@ test('strict requireBoolean parsing across admin, allOthers, revoke, and allowed
 		provider: 'stripe',
 		type: 'api_key',
 		name: 'Revoke Bool Stripe',
-		credentials: { apiKey: 'sk_rev_bool', baseUrl: 'https://api.stripe.com' }
+		credentials: { headers: { authorization: 'Bearer sk_rev_bool' }, baseUrl: 'https://api.stripe.com' }
 	})
 	const invalidRevokeAppRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${tempApp.id}?revoke=invalid`, {
 		method: 'DELETE',
@@ -6047,14 +6064,14 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 		provider: 'stripe',
 		type: 'api_key',
 		name: 'Stripe Existing',
-		credentials: { apiKey: 'sk_existing', baseUrl: 'https://api.stripe.com' }
+		credentials: { headers: { authorization: 'Bearer sk_existing' }, baseUrl: 'https://api.stripe.com' }
 	})
 	const ghPatApp = db.tokens.create({
 		userId: user.id,
 		provider: 'github',
 		type: 'api_key',
 		name: 'GitHub PAT Existing',
-		credentials: { apiKey: 'ghp_existing', baseUrl: 'https://api.github.com' }
+		credentials: { headers: { authorization: 'Bearer ghp_existing' }, baseUrl: 'https://api.github.com' }
 	})
 	const appCountBefore = db.tokens.listByUserId(user.id).filter(t => t.provider !== 'self').length
 	const mismatchProvConnect = await executeTool('admin', {
@@ -6079,7 +6096,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 	const oauthWithKeyAttempt = await executeTool('admin', {
 		action: 'connect_app',
 		appId: oauthApp.id,
-		apiKey: 'should-fail'
+		credentials: 'should-fail'
 	}, adminSession.token)
 	assert.equal(oauthWithKeyAttempt.isError, true)
 	assert.match(oauthWithKeyAttempt.content[0].text, /use update_app/)
@@ -6089,7 +6106,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 		baseUrl: 'https://api.stripe.com'
 	}, adminSession.token)
 	assert.equal(missingKeyStripeAttempt.isError, true)
-	assert.match(missingKeyStripeAttempt.content[0].text, /apiKey is required/)
+	assert.match(missingKeyStripeAttempt.content[0].text, /credentials is required/)
 	assert.equal(db.tokens.listByUserId(user.id).filter(t => t.provider !== 'self').length, appCountBefore, 'Rejected connect_app calls must not create orphan app rows')
 	for (const badProvider of ['', '   ', 123, true, {}]) {
 		const badProvRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
@@ -6108,7 +6125,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 		provider: 'stripe',
 		name: '   ',
 		account: '   ',
-		apiKey: 'sk_blank_meta',
+		credentials: 'sk_blank_meta',
 		baseUrl: 'https://api.stripe.com'
 	}, adminSession.token)
 	assert.equal(blankMetaRes.isError, undefined)
@@ -6123,7 +6140,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 		provider: '  Stripe  ',
 		name: '  Trimmed Stripe  ',
 		account: '  acct_trimmed  ',
-		apiKey: '  sk_trimmed  ',
+		credentials: '  sk_trimmed  ',
 		baseUrl: 'https://api.stripe.com'
 	}, adminSession.token)
 	assert.equal(trimmedMetaRes.isError, undefined)
@@ -6150,7 +6167,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 				authorization: `Bearer ${adminSession.token}`,
 				'content-type': 'application/json'
 			},
-			body: JSON.stringify({ provider: 'stripe', name: badVal, apiKey: 'sk_bad_name', baseUrl: 'https://api.stripe.com' })
+			body: JSON.stringify({ provider: 'stripe', name: badVal, credentials: 'sk_bad_name', baseUrl: 'https://api.stripe.com' })
 		})
 		assert.equal(badNameRes.status, 400, `connectApp must reject non-string name ${JSON.stringify(badVal)} with 400`)
 		assert.match((await badNameRes.json()).error, /name must be a string/)
@@ -6160,7 +6177,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 				authorization: `Bearer ${adminSession.token}`,
 				'content-type': 'application/json'
 			},
-			body: JSON.stringify({ provider: 'stripe', account: badVal, apiKey: 'sk_bad_acct', baseUrl: 'https://api.stripe.com' })
+			body: JSON.stringify({ provider: 'stripe', account: badVal, credentials: 'sk_bad_acct', baseUrl: 'https://api.stripe.com' })
 		})
 		assert.equal(badAccountRes.status, 400, `connectApp must reject non-string account ${JSON.stringify(badVal)} with 400`)
 		assert.match((await badAccountRes.json()).error, /account must be a string/)
@@ -6171,7 +6188,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 			authorization: `Bearer ${adminSession.token}`,
 			'content-type': 'application/json'
 		},
-		body: JSON.stringify({ provider: 'self', apiKey: 'sk_self', baseUrl: 'https://api.stripe.com' })
+		body: JSON.stringify({ provider: 'self', credentials: 'sk_self', baseUrl: 'https://api.stripe.com' })
 	})
 	assert.equal(selfProvRes.status, 400)
 	assert.match((await selfProvRes.json()).error, /provider cannot be "self"/)
@@ -6182,7 +6199,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 				authorization: `Bearer ${adminSession.token}`,
 				'content-type': 'application/json'
 			},
-			body: JSON.stringify({ provider: 'github', apiKey: 'ghp_123', baseUrl: badBase })
+			body: JSON.stringify({ provider: 'github', credentials: 'ghp_123', baseUrl: badBase })
 		})
 		assert.equal(ghBadBaseRes.status, 400, `connectApp must reject explicit falsy baseUrl ${JSON.stringify(badBase)} on preset provider`)
 		assert.match((await ghBadBaseRes.json()).error, /Valid https:\/\/ baseUrl is required/)
@@ -6192,20 +6209,19 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 		provider: 'stripe',
 		type: 'api_key',
 		name: 'Update Parity Stripe',
-		credentials: { apiKey: 'sk_keep_intact', baseUrl: 'https://api.stripe.com' }
+		credentials: { headers: { authorization: 'Bearer sk_keep_intact' }, baseUrl: 'https://api.stripe.com' }
 	})
-	for (const badKey of ['', '   ', null, 123]) {
+	for (const badCreds of ['', '   ', null, 123, {}, { unknown: 'x' }, { bearer: 'a', basic: 'u:p' }]) {
 		const badUpdateKeyRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${updApp.id}`, {
 			method: 'PATCH',
 			headers: {
 				authorization: `Bearer ${adminSession.token}`,
 				'content-type': 'application/json'
 			},
-			body: JSON.stringify({ apiKey: badKey })
+			body: JSON.stringify({ credentials: badCreds })
 		})
-		assert.equal(badUpdateKeyRes.status, 400, `updateApp must reject invalid apiKey ${JSON.stringify(badKey)} with 400`)
-		assert.match((await badUpdateKeyRes.json()).error, /apiKey must be a non-empty string/)
-		assert.equal(db.tokens.get(updApp.id).credentials.apiKey, 'sk_keep_intact')
+		assert.equal(badUpdateKeyRes.status, 400, `updateApp must reject invalid credentials ${JSON.stringify(badCreds)} with 400`)
+		assert.deepEqual(db.tokens.get(updApp.id).credentials.headers, { authorization: 'Bearer sk_keep_intact' })
 	}
 	for (const badId of ['', '   ', null, 123]) {
 		const badUpdIdRes = await executeTool('admin', {
@@ -6227,7 +6243,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 	assert.equal(clearedNameUpdData.app.name, null, 'Whitespace-only name clears name to null in single updateCredentials write')
 	assert.equal(clearedNameUpdData.app.account, 'acct_single_write')
 	assert.equal(db.tokens.get(updApp.id).name, null)
-	assert.equal(db.tokens.get(updApp.id).credentials.apiKey, 'sk_keep_intact', 'Updating account without apiKey preserves encrypted apiKey')
+	assert.deepEqual(db.tokens.get(updApp.id).credentials.headers, { authorization: 'Bearer sk_keep_intact' }, 'Updating account without credentials preserves encrypted headers')
 })
 
 test('linear-time glob matching, strict form body validation, SSRF host checks, form Origin CSRF guard, DCR client_name, and REST response headers', async () => {
@@ -6343,7 +6359,7 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 			userId: u.id,
 			provider: 'github',
 			type: 'api_key',
-			credentials: { apiKey: 'ghp_hdr', baseUrl: `http://127.0.0.1:${upPort}` }
+			credentials: { headers: { authorization: 'Bearer ghp_hdr' }, baseUrl: `http://127.0.0.1:${upPort}` }
 		})
 		db.links.create({ sessionId: s.id, appId: app.id })
 		const restRes = await fetch(`http://127.0.0.1:${addr.port}/api/github/repos`, {
@@ -6464,7 +6480,7 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 			userId: u.id,
 			provider: 'github',
 			type: 'api_key',
-			credentials: { apiKey: 'ghp_secret_token', baseUrl: `http://127.0.0.1:${apiPort}` }
+			credentials: { headers: { authorization: 'Bearer ghp_secret_token' }, baseUrl: `http://127.0.0.1:${apiPort}` }
 		})
 		db.links.create({
 			sessionId: s.id,
@@ -6497,7 +6513,7 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 			userId: u.id,
 			provider: 'namecheap',
 			type: 'api_key',
-			credentials: { apiKey: '?ApiKey=nc_top_secret', baseUrl: `http://127.0.0.1:${apiPort}` }
+			credentials: { query: { ApiKey: 'nc_top_secret' }, baseUrl: `http://127.0.0.1:${apiPort}` }
 		})
 		db.links.create({ sessionId: s.id, appId: qApp.id, policy: [{ action: 'allow', path: '/qauth/**' }] })
 		const qSameOrigin = await executeTool('namecheap_api', { url: '/qauth/start' }, s.token)
@@ -6624,7 +6640,7 @@ test('upstream SSRF filter blocks IANA special-purpose IP literals and private/s
 				userId: u.id,
 				provider,
 				type: 'api_key',
-				credentials: { apiKey: 'sk_test', baseUrl: `https://${host}` }
+				credentials: { headers: { authorization: 'Bearer sk_test' }, baseUrl: `https://${host}` }
 			})
 			db.links.create({ sessionId: s.id, appId: app.id })
 			const mcpRes = await executeTool(`${provider}_api`, { url: '/v1/data' }, s.token)
@@ -6640,7 +6656,7 @@ test('upstream SSRF filter blocks IANA special-purpose IP literals and private/s
 			userId: u.id,
 			provider: 'ssrf_pub',
 			type: 'api_key',
-			credentials: { apiKey: 'sk_pub', baseUrl: 'https://public.example.test' }
+			credentials: { headers: { authorization: 'Bearer sk_pub' }, baseUrl: 'https://public.example.test' }
 		})
 		db.links.create({ sessionId: s.id, appId: pubApp.id })
 		const okPub = await executeTool('ssrf_pub_api', { url: '/v1/ok' }, s.token)
@@ -6789,7 +6805,7 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 			provider: 'stripe',
 			type: 'api_key',
 			name: 'Older Stripe',
-			credentials: { apiKey: 'sk_older', baseUrl: 'https://api.stripe.com' }
+			credentials: { headers: { authorization: 'Bearer sk_older' }, baseUrl: 'https://api.stripe.com' }
 		})
 		db.links.create({ sessionId: olderSession.id, appId: olderApp.id })
 		const newerUser = db.logins.resolveUser('github', 'accidental-new-gh')
@@ -6799,7 +6815,7 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 			provider: 'linear',
 			type: 'api_key',
 			name: 'Absorbed Linear',
-			credentials: { apiKey: 'lin_api_absorbed_secret_99', baseUrl: 'https://api.linear.app' }
+			credentials: { headers: { authorization: 'lin_api_absorbed_secret_99' }, baseUrl: 'https://api.linear.app' }
 		})
 		db.logs.create({
 			userId: newerUser.id,
@@ -6824,7 +6840,7 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 			provider: 'mailgun',
 			type: 'api_key',
 			name: 'Shared Mailgun',
-			credentials: { apiKey: 'key-mg', baseUrl: 'https://api.mailgun.net' }
+			credentials: { headers: { authorization: `Basic ${Buffer.from('api:key-mg').toString('base64')}` }, baseUrl: 'https://api.mailgun.net' }
 		})
 		await executeTool('admin', { action: 'share_app', appId: thirdApp.id, account: 'primary-owner@example.com' }, thirdSession.token)
 		const newUserShare = JSON.parse((await executeTool('admin', { action: 'share_app', appId: thirdApp.id, account: 'github:accidental-new-gh' }, thirdSession.token)).content[0].text)
@@ -6902,7 +6918,7 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 		assert.equal(db.users.get(newerUser.id), null, 'Newer user row is removed after merge into older user')
 		assert.ok(db.users.get(olderUser.id), 'Older user row survives merge')
 		assert.equal(db.tokens.get(absorbedApp.id).userId, olderUser.id, 'Absorbed upstream app is re-parented to surviving user')
-		assert.equal(db.tokens.get(absorbedApp.id).credentials.apiKey, 'lin_api_absorbed_secret_99', 'Re-parented encrypted app decrypts cleanly after mergeUsers')
+		assert.deepEqual(db.tokens.get(absorbedApp.id).credentials.headers, { authorization: 'lin_api_absorbed_secret_99' }, 'Re-parented encrypted app decrypts cleanly after mergeUsers')
 		const whoamiFromNewerSession = JSON.parse((await executeTool('admin', { action: 'whoami' }, newerSession.token)).content[0].text)
 		assert.equal(whoamiFromNewerSession.user.id, olderUser.id, 'Newer session seamlessly points to surviving older user')
 		assert.equal(whoamiFromNewerSession.user.account, 'primary-owner@example.com')
@@ -6986,7 +7002,7 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			provider: 'stripe',
 			type: 'api_key',
 			name: 'Canary Stripe',
-			credentials: { apiKey: 'sk_live_ALWAYS_ON_CANARY_112233', baseUrl: 'https://api.stripe.com', account: 'acct_canary' }
+			credentials: { headers: { authorization: 'Bearer sk_live_ALWAYS_ON_CANARY_112233' }, query: { canaryParam: 'qp_ALWAYS_ON_CANARY_998877' }, baseUrl: 'https://api.stripe.com', account: 'acct_canary' }
 		})
 		const googleApp = db.tokens.create({
 			userId: encUser.id,
@@ -6996,71 +7012,87 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			credentials: { accessToken: 'ya29.ALWAYS_ON_ACCESS_445566', refreshToken: '1//ALWAYS_ON_REFRESH_778899', account: 'encryption-owner@example.com' }
 		})
 		const rawStripe = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(stripeApp.id).credentials)
-		assert.match(rawStripe.apiKey, /^[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]+$/, 'Ciphertext uses strict 4-part base64url format with no prefix or kid')
+		assert.match(rawStripe.headers, /^[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]+$/, 'Ciphertext uses strict 4-part base64url format with no prefix or kid')
+		assert.match(rawStripe.query, /^[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]+$/, 'Encrypted query map uses strict 4-part base64url format')
 		assert.equal(rawStripe.baseUrl, 'https://api.stripe.com', 'Queryable metadata baseUrl stays plaintext for json_extract')
 		assert.equal(rawStripe.account, 'acct_canary', 'Queryable metadata account stays plaintext for json_extract')
-		assert.equal(stripeApp.credentials.apiKey, 'sk_live_ALWAYS_ON_CANARY_112233')
-		assert.equal(db.tokens.get(stripeApp.id).credentials.apiKey, 'sk_live_ALWAYS_ON_CANARY_112233')
+		assert.deepEqual(stripeApp.credentials.headers, { authorization: 'Bearer sk_live_ALWAYS_ON_CANARY_112233' })
+		assert.deepEqual(stripeApp.credentials.query, { canaryParam: 'qp_ALWAYS_ON_CANARY_998877' })
+		assert.deepEqual(db.tokens.get(stripeApp.id).credentials.headers, { authorization: 'Bearer sk_live_ALWAYS_ON_CANARY_112233' })
+		assert.deepEqual(db.tokens.get(stripeApp.id).credentials.query, { canaryParam: 'qp_ALWAYS_ON_CANARY_998877' })
 		assert.equal(db.tokens.get(googleApp.id).credentials.accessToken, 'ya29.ALWAYS_ON_ACCESS_445566')
 		assert.equal(db.tokens.get(googleApp.id).credentials.refreshToken, '1//ALWAYS_ON_REFRESH_778899')
-		assert.equal(db.tokens.listByUserId(encUser.id).find(t => t.id === stripeApp.id).credentials.apiKey, 'sk_live_ALWAYS_ON_CANARY_112233')
+		assert.deepEqual(db.tokens.listByUserId(encUser.id).find(t => t.id === stripeApp.id).credentials.headers, { authorization: 'Bearer sk_live_ALWAYS_ON_CANARY_112233' })
 		const encAdmin = db.tokens.create({ userId: encUser.id, provider: 'self', admin: 1 })
 		assert.match(db.tokens.hashSecret(encAdmin.token), /^[0-9a-f]{64}$/, 'hashSecret produces bare 64-char hex SHA-256 digest without prefix')
 		db.links.create({ sessionId: encAdmin.id, appId: stripeApp.id })
-		assert.equal(db.links.get(encAdmin.id, stripeApp.id).app.credentials.apiKey, 'sk_live_ALWAYS_ON_CANARY_112233', 'db.links transparently decrypts linked app credentials')
+		assert.deepEqual(db.links.get(encAdmin.id, stripeApp.id).app.credentials.headers, { authorization: 'Bearer sk_live_ALWAYS_ON_CANARY_112233' }, 'db.links transparently decrypts linked app credentials')
 		const listRes = JSON.parse((await executeTool('admin', { action: 'list_apps' }, encAdmin.token)).content[0].text)
 		const listedStripe = listRes.apps.find(a => a.id === stripeApp.id)
-		assert.equal(listedStripe.apiKey, undefined, 'API boundary formatApp strips secret fields')
+		assert.equal(listedStripe.headers, undefined, 'API boundary formatApp strips secret fields')
+		assert.equal(listedStripe.query, undefined, 'API boundary formatApp strips secret query fields')
 		assert.equal(listedStripe.credentials, undefined, 'API boundary formatApp never exposes raw credentials object')
 		const whoamiRes = JSON.parse((await executeTool('admin', { action: 'whoami' }, encAdmin.token)).content[0].text)
 		const whoamiStripe = whoamiRes.session.apps.find(a => a.id === stripeApp.id)
-		assert.equal(whoamiStripe.apiKey, undefined, 'whoami formatSession/formatApp strips secret fields')
+		assert.equal(whoamiStripe.headers, undefined, 'whoami formatSession/formatApp strips secret fields')
+		assert.equal(whoamiStripe.query, undefined, 'whoami formatSession/formatApp strips secret query fields')
 		assert.equal(whoamiStripe.credentials, undefined, 'whoami formatSession/formatApp never exposes raw credentials object')
+		assert.throws(() => {
+			db.tokens.create({
+				userId: encUser.id,
+				provider: 'google',
+				type: 'oauth',
+				credentials: { accessToken: 12345 }
+			})
+		}, /string plaintext/, 'Non-string secret fields fail loud instead of storing unencrypted')
 		assert.throws(() => {
 			db.tokens.create({
 				userId: encUser.id,
 				provider: 'stripe',
 				type: 'api_key',
-				credentials: { apiKey: 12345, baseUrl: 'https://api.stripe.com' }
+				credentials: { headers: 'not-an-object', baseUrl: 'https://api.stripe.com' }
 			})
-		}, /string plaintext/, 'Non-string secret fields fail loud instead of storing unencrypted')
+		}, /non-empty plain object/, 'Non-object headers secret map fails loud instead of storing unencrypted')
 		const writeA = db.tokens.create({
 			userId: encUser.id,
 			provider: 'stripe',
 			type: 'api_key',
-			credentials: { apiKey: 'sk_same_value', baseUrl: 'https://api.stripe.com' }
+			credentials: { headers: { authorization: 'Bearer sk_same_value' }, baseUrl: 'https://api.stripe.com' }
 		})
 		const writeB = db.tokens.create({
 			userId: encUser.id,
 			provider: 'stripe',
 			type: 'api_key',
-			credentials: { apiKey: 'sk_same_value', baseUrl: 'https://api.stripe.com' }
+			credentials: { headers: { authorization: 'Bearer sk_same_value' }, baseUrl: 'https://api.stripe.com' }
 		})
-		const ctA = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeA.id).credentials).apiKey
-		const ctB = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeB.id).credentials).apiKey
+		const ctA = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeA.id).credentials).headers
+		const ctB = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeB.id).credentials).headers
 		assert.notEqual(ctA, ctB, 'Identical secrets produce distinct ciphertexts per write')
 		const rawGoogle = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(googleApp.id).credentials)
 		assert.throws(() => {
 			cryptoMod.decryptSecret(rawGoogle.accessToken, cryptoMod.secretContext(googleApp.id, 'google', 'oauth', 'refreshToken'))
 		}, /unable to authenticate data/i, 'Field-level AAD rejects swapping accessToken and refreshToken')
 		assert.throws(() => {
-			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeB.id, 'stripe', 'api_key', 'apiKey'))
+			cryptoMod.decryptSecret(rawStripe.headers, cryptoMod.secretContext(stripeApp.id, 'stripe', 'api_key', 'query'))
+		}, /unable to authenticate data/i, 'Field-level AAD rejects swapping headers and query')
+		assert.throws(() => {
+			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeB.id, 'stripe', 'api_key', 'headers'))
 		}, /unable to authenticate data/i, 'Row-level AAD rejects transplanting ciphertext across rows')
 		assert.notEqual(
-			cryptoMod.secretContext('a:b', 'c', 'api_key', 'apiKey'),
-			cryptoMod.secretContext('a', 'b:c', 'api_key', 'apiKey'),
+			cryptoMod.secretContext('a:b', 'c', 'api_key', 'headers'),
+			cryptoMod.secretContext('a', 'b:c', 'api_key', 'headers'),
 			'JSON array AAD framing prevents colon delimiter collisions'
 		)
 		const ctParts = ctA.split(':')
 		const truncatedTag = `${ctParts[0]}:${ctParts[1]}:${ctParts[2].slice(0, 8)}:${ctParts[3]}`
 		assert.throws(() => {
-			cryptoMod.decryptSecret(truncatedTag, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'apiKey'))
+			cryptoMod.decryptSecret(truncatedTag, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'headers'))
 		}, /Malformed encrypted credential parameters/, 'Truncated GCM auth tags are rejected immediately')
 		assert.throws(() => {
-			cryptoMod.decryptSecret('not-four-parts', cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'apiKey'))
+			cryptoMod.decryptSecret('not-four-parts', cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'headers'))
 		}, /Malformed encrypted credential envelope/, 'Non-4-part envelopes are rejected immediately')
 		assert.throws(() => {
-			cryptoMod.decryptSecret(`${ctParts[0]}:${ctParts[1]}:${ctParts[2]}:`, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'apiKey'))
+			cryptoMod.decryptSecret(`${ctParts[0]}:${ctParts[1]}:${ctParts[2]}:`, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key', 'headers'))
 		}, /Malformed encrypted credential parameters/, 'Empty ciphertext part is rejected immediately')
 		const scopedState = db.tokens.createState({ mode: 'setup_connect', provider: 'google', sessionId: 'sess-1' })
 		const scopedStateRow = db.sqlite.prepare('SELECT id, token FROM tokens WHERE token = ?').get(db.tokens.hashSecret(scopedState))
@@ -7146,13 +7178,13 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			runMigrate(diyDb)
 			assert.equal(fs.existsSync(`${diyPath}.key`), true, 'Empty ENCRYPTION_KEY="" from .env uses auto-generated <dbPath>.key')
 			const diyKeys1 = cryptoMod.getKeys()
-			const ctx = cryptoMod.secretContext('app-1', 'stripe', 'api_key', 'apiKey')
-			const ctUnderOld = cryptoMod.encryptSecret('sk_diy_rotate_secret', ctx, diyKeys1)
+			const ctx = cryptoMod.secretContext('app-1', 'stripe', 'api_key', 'headers')
+			const ctUnderOld = cryptoMod.encryptSecret(JSON.stringify({ authorization: 'Bearer sk_diy_rotate_secret' }), ctx, diyKeys1)
 			const nowIso = new Date().toISOString()
 			diyDb.prepare(`
 				INSERT INTO tokens (id, provider, type, credentials, created, updated)
 				VALUES ('app-1', 'stripe', 'api_key', ?, ?, ?)
-			`).run(JSON.stringify({ apiKey: ctUnderOld, baseUrl: 'https://api.stripe.com' }), nowIso, nowIso)
+			`).run(JSON.stringify({ headers: ctUnderOld, baseUrl: 'https://api.stripe.com' }), nowIso, nowIso)
 			diyDb.exec('PRAGMA wal_checkpoint(FULL);')
 			assert.equal(fs.readFileSync(diyPath).includes(ctUnderOld), true)
 			fs.renameSync(`${diyPath}.key`, `${diyPath}.key.old`)
@@ -7169,8 +7201,8 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			fs.chmodSync(`${diyPath}.key`, 0o400)
 			runMigrate(diyDb)
 			assert.equal(fs.statSync(`${diyPath}.key`).mode & 0o777, 0o400, 'Read-only 0400 key file is accepted without forcing chmod 0600')
-			const rotatedRaw = JSON.parse(diyDb.prepare("SELECT credentials FROM tokens WHERE id = 'app-1'").get().credentials).apiKey
-			assert.equal(cryptoMod.decryptSecret(rotatedRaw, ctx), 'sk_diy_rotate_secret', 'Rotated DIY DB decrypts cleanly after .key.old is deleted')
+			const rotatedRaw = JSON.parse(diyDb.prepare("SELECT credentials FROM tokens WHERE id = 'app-1'").get().credentials).headers
+			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(rotatedRaw, ctx)), { authorization: 'Bearer sk_diy_rotate_secret' }, 'Rotated DIY DB decrypts cleanly after .key.old is deleted')
 			fs.chmodSync(`${diyPath}.key`, 0o600)
 			fs.rmSync(`${diyPath}.key`)
 			assert.throws(() => runMigrate(diyDb), /Missing encryption key file/, 'Encrypted DB fails loud if .key is missing without .key.old')
@@ -7192,20 +7224,20 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
 			runMigrate(tpmDb)
 			assert.equal(fs.existsSync(`${tpmDbPath}.key`), false, 'systemd jump.key mode never writes <dbPath>.key to disk')
-			const ctx = cryptoMod.secretContext('tpm-app-1', 'stripe', 'api_key', 'apiKey')
-			const tpmCt1 = cryptoMod.encryptSecret('sk_tpm_sealed_secret', ctx)
+			const ctx = cryptoMod.secretContext('tpm-app-1', 'stripe', 'api_key', 'headers')
+			const tpmCt1 = cryptoMod.encryptSecret(JSON.stringify({ authorization: 'Bearer sk_tpm_sealed_secret' }), ctx)
 			const nowIso = new Date().toISOString()
 			tpmDb.prepare(`
 				INSERT INTO tokens (id, provider, type, credentials, created, updated)
 				VALUES ('tpm-app-1', 'stripe', 'api_key', ?, ?, ?)
-			`).run(JSON.stringify({ apiKey: tpmCt1 }), nowIso, nowIso)
+			`).run(JSON.stringify({ headers: tpmCt1 }), nowIso, nowIso)
 			fs.renameSync(path.join(credDir, 'jump.key'), path.join(credDir, 'jump.key.old'))
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k2}\n`, { mode: 0o600 })
 			runMigrate(tpmDb)
 			fs.rmSync(path.join(credDir, 'jump.key.old'))
 			runMigrate(tpmDb)
-			const tpmRotatedCt = JSON.parse(tpmDb.prepare("SELECT credentials FROM tokens WHERE id = 'tpm-app-1'").get().credentials).apiKey
-			assert.equal(cryptoMod.decryptSecret(tpmRotatedCt, ctx), 'sk_tpm_sealed_secret', 'systemd jump.key + jump.key.old rotates cleanly onto new key')
+			const tpmRotatedCt = JSON.parse(tpmDb.prepare("SELECT credentials FROM tokens WHERE id = 'tpm-app-1'").get().credentials).headers
+			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(tpmRotatedCt, ctx)), { authorization: 'Bearer sk_tpm_sealed_secret' }, 'systemd jump.key + jump.key.old rotates cleanly onto new key')
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
 			assert.throws(() => runMigrate(tpmDb), /unable to authenticate data/i, 'Booting with wrong systemd jump.key fails loud immediately at startup')
 		} finally {
@@ -7220,18 +7252,18 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			process.env.ENCRYPTION_KEY = k1
 			runMigrate(envDb)
 			assert.equal(fs.existsSync(`${envDbPath}.key`), false, 'ENCRYPTION_KEY mode never writes <dbPath>.key to disk')
-			const ctx = cryptoMod.secretContext('env-app-1', 'stripe', 'api_key', 'apiKey')
+			const ctx = cryptoMod.secretContext('env-app-1', 'stripe', 'api_key', 'headers')
 			const nowIso = new Date().toISOString()
 			envDb.prepare(`
 				INSERT INTO tokens (id, provider, type, credentials, created, updated)
 				VALUES ('env-app-1', 'stripe', 'api_key', ?, ?, ?)
-			`).run(JSON.stringify({ apiKey: cryptoMod.encryptSecret('sk_env_secret', ctx) }), nowIso, nowIso)
+			`).run(JSON.stringify({ headers: cryptoMod.encryptSecret(JSON.stringify({ authorization: 'Bearer sk_env_secret' }), ctx) }), nowIso, nowIso)
 			process.env.ENCRYPTION_KEY = `${k2},${k1}`
 			runMigrate(envDb)
 			process.env.ENCRYPTION_KEY = k2
 			runMigrate(envDb)
-			const envRotatedCt = JSON.parse(envDb.prepare("SELECT credentials FROM tokens WHERE id = 'env-app-1'").get().credentials).apiKey
-			assert.equal(cryptoMod.decryptSecret(envRotatedCt, ctx), 'sk_env_secret', 'ENCRYPTION_KEY=<new>,<old> rotates cleanly onto <new>')
+			const envRotatedCt = JSON.parse(envDb.prepare("SELECT credentials FROM tokens WHERE id = 'env-app-1'").get().credentials).headers
+			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(envRotatedCt, ctx)), { authorization: 'Bearer sk_env_secret' }, 'ENCRYPTION_KEY=<new>,<old> rotates cleanly onto <new>')
 		} finally {
 			envDb.close()
 		}
@@ -7241,7 +7273,8 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 		db.init()
 		process.env.ENCRYPTION_KEY = k2
 		db.init()
-		assert.equal(db.tokens.get(stripeApp.id).credentials.apiKey, 'sk_live_ALWAYS_ON_CANARY_112233', 'Full test DB rotates cleanly onto new key with zero double-encrypted rows')
+		assert.deepEqual(db.tokens.get(stripeApp.id).credentials.headers, { authorization: 'Bearer sk_live_ALWAYS_ON_CANARY_112233' }, 'Full test DB rotates cleanly onto new key with zero double-encrypted rows')
+		assert.deepEqual(db.tokens.get(stripeApp.id).credentials.query, { canaryParam: 'qp_ALWAYS_ON_CANARY_998877' }, 'Full test DB rotates encrypted query map cleanly')
 		process.env.ENCRYPTION_KEY = `${sharedDbOldKey},${k2}`
 		db.init()
 	} finally {
@@ -7265,7 +7298,7 @@ test('proxy strips query-param API keys on upstream redirects', async () => {
 		provider: 'customq',
 		type: 'api_key',
 		name: 'Query Key App',
-		credentials: { apiKey: `?ApiKey=${qSecret}`, baseUrl: 'http://127.0.0.1:19999' }
+		credentials: { query: { ApiKey: qSecret }, baseUrl: 'http://127.0.0.1:19999' }
 	})
 	db.links.create({
 		sessionId: qSession.id,
@@ -7364,6 +7397,434 @@ test('proxy strips query-param API keys on upstream redirects', async () => {
 		assert.equal(fs.readFileSync(testDbPath).includes(qSecret), false, 'Query-param API key never appears in plaintext anywhere in SQLite')
 	} finally {
 		globalThis.fetch = origFetch
+	}
+})
+
+test('structured credentials model: zero-magic shapes, OAuth static override, proxy attachment, unit replacement, and SCHEMA_VERSION 4 migration', async () => {
+	const http = await import('node:http')
+	const os = await import('node:os')
+	const { DatabaseSync } = await import('node:sqlite')
+	const cryptoMod = await import('../crypto.js')
+	const { migrate: runMigrate } = await import('../db/migrate.js')
+	const captured = []
+	let cdnCaptured = null
+	const cdnServer = http.createServer((req, res) => {
+		cdnCaptured = { url: req.url, headers: req.headers }
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.end(JSON.stringify({ cdn: true }))
+	})
+	await new Promise(resolve => cdnServer.listen(0, '127.0.0.1', resolve))
+	const cdnPort = cdnServer.address().port
+	const upstreamServer = http.createServer((req, res) => {
+		captured.push({ url: req.url, headers: req.headers })
+		if (req.url.startsWith('/redirect-cross')) {
+			res.statusCode = 302
+			res.setHeader('location', `http://127.0.0.1:${cdnPort}/dl?asset=99`)
+			res.end()
+			return
+		}
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.end(JSON.stringify({ ok: true, url: req.url, headers: req.headers }))
+	})
+	await new Promise(resolve => upstreamServer.listen(0, '127.0.0.1', resolve))
+	const baseUrl = `http://127.0.0.1:${upstreamServer.address().port}`
+	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jump-v4-'))
+	const origKey = process.env.ENCRYPTION_KEY
+	const origCredDir = process.env.CREDENTIALS_DIRECTORY
+	const origGhId = process.env.GITHUB_CLIENT_ID
+	const origGhSecret = process.env.GITHUB_CLIENT_SECRET
+	try {
+		const addr = server.address()
+		const owner = db.logins.resolveUser('google', 'creds-model@example.com')
+		const adminSession = db.tokens.create({ userId: owner.id, provider: 'self', admin: 1 })
+		const colonBearerConnect = await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'colon_bearer',
+			name: 'Colon Bearer App',
+			credentials: 'tok_part1:tok_part2',
+			baseUrl
+		}, adminSession.token)
+		assert.equal(colonBearerConnect.isError, undefined, 'String shorthand containing colon stays Bearer with zero Basic sniffing')
+		const colonBearerId = JSON.parse(colonBearerConnect.content[0].text).app.id
+		db.links.create({ sessionId: adminSession.id, appId: colonBearerId })
+		captured.length = 0
+		await executeTool('colon_bearer_api', { url: '/v1/test' }, adminSession.token)
+		assert.equal(captured[0].headers.authorization, 'Bearer tok_part1:tok_part2', 'String shorthand with colon sends Bearer header, not Basic')
+		const qmarkBearerConnect = await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'qmark_bearer',
+			credentials: '  bEaReR   ?weird_token_value  ',
+			baseUrl
+		}, adminSession.token)
+		assert.equal(qmarkBearerConnect.isError, undefined, 'String shorthand strips case-insensitive leading Bearer prefix and does not sniff leading ?')
+		const qmarkBearerId = JSON.parse(qmarkBearerConnect.content[0].text).app.id
+		assert.deepEqual(db.tokens.get(qmarkBearerId).credentials.headers, { authorization: 'Bearer ?weird_token_value' })
+		assert.equal(db.tokens.get(qmarkBearerId).credentials.query, undefined)
+		const emptyPassBasic = JSON.parse((await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'stripe_basic',
+			credentials: { basic: 'sk_live_empty_pass:' },
+			baseUrl
+		}, adminSession.token)).content[0].text).app
+		assert.deepEqual(db.tokens.get(emptyPassBasic.id).credentials.headers, {
+			authorization: `Basic ${Buffer.from('sk_live_empty_pass:').toString('base64')}`
+		})
+		const emptyUserBasic = JSON.parse((await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'token_pass_basic',
+			credentials: { basic: ':secret_pass_only' },
+			baseUrl
+		}, adminSession.token)).content[0].text).app
+		assert.deepEqual(db.tokens.get(emptyUserBasic.id).credentials.headers, {
+			authorization: `Basic ${Buffer.from(':secret_pass_only').toString('base64')}`
+		})
+		const protoSafeHdrRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${adminSession.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({
+				provider: 'proto_safe_hdr',
+				baseUrl,
+				credentials: { headers: { constructor: 'ctor_secret_val', toString: 'str_secret_val' } }
+			})
+		})
+		assert.equal(protoSafeHdrRes.status, 201)
+		const protoSafeHdrApp = (await protoSafeHdrRes.json()).app
+		db.links.create({ sessionId: adminSession.id, appId: protoSafeHdrApp.id })
+		captured.length = 0
+		await executeTool('proto_safe_hdr_api', { url: '/v1/proto-check', headers: ['ignored-array'] }, adminSession.token)
+		assert.equal(captured[0].headers.constructor, 'ctor_secret_val')
+		assert.equal(captured[0].headers.tostring, 'str_secret_val')
+		const rawProtoRejectRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${adminSession.token}`,
+				'content-type': 'application/json'
+			},
+			body: `{"provider":"proto_hdr","baseUrl":${JSON.stringify(baseUrl)},"credentials":{"headers":{"__proto__":"proto_secret_val"}}}`
+		})
+		assert.equal(rawProtoRejectRes.status, 400, '__proto__ header name must fail loud with 400 rather than being silently dropped by Undici fetch')
+		assert.equal(isPlainObject({}), true)
+		assert.equal(isPlainObject(Object.create(null)), true)
+		for (const nonPlain of [null, undefined, 'x', 1, true, [], Object.setPrototypeOf([], null), Buffer.from('x'), new Uint8Array(1), new DataView(new ArrayBuffer(1)), new Date(), /a/, new Map(), new String('x'), Object.create({})]) {
+			assert.equal(isPlainObject(nonPlain), false)
+		}
+		assert.throws(() => {
+			db.tokens.create({
+				userId: owner.id,
+				provider: 'boxed_str',
+				type: 'api_key',
+				credentials: { headers: new String('bad'), baseUrl }
+			})
+		}, /non-empty plain object/, 'Boxed String object must be rejected by isPlainSecretMap')
+		const oauthForReauthErr = db.tokens.create({
+			userId: owner.id,
+			provider: 'google',
+			type: 'oauth',
+			name: 'OAuth Reauth Precedence',
+			credentials: { accessToken: 'ya29.prec', account: 'prec@example.com' }
+		})
+		const reauthWithEmptyCreds = await executeTool('admin', {
+			action: 'connect_app',
+			appId: oauthForReauthErr.id,
+			credentials: ''
+		}, adminSession.token)
+		assert.equal(reauthWithEmptyCreds.isError, true)
+		assert.match(reauthWithEmptyCreds.content[0].text, /use update_app instead/, 'connect_app with appId and credentials must report update_app guidance even when credentials is empty')
+		const badAppIdWithCreds = await executeTool('admin', {
+			action: 'connect_app',
+			appId: 123,
+			credentials: {}
+		}, adminSession.token)
+		assert.equal(badAppIdWithCreds.isError, true)
+		assert.match(badAppIdWithCreds.content[0].text, /appId must be a non-empty string/)
+		const composedConnect = JSON.parse((await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'notion',
+			credentials: {
+				bearer: 'Bearer secret_notion_123',
+				headers: { 'Notion-Version': '2022-06-28', 'X-Tenant': 'acme' },
+				query: { workspace: 'ws_1', emptyVal: '' }
+			},
+			baseUrl
+		}, adminSession.token)).content[0].text).app
+		db.links.create({ sessionId: adminSession.id, appId: composedConnect.id })
+		captured.length = 0
+		cdnCaptured = null
+		await executeTool('notion_api', {
+			url: '/v1/pages?WORKspace=spoofed&page=1',
+			headers: {
+				'notion-version': '1999-01-01',
+				authorization: 'Bearer spoofed',
+				cookie: 'sid=spoofed',
+				'x-caller-safe': 'pass-through'
+			}
+		}, adminSession.token)
+		assert.equal(captured[0].headers.authorization, 'Bearer secret_notion_123', 'Configured bearer overwrites caller authorization')
+		assert.equal(captured[0].headers['notion-version'], '2022-06-28', 'Configured custom header overwrites case-insensitive caller header')
+		assert.equal(captured[0].headers['x-tenant'], 'acme')
+		assert.equal(captured[0].headers['x-caller-safe'], 'pass-through')
+		assert.equal(captured[0].headers.cookie, undefined, 'Caller cookie is always stripped')
+		const notionReqUrl = new URL(captured[0].url, baseUrl)
+		assert.equal(notionReqUrl.searchParams.get('workspace'), 'ws_1', 'Configured query param replaces case-insensitive caller param')
+		assert.equal(notionReqUrl.searchParams.get('WORKspace'), null)
+		assert.equal(notionReqUrl.searchParams.get('emptyVal'), '')
+		assert.equal(notionReqUrl.searchParams.get('page'), '1')
+		await executeTool('notion_api', { url: '/redirect-cross' }, adminSession.token)
+		assert.ok(cdnCaptured, 'Cross-origin redirect followed')
+		assert.equal(cdnCaptured.headers.authorization, undefined, 'Cross-origin redirect strips Authorization')
+		assert.equal(cdnCaptured.headers['notion-version'], undefined, 'Cross-origin redirect does not attach custom credential headers')
+		assert.equal(cdnCaptured.headers['x-tenant'], undefined, 'Cross-origin redirect does not attach custom credential headers')
+		assert.equal(cdnCaptured.url, '/dl?asset=99', 'Cross-origin redirect does not attach credential query params')
+		const linearApp = JSON.parse((await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'linear',
+			credentials: { headers: { Authorization: 'lin_api_raw_unprefixed_999' } },
+			baseUrl
+		}, adminSession.token)).content[0].text).app
+		assert.deepEqual(db.tokens.get(linearApp.id).credentials.headers, { authorization: 'lin_api_raw_unprefixed_999' }, 'Raw unprefixed Authorization header is preserved verbatim')
+		await executeTool('admin', {
+			action: 'update_app',
+			appId: composedConnect.id,
+			credentials: { query: { api_key: 'switched_to_query_only' } }
+		}, adminSession.token)
+		const afterUnitReplace = db.tokens.get(composedConnect.id).credentials
+		assert.equal(afterUnitReplace.headers, undefined, 'updateApp with new query-only credentials removes previous headers cleanly')
+		assert.deepEqual(afterUnitReplace.query, { api_key: 'switched_to_query_only' })
+		await executeTool('admin', {
+			action: 'update_app',
+			appId: composedConnect.id,
+			name: 'Renamed Notion'
+		}, adminSession.token)
+		assert.deepEqual(db.tokens.get(composedConnect.id).credentials.query, { api_key: 'switched_to_query_only' }, 'updateApp without credentials preserves existing query auth')
+		delete process.env.GITHUB_CLIENT_ID
+		delete process.env.GITHUB_CLIENT_SECRET
+		const ghNoOauthEnvRes = await executeTool('admin', {
+			action: 'connect_app',
+			provider: 'github',
+			name: 'GitHub Static Default Base',
+			credentials: 'ghp_static_no_oauth_env'
+		}, adminSession.token)
+		assert.equal(ghNoOauthEnvRes.isError, undefined, 'OAuth provider with credentials connects statically without requiring GITHUB_CLIENT_ID/SECRET')
+		const ghStaticApp = JSON.parse(ghNoOauthEnvRes.content[0].text).app
+		assert.equal(ghStaticApp.type, 'api_key')
+		assert.equal(ghStaticApp.baseUrl, 'https://api.github.com', 'Static override on OAuth provider inherits providerDef.baseUrl when baseUrl is omitted')
+		const invalidShapes = [
+			'',
+			'   ',
+			'Bearer   ',
+			'tok\r\ninjected: 1',
+			'tok_trailing_crlf\r\n',
+			'\ntok_leading_lf',
+			'Bearer\r\ncrlf_after_scheme',
+			123,
+			true,
+			null,
+			[],
+			{},
+			{ extra: '1' },
+			{ bearer: '' },
+			{ bearer: 'Bearer ' },
+			{ bearer: 'Bearer\r\ntok' },
+			{ bearer: 'tok\r\n' },
+			{ basic: 'no_colon_here' },
+			{ basic: ':' },
+			{ basic: '   :   ' },
+			{ basic: 'user:pass\r\nx:1' },
+			{ basic: 'user:pass\r\n' },
+			{ basic: '\tuser:pass\t' },
+			{ basic: 'user:pass\x07' },
+			{ basic: 'user:\tpass' },
+			{ bearer: 'tok', basic: 'u:p' },
+			{ bearer: 'tok', headers: { Authorization: 'Bearer tok2' } },
+			{ basic: 'u:p', headers: { authorization: 'Basic xxx' } },
+			{ headers: {} },
+			{ headers: { 'bad name': 'val' } },
+			{ headers: { ' x-api-key ': 'val' } },
+			{ headers: { 'x-api-key\r\n': 'val' } },
+			{ headers: { cookie: 'sid=1' } },
+			{ headers: { host: 'evil.com' } },
+			{ headers: { 'content-length': '0' } },
+			{ headers: { 'x-api-key': '' } },
+			{ headers: { 'x-api-key': 'val\r\nInjected: 1' } },
+			{ headers: { 'x-api-key': 'a', 'X-Api-Key': 'b' } },
+			{ query: {} },
+			{ query: { '': 'val' } },
+			{ query: { 'ApiKey\r\n': 'val' } },
+			{ query: { ApiKey: 'val\x00bad' } },
+			{ query: { key: 123 } },
+			{ query: { ApiKey: '1', apikey: '2' } }
+		]
+		for (const bad of invalidShapes) {
+			const res = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+				method: 'POST',
+				headers: {
+					authorization: `Bearer ${adminSession.token}`,
+					'content-type': 'application/json'
+				},
+				body: JSON.stringify({ provider: 'stripe', credentials: bad, baseUrl: 'https://api.stripe.com' })
+			})
+			assert.equal(res.status, 400, `connectApp via REST must reject invalid credentials ${JSON.stringify(bad)} with 400`)
+		}
+		const TOKEN_DDL = `
+			CREATE TABLE tokens (
+				id TEXT PRIMARY KEY,
+				user_id TEXT,
+				provider TEXT NOT NULL,
+				type TEXT NOT NULL,
+				name TEXT,
+				token TEXT UNIQUE,
+				credentials TEXT,
+				expires_at INTEGER,
+				scopes TEXT,
+				admin INTEGER DEFAULT 0,
+				ip TEXT,
+				ua TEXT,
+				created TEXT NOT NULL,
+				updated TEXT NOT NULL
+			);
+		`
+		const kMig = cryptoMod.generateKey()
+		delete process.env.CREDENTIALS_DIRECTORY
+		process.env.ENCRYPTION_KEY = kMig
+		const keysMig = cryptoMod.loadKeys({ encrypted: true })
+		const v3Path = path.join(tmpDir, 'v3-legacy.db')
+		const v3Db = new DatabaseSync(v3Path)
+		try {
+			v3Db.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
+			v3Db.exec(`${TOKEN_DDL} PRAGMA user_version = 3;`)
+			const nowIso = new Date().toISOString()
+			const v3Rows = [
+				['v3-bearer', 'stripe', 'sk_live_v3_bearer_secret'],
+				['v3-prefixed-basic', 'twilio', 'basic dXNlcjpwYXNz'],
+				['v3-colon-basic', 'mailgun', 'api:key-v3-mailgun'],
+				['v3-query', 'namecheap', '?ApiUser=jt&ApiKey=v3_nc_secret'],
+				['v3-proto-dedup', 'customq', '?__proto__=v3_proto_secret&ApiKey=old_val&apikey=new_val']
+			]
+			for (const [id, prov, rawKey] of v3Rows) {
+				const ct = cryptoMod.encryptSecret(rawKey, cryptoMod.secretContext(id, prov, 'api_key', 'apiKey'), keysMig)
+				v3Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
+					id,
+					prov,
+					'api_key',
+					JSON.stringify({ apiKey: ct, baseUrl: 'https://api.example.com', account: `acct_${id}` }),
+					nowIso,
+					nowIso
+				)
+			}
+			const oauthAccCt = cryptoMod.encryptSecret('ya29.v3_oauth', cryptoMod.secretContext('v3-oauth', 'google', 'oauth', 'accessToken'), keysMig)
+			v3Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
+				'v3-oauth',
+				'google',
+				'oauth',
+				JSON.stringify({ accessToken: oauthAccCt, account: 'u@example.com' }),
+				nowIso,
+				nowIso
+			)
+			runMigrate(v3Db)
+			assert.equal(v3Db.prepare('PRAGMA user_version').get().user_version, 4)
+			const readV3Creds = (id, prov) => {
+				const raw = JSON.parse(v3Db.prepare('SELECT credentials FROM tokens WHERE id = ?').get(id).credentials)
+				assert.equal('apiKey' in raw, false, `Migrated row ${id} must delete legacy apiKey`)
+				return {
+					baseUrl: raw.baseUrl,
+					account: raw.account,
+					...(raw.headers && { headers: JSON.parse(cryptoMod.decryptSecret(raw.headers, cryptoMod.secretContext(id, prov, 'api_key', 'headers'), keysMig)) }),
+					...(raw.query && { query: JSON.parse(cryptoMod.decryptSecret(raw.query, cryptoMod.secretContext(id, prov, 'api_key', 'query'), keysMig)) })
+				}
+			}
+			assert.deepEqual(readV3Creds('v3-bearer', 'stripe'), {
+				baseUrl: 'https://api.example.com',
+				account: 'acct_v3-bearer',
+				headers: { authorization: 'Bearer sk_live_v3_bearer_secret' }
+			})
+			assert.deepEqual(readV3Creds('v3-prefixed-basic', 'twilio'), {
+				baseUrl: 'https://api.example.com',
+				account: 'acct_v3-prefixed-basic',
+				headers: { authorization: 'Basic dXNlcjpwYXNz' }
+			})
+			assert.deepEqual(readV3Creds('v3-colon-basic', 'mailgun'), {
+				baseUrl: 'https://api.example.com',
+				account: 'acct_v3-colon-basic',
+				headers: { authorization: `Basic ${Buffer.from('api:key-v3-mailgun').toString('base64')}` }
+			})
+			assert.deepEqual(readV3Creds('v3-query', 'namecheap'), {
+				baseUrl: 'https://api.example.com',
+				account: 'acct_v3-query',
+				query: { ApiUser: 'jt', ApiKey: 'v3_nc_secret' }
+			})
+			const protoDedupCreds = readV3Creds('v3-proto-dedup', 'customq')
+			assert.equal(Object.getOwnPropertyDescriptor(protoDedupCreds.query, '__proto__')?.value, 'v3_proto_secret', 'parseLegacyApiKey preserves __proto__ query param as own property')
+			assert.deepEqual(Object.entries(protoDedupCreds.query), [['__proto__', 'v3_proto_secret'], ['apikey', 'new_val']], 'parseLegacyApiKey deduplicates case-insensitive query keys')
+		} finally {
+			v3Db.close()
+		}
+		const v2Path = path.join(tmpDir, 'v2-legacy.db')
+		const v2Db = new DatabaseSync(v2Path)
+		try {
+			v2Db.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
+			v2Db.exec(`${TOKEN_DDL} PRAGMA user_version = 2;`)
+			const nowIso = new Date().toISOString()
+			const v2PlainSecret = 'sk_v2_plaintext_canary_secret_991122'
+			v2Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
+				'v2-bearer',
+				'stripe',
+				'api_key',
+				JSON.stringify({ apiKey: v2PlainSecret, baseUrl: 'https://api.stripe.com' }),
+				nowIso,
+				nowIso
+			)
+			v2Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
+				'v2-query',
+				'namecheap',
+				'api_key',
+				JSON.stringify({ apiKey: '?ApiKey=v2_q_canary_334455', baseUrl: 'https://api.namecheap.com' }),
+				nowIso,
+				nowIso
+			)
+			v2Db.exec('PRAGMA wal_checkpoint(FULL);')
+			assert.equal(fs.readFileSync(v2Path).includes(v2PlainSecret), true)
+			runMigrate(v2Db)
+			assert.equal(v2Db.prepare('PRAGMA user_version').get().user_version, 4)
+			const rawV2Bearer = JSON.parse(v2Db.prepare("SELECT credentials FROM tokens WHERE id = 'v2-bearer'").get().credentials)
+			assert.equal('apiKey' in rawV2Bearer, false)
+			assert.deepEqual(
+				JSON.parse(cryptoMod.decryptSecret(rawV2Bearer.headers, cryptoMod.secretContext('v2-bearer', 'stripe', 'api_key', 'headers'), keysMig)),
+				{ authorization: `Bearer ${v2PlainSecret}` }
+			)
+			const rawV2Query = JSON.parse(v2Db.prepare("SELECT credentials FROM tokens WHERE id = 'v2-query'").get().credentials)
+			assert.equal('apiKey' in rawV2Query, false)
+			assert.deepEqual(
+				JSON.parse(cryptoMod.decryptSecret(rawV2Query.query, cryptoMod.secretContext('v2-query', 'namecheap', 'api_key', 'query'), keysMig)),
+				{ ApiKey: 'v2_q_canary_334455' }
+			)
+			for (const ext of ['', '-wal']) {
+				const f = `${v2Path}${ext}`
+				if (fs.existsSync(f)) {
+					assert.equal(fs.readFileSync(f).includes(v2PlainSecret), false, `v2->v4 migration VACUUM scrubs plaintext apiKey from ${f}`)
+					assert.equal(fs.readFileSync(f).includes('v2_q_canary_334455'), false, `v2->v4 migration VACUUM scrubs plaintext query apiKey from ${f}`)
+				}
+			}
+		} finally {
+			v2Db.close()
+		}
+	} finally {
+		if (origKey === undefined) delete process.env.ENCRYPTION_KEY
+		else process.env.ENCRYPTION_KEY = origKey
+		if (origCredDir === undefined) delete process.env.CREDENTIALS_DIRECTORY
+		else process.env.CREDENTIALS_DIRECTORY = origCredDir
+		if (origGhId === undefined) delete process.env.GITHUB_CLIENT_ID
+		else process.env.GITHUB_CLIENT_ID = origGhId
+		if (origGhSecret === undefined) delete process.env.GITHUB_CLIENT_SECRET
+		else process.env.GITHUB_CLIENT_SECRET = origGhSecret
+		cryptoMod.loadKeys({ dbPath: testDbPath, encrypted: true })
+		fs.rmSync(tmpDir, { recursive: true, force: true })
+		await new Promise(resolve => upstreamServer.close(resolve))
+		await new Promise(resolve => cdnServer.close(resolve))
 	}
 })
 

@@ -9,7 +9,7 @@ Giving agents access to APIs usually means installing or writing bespoke scripts
 * **Client sessions** - Sign in from an MCP client via OAuth (or a local bootstrap token). Mint revocable / non-admin sessions for other agents and scripts.
 * **Upstream apps** - Each linked provider exposes one `<provider>_api` MCP tool:
 	* **OAuth** - Ships with [`google`](providers/google.js) and [`github`](providers/github.js); adding a new config in [`providers/`](providers) is trivial (patches welcome).
-	* **API keys** - Any HTTPS API at runtime using `Bearer`, `Basic`, or query-param credentials.
+	* **Static credentials** - Any HTTPS API at runtime using `Bearer`, `Basic`, custom HTTP `headers`, or `query` parameters.
 * **Linking & sharing** - Link multiple apps to one session, fan one app across many sessions, or share apps with other users without exposing secrets.
 * **Request policies** - Attach ordered `allow`/`deny` rules matching HTTP method, origin, path, query and body to any link or share.
 
@@ -44,12 +44,12 @@ From an admin session, use the `admin` tool to connect upstream apps, create sco
 // connect an OAuth provider (returns an interactive authorization URL)
 admin({ action: 'connect_app', provider: 'google', name: 'Work Google' })
 
-// or connect any HTTP API with a Bearer key, Basic auth ("user:pass"), or query params ("?key=val")
+// or connect any HTTP API with Bearer shorthand or structured { bearer?, basic?, headers?, query? } credentials
 admin({
 	action: 'connect_app',
 	provider: 'stripe',
 	name: 'Stripe',
-	apiKey: 'sk_live_...',
+	credentials: 'sk_live_...',
 	baseUrl: 'https://api.stripe.com'
 })
 
@@ -114,8 +114,8 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 	* `update_session` - Rename a session, toggle `admin`, or rotate its token.
 	* `revoke_session` - Revoke the current session, a specific session, or `allOthers`.
 	* `list_apps` - List connected and shared apps.
-	* `connect_app` - Connect an OAuth or API-key upstream app (or re-authenticate one).
-	* `update_app` - Update an app's name or API-key credentials.
+	* `connect_app` - Connect an OAuth or static-credential upstream app (or re-authenticate one).
+	* `update_app` - Update an app's name or static credentials.
 	* `disconnect_app` - Remove an app (and revoke its upstream OAuth token).
 	* `share_app` - Share an owned app with another user under an optional ceiling policy.
 	* `unshare_app` - Revoke an app share from a user.

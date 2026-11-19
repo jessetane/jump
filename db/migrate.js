@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import * as users from './users.js'
-import { hashSecret, UPSTREAM_SECRET_FIELDS } from './tokens.js'
-import { loadKeys, secretContext, encryptSecret, openSecret } from '../crypto.js'
+import { hashSecret, UPSTREAM_SECRET_FIELDS, UPSTREAM_OBJECT_SECRET_FIELDS, parseLegacyApiKey } from './tokens.js'
+import { loadKeys, secretContext, encryptSecret, openSecret, decryptSecret } from '../crypto.js'
 
 export {
 	migrate
 }
 
-const SCHEMA_VERSION = 3
+const SCHEMA_VERSION = 4
+const ENCRYPTED_SCHEMA_VERSION = 3
 
 function migrateUsersEmail (sqlite) {
 	const userCols = sqlite.prepare('PRAGMA table_info(users)').all()
@@ -115,10 +116,24 @@ function migrateUpstreamEncryption (sqlite, keys) {
 			const creds = JSON.parse(row.credentials)
 			if (!creds || typeof creds !== 'object') continue
 			let rowChanged = false
+			if (row.type === 'api_key' && 'apiKey' in creds) {
+				const rawApiKey = creds.apiKey
+				delete creds.apiKey
+				const normalized = parseLegacyApiKey(rawApiKey)
+				Object.assign(creds, normalized)
+				rowChanged = true
+			}
 			for (const field of UPSTREAM_SECRET_FIELDS) {
 				const val = creds[field]
 				if (val === undefined || val === null || val === '') continue
 				creds[field] = encryptSecret(val, secretContext(row.id, row.provider, row.type, field), keys)
+				rowChanged = true
+			}
+			for (const field of UPSTREAM_OBJECT_SECRET_FIELDS) {
+				const val = creds[field]
+				if (val === undefined || val === null || val === '') continue
+				const serialized = typeof val === 'string' ? val : JSON.stringify(val)
+				creds[field] = encryptSecret(serialized, secretContext(row.id, row.provider, row.type, field), keys)
 				rowChanged = true
 			}
 			if (rowChanged) {
@@ -135,18 +150,55 @@ function migrateUpstreamEncryption (sqlite, keys) {
 	}
 }
 
+function migrateLegacyApiKeyCredentials (sqlite, keys) {
+	sqlite.exec('BEGIN IMMEDIATE;')
+	try {
+		const rows = sqlite.prepare(`
+			SELECT id, provider, type, credentials
+			FROM tokens
+			WHERE provider != 'self' AND type = 'api_key' AND credentials IS NOT NULL
+		`).all()
+		const stmt = sqlite.prepare('UPDATE tokens SET credentials = ? WHERE id = ?')
+		let changedCount = 0
+		for (const row of rows) {
+			const creds = JSON.parse(row.credentials)
+			if (!creds || typeof creds !== 'object' || !('apiKey' in creds)) continue
+			const encryptedApiKey = creds.apiKey
+			delete creds.apiKey
+			if (encryptedApiKey !== undefined && encryptedApiKey !== null && encryptedApiKey !== '') {
+				const rawApiKey = decryptSecret(encryptedApiKey, secretContext(row.id, row.provider, row.type, 'apiKey'), keys)
+				const normalized = parseLegacyApiKey(rawApiKey)
+				for (const field of UPSTREAM_OBJECT_SECRET_FIELDS) {
+					if (normalized[field]) {
+						creds[field] = encryptSecret(JSON.stringify(normalized[field]), secretContext(row.id, row.provider, row.type, field), keys)
+					}
+				}
+			}
+			stmt.run(JSON.stringify(creds), row.id)
+			changedCount++
+		}
+		sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
+		sqlite.exec('COMMIT;')
+		return changedCount > 0
+	} catch (err) {
+		sqlite.exec('ROLLBACK;')
+		throw err
+	}
+}
+
 function verifyAndRotateUpstreamEncryption (sqlite, keys) {
 	const rows = sqlite.prepare(`
 		SELECT id, provider, type, credentials
 		FROM tokens
 		WHERE provider != 'self' AND type IN ('oauth', 'api_key') AND credentials IS NOT NULL
 	`).all()
+	const allSecretFields = [...UPSTREAM_SECRET_FIELDS, ...UPSTREAM_OBJECT_SECRET_FIELDS]
 	const updates = []
 	for (const row of rows) {
 		const creds = JSON.parse(row.credentials)
 		if (!creds || typeof creds !== 'object') continue
 		let rowChanged = false
-		for (const field of UPSTREAM_SECRET_FIELDS) {
+		for (const field of allSecretFields) {
 			const val = creds[field]
 			if (val === undefined || val === null || val === '') continue
 			const context = secretContext(row.id, row.provider, row.type, field)
@@ -189,7 +241,7 @@ function vacuumDatabase (sqlite) {
 function migrate (sqlite) {
 	const version = sqlite.prepare('PRAGMA user_version').get()?.user_version || 0
 	const dbPath = sqlite.prepare('PRAGMA database_list').get()?.file || process.env.DB_PATH || './data.db'
-	const keys = loadKeys({ dbPath, encrypted: version >= SCHEMA_VERSION })
+	const keys = loadKeys({ dbPath, encrypted: version >= ENCRYPTED_SCHEMA_VERSION })
 	let dirty = version > 0 && version < SCHEMA_VERSION
 	if (version < 1 && migrateUsersEmail(sqlite)) {
 		dirty = true
@@ -199,8 +251,13 @@ function migrate (sqlite) {
 	}
 	if (version < 3) {
 		if (migrateUpstreamEncryption(sqlite, keys)) dirty = true
-	} else if (verifyAndRotateUpstreamEncryption(sqlite, keys)) {
-		dirty = true
+	} else {
+		if (version < 4 && migrateLegacyApiKeyCredentials(sqlite, keys)) {
+			dirty = true
+		}
+		if (verifyAndRotateUpstreamEncryption(sqlite, keys)) {
+			dirty = true
+		}
 	}
 	if (dirty) {
 		vacuumDatabase(sqlite)

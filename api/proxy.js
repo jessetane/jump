@@ -42,19 +42,17 @@ async function readResponseBody (res, maxBytes) {
 	return Buffer.concat(chunks)
 }
 
-function stripQueryAuth (parsed, cleanToken) {
-	const secretParams = new URLSearchParams(cleanToken.slice(1))
-	const secretKeysLower = new Set(Array.from(secretParams.keys(), k => k.toLowerCase()))
+function stripQueryAuth (parsed, queryEntries) {
+	const secretKeysLower = new Set(queryEntries.map(([k]) => k.toLowerCase()))
 	for (const existingKey of Array.from(parsed.searchParams.keys())) {
 		if (secretKeysLower.has(existingKey.toLowerCase())) {
 			parsed.searchParams.delete(existingKey)
 		}
 	}
-	return secretParams
 }
 
-function stripLocationAuth (rawLocation, baseUrl, cleanToken) {
-	if (!cleanToken.startsWith('?')) return rawLocation
+function stripLocationAuth (rawLocation, baseUrl, queryEntries) {
+	if (queryEntries.length === 0) return rawLocation
 	let parsed
 	try {
 		parsed = new URL(rawLocation, baseUrl)
@@ -64,7 +62,7 @@ function stripLocationAuth (rawLocation, baseUrl, cleanToken) {
 		throw err
 	}
 	const before = parsed.toString()
-	stripQueryAuth(parsed, cleanToken)
+	stripQueryAuth(parsed, queryEntries)
 	const after = parsed.toString()
 	if (after === before) return rawLocation
 	const trimmed = rawLocation.trim()
@@ -73,34 +71,27 @@ function stripLocationAuth (rawLocation, baseUrl, cleanToken) {
 	return `${parsed.pathname}${parsed.search}${parsed.hash}`
 }
 
-function attachAuth (targetUrl, baseHeaders, token) {
-	const hopHeaders = { ...baseHeaders }
+function attachAuth (targetUrl, baseHeaders, authHeaders, queryEntries) {
+	const hopHeaders = Object.assign(Object.create(null), baseHeaders)
 	delete hopHeaders.authorization
 	delete hopHeaders.cookie
-	const cleanToken = typeof token === 'string' ? token.trim() : ''
-	if (!cleanToken) return { url: targetUrl, headers: hopHeaders }
-	if (cleanToken.startsWith('?')) {
-		const parsed = new URL(targetUrl)
-		const secretParams = stripQueryAuth(parsed, cleanToken)
-		for (const [k, v] of secretParams.entries()) {
-			parsed.searchParams.append(k, v)
-		}
-		return { url: parsed.toString(), headers: hopHeaders }
+	for (const [k, v] of authHeaders) {
+		hopHeaders[k] = v
 	}
-	if (/^(?:Bearer|Basic)\s+/i.test(cleanToken)) {
-		const isBasic = /^basic/i.test(cleanToken)
-		hopHeaders.authorization = `${isBasic ? 'Basic' : 'Bearer'} ${cleanToken.replace(/^(?:Bearer|Basic)\s+/i, '').trim()}`
-	} else if (cleanToken.includes(':')) {
-		hopHeaders.authorization = `Basic ${Buffer.from(cleanToken).toString('base64')}`
-	} else {
-		hopHeaders.authorization = `Bearer ${cleanToken}`
+	if (queryEntries.length === 0) {
+		return { url: targetUrl, headers: hopHeaders }
 	}
-	return { url: targetUrl, headers: hopHeaders }
+	const parsed = new URL(targetUrl)
+	stripQueryAuth(parsed, queryEntries)
+	for (const [k, v] of queryEntries) {
+		parsed.searchParams.append(k, v)
+	}
+	return { url: parsed.toString(), headers: hopHeaders }
 }
 
-async function executeUpstream ({ token, url, method = 'GET', body, headers = {}, raw = false, onStatus, onSameOriginRedirect }) {
-	const baseHeaders = {}
-	if (headers && typeof headers === 'object') {
+async function executeUpstream ({ credentials, url, method = 'GET', body, headers = {}, raw = false, onStatus, onSameOriginRedirect }) {
+	const baseHeaders = Object.create(null)
+	if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
 		for (const [k, v] of Object.entries(headers)) {
 			if (v !== undefined && v !== null) {
 				baseHeaders[k.toLowerCase()] = String(v)
@@ -131,7 +122,12 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 			}
 		}
 	}
-	const cleanToken = typeof token === 'string' ? token.trim() : ''
+	const authHeaders = credentials?.headers && typeof credentials.headers === 'object'
+		? Object.entries(credentials.headers).map(([k, v]) => [k.toLowerCase(), String(v)])
+		: []
+	const queryEntries = credentials?.query && typeof credentials.query === 'object'
+		? Object.entries(credentials.query).map(([k, v]) => [k, String(v)])
+		: []
 	const initialOrigin = new URL(url).origin
 	let curMethod = method.toUpperCase()
 	let curUrl = url
@@ -143,11 +139,11 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 		await assertUpstreamHost(hopUrl.hostname)
 		const isInitialOrigin = hopUrl.origin === initialOrigin
 		const hopReq = isInitialOrigin
-			? attachAuth(curUrl, baseHeaders, cleanToken)
-			: { url: curUrl, headers: { ...baseHeaders } }
+			? attachAuth(curUrl, baseHeaders, authHeaders, queryEntries)
+			: { url: curUrl, headers: baseHeaders }
 		res = await fetch(hopReq.url, {
 			method: curMethod,
-			headers: hopReq.headers,
+			headers: Object.entries(hopReq.headers),
 			...(curBody !== undefined && { body: curBody }),
 			redirect: 'manual',
 			signal
@@ -180,8 +176,8 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 			delete baseHeaders['content-type']
 			delete baseHeaders['content-length']
 		}
-		if (cleanToken.startsWith('?')) {
-			stripQueryAuth(nextParsed, cleanToken)
+		if (queryEntries.length > 0) {
+			stripQueryAuth(nextParsed, queryEntries)
 		}
 		curUrl = nextParsed.toString()
 		if (nextParsed.origin === initialOrigin && onSameOriginRedirect) {
@@ -203,7 +199,7 @@ async function executeUpstream ({ token, url, method = 'GET', body, headers = {}
 	const buf = await readResponseBody(res, maxFileSizeBytes)
 	if (raw) {
 		const rawLocation = res.headers.get('location')
-		const cleanedLocation = rawLocation ? stripLocationAuth(rawLocation, curUrl, cleanToken) : rawLocation
+		const cleanedLocation = rawLocation ? stripLocationAuth(rawLocation, curUrl, queryEntries) : rawLocation
 		let outHeaders = res.headers
 		if (cleanedLocation !== rawLocation) {
 			outHeaders = new Headers(res.headers)
@@ -393,14 +389,14 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 			error.status = 401
 			throw error
 		}
-		if (!freshInfo?.token) {
+		if (!freshInfo?.headers && !freshInfo?.query) {
 			const err = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
 			err.status = 401
 			throw err
 		}
 		let upstreamStatus = 200
 		const result = await executeUpstream({
-			token: freshInfo.token,
+			credentials: freshInfo,
 			url: resolvedUrl,
 			method: normalizedMethod,
 			body,

@@ -25,6 +25,7 @@ test('policy: schema validation rejects malformed rules fast', () => {
 		['not-an-object'],
 		[null],
 		[[]],
+		[Object.assign(new Date(), { action: 'allow' })],
 		[{}],
 		[{ action: 'maybe' }],
 		[{ action: 'allow', method: 'GET' }],
@@ -44,6 +45,7 @@ test('policy: schema validation rejects malformed rules fast', () => {
 		[{ action: 'allow', path: 'https://api.stripe.com/v1/charges' }],
 		[{ action: 'allow', query: null }],
 		[{ action: 'allow', query: [] }],
+		[{ action: 'allow', query: Object.assign(new Date(), { a: '1' }) }],
 		[{ action: 'allow', query: {} }],
 		[{ action: 'allow', query: { '': '1' } }],
 		[{ action: 'allow', query: { k: [] } }],
@@ -54,6 +56,7 @@ test('policy: schema validation rejects malformed rules fast', () => {
 		[{ action: 'allow', body: [] }],
 		[{ action: 'allow', body: ['ok', ''] }],
 		[{ action: 'allow', body: 123 }],
+		[{ action: 'allow', body: Object.assign(new Date(), { a: '1' }) }],
 		[{ action: 'allow', body: {} }],
 		[{ action: 'allow', body: { '': '1' } }],
 		[{ action: 'allow', body: { k: [] } }],
@@ -304,4 +307,19 @@ test('policy: raw string/Buffer parser differentials, duplicate JSON keys, and C
 		contentType: 'application/xml',
 		body: '<Charge><destination>acct_evil</destination></Charge>&dry_run=1'
 	}).allowed, false, 'Compact XML with Content-Type: application/xml must not pass bodyType: form allow rule')
+	const denyRawSecret = [
+		{ action: 'deny', methods: ['POST'], path: '/v1/items', body: '*secret*' },
+		{ action: 'allow', methods: ['POST'], path: '/v1/items' }
+	]
+	assert.equal(evaluatePolicy(denyRawSecret, {
+		url: 'https://api.example.com/v1/items',
+		method: 'POST',
+		body: [{ k: 'secret_val' }]
+	}).allowed, false, 'Raw glob deny rule must inspect JSON-serialized array body matching executeUpstream')
+	const customInstance = Object.assign(Object.create({ protoProp: 1 }), { k: 'secret_val' })
+	assert.equal(evaluatePolicy(denyRawSecret, {
+		url: 'https://api.example.com/v1/items',
+		method: 'POST',
+		body: customInstance
+	}).allowed, false, 'Raw glob deny rule must inspect JSON-serialized non-plain object body matching executeUpstream')
 })

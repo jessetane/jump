@@ -1,4 +1,4 @@
-import { resolveTargetUrl, hasPathTraversal, serializeFormBody } from './util.js'
+import { resolveTargetUrl, hasPathTraversal, serializeFormBody, isPlainObject } from './util.js'
 
 export {
 	evaluatePolicy,
@@ -10,10 +10,6 @@ export {
 const ALLOWED_RULE_KEYS = new Set(['action', 'methods', 'origin', 'path', 'query', 'body', 'bodyType', 'description'])
 const ALLOWED_HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', '*'])
 const ALLOWED_BODY_TYPES = new Set(['json', 'form'])
-
-function isPlainObject (val) {
-	return Boolean(val) && typeof val === 'object' && !Array.isArray(val) && !ArrayBuffer.isView(val)
-}
 
 function isEmptyBody (body) {
 	if (body === undefined || body === null || body === '') return true
@@ -149,7 +145,7 @@ function bodyToString (body, objectFormat = 'json') {
 	if (ArrayBuffer.isView(body)) {
 		return Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString('utf8')
 	}
-	if (isPlainObject(body)) {
+	if (typeof body === 'object') {
 		return objectFormat === 'form' ? serializeFormBody(body) : JSON.stringify(body)
 	}
 	return String(body)
@@ -212,7 +208,7 @@ function matchFieldValue (expected, actual, action = 'allow') {
 }
 
 function validateFieldMap (map, label, ruleIndex) {
-	if (!map || typeof map !== 'object' || Array.isArray(map)) {
+	if (!isPlainObject(map)) {
 		return `Rule at index ${ruleIndex} ${label} must be a non-empty object`
 	}
 	const entries = Object.entries(map)
@@ -285,7 +281,7 @@ function validatePolicy (policy) {
 	}
 	for (let i = 0; i < parsed.length; i++) {
 		const rule = parsed[i]
-		if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+		if (!isPlainObject(rule)) {
 			return { valid: false, error: `Rule at index ${i} must be an object` }
 		}
 		for (const key of Object.keys(rule)) {

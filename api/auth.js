@@ -2,7 +2,7 @@ import * as db from '../db/index.js'
 import { getProvider, listAuthProviders, requireAuthProvider } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
-import { validateBaseUrl, parseAccountSpec, requireBoolean } from '../util.js'
+import { validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
 
 export {
 	whoami,
@@ -333,12 +333,156 @@ function requireValidBaseUrl (rawBase) {
 	return normalized
 }
 
-async function connectApp (token, opts = {}) {
-	let { provider, name, apiKey, account, baseUrl, appId } = opts
-	const { session, appUrl } = requireAdmin(token, opts)
-	if (apiKey !== undefined) {
-		apiKey = requireNonEmptyString(apiKey, 'apiKey')
+const ALLOWED_CREDENTIAL_KEYS = new Set(['bearer', 'basic', 'headers', 'query'])
+const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+const DISALLOWED_CREDENTIAL_HEADERS = new Set([
+	'connection',
+	'keep-alive',
+	'transfer-encoding',
+	'te',
+	'trailer',
+	'upgrade',
+	'content-length',
+	'host',
+	'cookie',
+	'__proto__'
+])
+
+function badRequest (message) {
+	const error = new Error(message)
+	error.status = 400
+	return error
+}
+
+function isValidHeaderValue (val) {
+	if (typeof val !== 'string' || !val.trim()) return false
+	for (let i = 0; i < val.length; i++) {
+		const c = val.charCodeAt(i)
+		if ((c < 0x20 && c !== 0x09) || c === 0x7f || c > 0xff) return false
 	}
+	return true
+}
+
+function normalizeBearerToken (raw, label) {
+	if (typeof raw !== 'string' || !raw.trim()) {
+		throw badRequest(`${label} must be a non-empty string`)
+	}
+	if (!isValidHeaderValue(raw)) {
+		throw badRequest(`${label} contains invalid HTTP header characters`)
+	}
+	const trimmed = raw.trim()
+	if (/^Bearer(?:[ \t]+|$)/i.test(trimmed)) {
+		const rest = trimmed.replace(/^Bearer/i, '').trim()
+		if (!rest) throw badRequest(`${label} must contain a non-empty token`)
+		return rest
+	}
+	return trimmed
+}
+
+function normalizeCredentials (raw) {
+	if (typeof raw === 'string') {
+		const token = normalizeBearerToken(raw, 'credentials')
+		return { headers: { authorization: `Bearer ${token}` } }
+	}
+	if (!isPlainObject(raw)) {
+		throw badRequest('credentials must be a non-empty string or object')
+	}
+	const keys = Object.keys(raw)
+	for (const key of keys) {
+		if (!ALLOWED_CREDENTIAL_KEYS.has(key)) {
+			throw badRequest(`Unknown credentials field "${key}"`)
+		}
+	}
+	const headers = Object.create(null)
+	let authSource = null
+	if (raw.bearer !== undefined) {
+		const token = normalizeBearerToken(raw.bearer, 'credentials.bearer')
+		headers.authorization = `Bearer ${token}`
+		authSource = 'bearer'
+	}
+	if (raw.basic !== undefined) {
+		if (typeof raw.basic !== 'string' || !raw.basic.trim()) {
+			throw badRequest('credentials.basic must be a non-empty "user:pass" string')
+		}
+		if (/[\x00-\x1f\x7f]/.test(raw.basic)) {
+			throw badRequest('credentials.basic must not contain control characters')
+		}
+		const cleanBasic = raw.basic.trim()
+		if (!cleanBasic.includes(':') || cleanBasic === ':') {
+			throw badRequest('credentials.basic must be in "user:pass" format')
+		}
+		if (authSource) {
+			throw badRequest('Conflicting Authorization credentials: specify only one of bearer, basic, or headers.authorization')
+		}
+		headers.authorization = `Basic ${Buffer.from(cleanBasic).toString('base64')}`
+		authSource = 'basic'
+	}
+	if (raw.headers !== undefined) {
+		if (!isPlainObject(raw.headers) || Object.keys(raw.headers).length === 0) {
+			throw badRequest('credentials.headers must be a non-empty object of header names to string values')
+		}
+		for (const [rawName, val] of Object.entries(raw.headers)) {
+			const name = rawName.toLowerCase()
+			if (!HEADER_NAME_RE.test(name)) {
+				throw badRequest(`Invalid HTTP header name in credentials.headers: "${rawName}"`)
+			}
+			if (DISALLOWED_CREDENTIAL_HEADERS.has(name)) {
+				throw badRequest(`Forbidden header in credentials.headers: "${name}"`)
+			}
+			if (!isValidHeaderValue(val)) {
+				throw badRequest(`credentials.headers["${rawName}"] must be a valid non-empty HTTP header value`)
+			}
+			if (Object.hasOwn(headers, name)) {
+				if (name === 'authorization' && authSource !== 'headers.authorization') {
+					throw badRequest('Conflicting Authorization credentials: specify only one of bearer, basic, or headers.authorization')
+				}
+				throw badRequest(`Duplicate header in credentials.headers: "${name}"`)
+			}
+			if (name === 'authorization') {
+				authSource = 'headers.authorization'
+			}
+			headers[name] = val.trim()
+		}
+	}
+	const query = Object.create(null)
+	if (raw.query !== undefined) {
+		if (!isPlainObject(raw.query) || Object.keys(raw.query).length === 0) {
+			throw badRequest('credentials.query must be a non-empty object of parameter names to string values')
+		}
+		const seenLower = new Set()
+		for (const [rawParam, val] of Object.entries(raw.query)) {
+			if (/[\x00-\x1f\x7f]/.test(rawParam)) {
+				throw badRequest('credentials.query parameter names must not contain control characters')
+			}
+			const param = rawParam.trim()
+			if (!param) {
+				throw badRequest('credentials.query parameter names must be non-empty strings')
+			}
+			const lower = param.toLowerCase()
+			if (seenLower.has(lower)) {
+				throw badRequest(`Duplicate query parameter in credentials.query: "${param}"`)
+			}
+			seenLower.add(lower)
+			if (typeof val !== 'string' || /[\x00-\x1f\x7f]/.test(val)) {
+				throw badRequest(`credentials.query["${rawParam}"] must be a valid string`)
+			}
+			query[param] = val
+		}
+	}
+	const hasHeaders = Object.keys(headers).length > 0
+	const hasQuery = Object.keys(query).length > 0
+	if (!hasHeaders && !hasQuery) {
+		throw badRequest('credentials must specify at least one of bearer, basic, headers, or query')
+	}
+	return {
+		...(hasHeaders && { headers: { ...headers } }),
+		...(hasQuery && { query: { ...query } })
+	}
+}
+
+async function connectApp (token, opts = {}) {
+	let { provider, name, credentials, account, baseUrl, appId } = opts
+	const { session, appUrl } = requireAdmin(token, opts)
 	if (provider === undefined || provider === null) {
 		provider = null
 	} else {
@@ -359,13 +503,14 @@ async function connectApp (token, opts = {}) {
 			error.status = 400
 			throw error
 		}
-		if (apiKey !== undefined || account !== undefined || baseUrl !== undefined) {
-			const error = new Error('Cannot pass apiKey, account, or baseUrl with appId in connect_app; use update_app instead')
+		if (credentials !== undefined || account !== undefined || baseUrl !== undefined) {
+			const error = new Error('Cannot pass credentials, account, or baseUrl with appId in connect_app; use update_app instead')
 			error.status = 400
 			throw error
 		}
 		provider = existing.provider
 	}
+	const normalizedAuth = credentials !== undefined ? normalizeCredentials(credentials) : null
 	provider = provider || 'google'
 	if (provider === 'self') {
 		const error = new Error('provider cannot be "self"')
@@ -373,7 +518,7 @@ async function connectApp (token, opts = {}) {
 		throw error
 	}
 	const providerDef = getProvider(provider)
-	if (providerDef?.type === 'oauth' && !apiKey) {
+	if (providerDef?.type === 'oauth' && !normalizedAuth) {
 		requireAuthProvider(providerDef.id)
 		const setupCode = db.tokens.createState({
 			mode: 'setup_connect',
@@ -388,15 +533,15 @@ async function connectApp (token, opts = {}) {
 			connectUrl: `${appUrl}/providers/${providerDef.id}/connect?code=${encodeURIComponent(setupCode)}`
 		}
 	}
-	if (!apiKey) {
-		const error = new Error('apiKey is required for api_key apps')
+	if (!normalizedAuth) {
+		const error = new Error('credentials is required for api_key apps')
 		error.status = 400
 		throw error
 	}
 	const rawBase = baseUrl !== undefined ? baseUrl : (providerDef?.baseUrl || null)
 	const normalizedBaseUrl = requireValidBaseUrl(rawBase)
 	const creds = {
-		apiKey,
+		...normalizedAuth,
 		baseUrl: normalizedBaseUrl,
 		...(cleanAccount && { account: cleanAccount })
 	}
@@ -520,29 +665,40 @@ async function unlinkLogin (token, opts = {}) {
 }
 
 async function updateApp (token, opts = {}) {
-	const { appId, name, account, baseUrl, apiKey } = opts
+	const { appId, name, account, baseUrl, credentials } = opts
 	const { session } = requireAdmin(token, opts)
 	const targetApp = requireApp(session.userId, appId, { allowShare: false, requireId: true })
-	if ((account !== undefined || baseUrl !== undefined || apiKey !== undefined) && targetApp.type !== 'api_key') {
-		const error = new Error('account, baseUrl, and apiKey can only be updated on api_key apps')
+	if ((account !== undefined || baseUrl !== undefined || credentials !== undefined) && targetApp.type !== 'api_key') {
+		const error = new Error('account, baseUrl, and credentials can only be updated on api_key apps')
 		error.status = 400
 		throw error
 	}
 	const cleanName = name !== undefined ? optionalString(name, 'name') : undefined
 	const cleanAccount = account !== undefined ? optionalString(account, 'account') : undefined
-	const cleanApiKey = apiKey !== undefined ? requireNonEmptyString(apiKey, 'apiKey') : undefined
+	const normalizedAuth = credentials !== undefined ? normalizeCredentials(credentials) : undefined
 	const normalizedBaseUrl = baseUrl !== undefined ? requireValidBaseUrl(baseUrl) : undefined
 	let updated = targetApp
-	if (cleanName !== undefined || cleanAccount !== undefined || normalizedBaseUrl !== undefined || cleanApiKey !== undefined) {
-		const hasCredChanges = cleanAccount !== undefined || normalizedBaseUrl !== undefined || cleanApiKey !== undefined
-		const updatedCreds = hasCredChanges
-			? {
-				...(targetApp.credentials || {}),
-				...(cleanAccount !== undefined ? { account: cleanAccount } : {}),
-				...(normalizedBaseUrl !== undefined ? { baseUrl: normalizedBaseUrl } : {}),
-				...(cleanApiKey !== undefined ? { apiKey: cleanApiKey } : {})
+	if (cleanName !== undefined || cleanAccount !== undefined || normalizedBaseUrl !== undefined || normalizedAuth !== undefined) {
+		const hasCredChanges = cleanAccount !== undefined || normalizedBaseUrl !== undefined || normalizedAuth !== undefined
+		let updatedCreds = undefined
+		if (hasCredChanges) {
+			const existingCreds = targetApp.credentials || {}
+			const { headers: _h, query: _q, ...metaCreds } = existingCreds
+			updatedCreds = {
+				...metaCreds,
+				...(normalizedAuth !== undefined
+					? normalizedAuth
+					: {
+						...(existingCreds.headers ? { headers: existingCreds.headers } : {}),
+						...(existingCreds.query ? { query: existingCreds.query } : {})
+					}),
+				...(normalizedBaseUrl !== undefined ? { baseUrl: normalizedBaseUrl } : {})
 			}
-			: undefined
+			if (cleanAccount !== undefined) {
+				if (cleanAccount) updatedCreds.account = cleanAccount
+				else delete updatedCreds.account
+			}
+		}
 		updated = db.tokens.updateCredentials(targetApp.id, {
 			...(cleanName !== undefined ? { name: cleanName } : {}),
 			...(updatedCreds !== undefined ? { credentials: updatedCreds } : {})

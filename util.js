@@ -16,6 +16,7 @@ export {
 	resolveTargetUrl,
 	hasPathTraversal,
 	parseAccountSpec,
+	isPlainObject,
 	requireBoolean
 }
 
@@ -34,6 +35,12 @@ function serializeFormBody (body) {
 		}
 	}
 	return params.toString()
+}
+
+function isPlainObject (val) {
+	if (!val || typeof val !== 'object' || Array.isArray(val) || ArrayBuffer.isView(val)) return false
+	const proto = Object.getPrototypeOf(val)
+	return proto === Object.prototype || proto === null
 }
 
 function requireBoolean (val, name, defaultValue = undefined) {

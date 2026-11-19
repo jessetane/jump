@@ -75,7 +75,16 @@ const adminTool = {
 			name: { type: 'string', description: 'Human-readable label for a session or upstream app.' },
 			account: { type: 'string', description: 'Upstream account, login key account, or recipient user account identifier (e.g. email, username, or "provider:account").' },
 			baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or API-key providers (e.g. "https://api.stripe.com").' },
-			apiKey: { type: 'string', description: 'Upstream API credential when connecting an API-key provider: Bearer token, HTTP Basic "user:pass", or query string "?key=val".' },
+			credentials: {
+				type: ['string', 'object'],
+				description: 'Upstream static credentials for connect_app and update_app: pass a string shorthand "<token>" for Bearer auth, or a structured object { bearer?, basic?, headers?, query? } where bearer is "<token>", basic is "user:pass", headers is { [name]: value } (e.g. { "x-api-key": "..." }), and query is { [name]: value }.',
+				properties: {
+					bearer: { type: 'string', description: 'Bearer token sent as Authorization: Bearer <token>.' },
+					basic: { type: 'string', description: 'HTTP Basic credentials in "user:pass" format.' },
+					headers: { type: 'object', description: 'Exact HTTP headers to attach on upstream requests (e.g. { "x-api-key": "sk-ant-...", "anthropic-version": "2023-06-01" }).' },
+					query: { type: 'object', description: 'URL query parameters to attach on upstream requests (e.g. { ApiKey: "..." }).' }
+				}
+			},
 			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe", "github").' },
 			policy: {
 				type: ['array', 'null'],
