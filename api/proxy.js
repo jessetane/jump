@@ -255,7 +255,7 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 		throw err
 	}
 	const appUrl = (rawAppUrl || 'http://localhost:8080').replace(/\/$/, '')
-	const session = auth && typeof auth === 'object' ? auth : (auth ? db.tokens.getByToken(auth) : null)
+	const session = db.tokens.resolveSession(auth)
 	if (!session) {
 		const err = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
 		err.status = 401

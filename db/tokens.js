@@ -15,6 +15,7 @@ export {
 	getActiveSession,
 	hasActiveAdmin,
 	getByToken,
+	resolveSession,
 	findRevocable,
 	refreshOauthSession,
 	listByUserId,
@@ -168,14 +169,30 @@ function decryptUpstreamCredentials (creds, { id, provider, type }) {
 	}
 	for (const field of UPSTREAM_OBJECT_SECRET_FIELDS) {
 		if (out[field] !== undefined && out[field] !== null && out[field] !== '') {
-			const parsed = JSON.parse(decryptSecret(out[field], secretContext(id, provider, type, field)))
-			if (!isPlainSecretMap(parsed)) {
-				throw new Error(`Malformed decrypted ${field} credential map`)
-			}
-			out[field] = parsed
+			out[field] = JSON.parse(decryptSecret(out[field], secretContext(id, provider, type, field)))
 		}
 	}
 	return out
+}
+
+function serializeCredentials (credentials, meta) {
+	if (!credentials || typeof credentials !== 'object') {
+		return { credsJson: credentials, rawRefreshToken: null }
+	}
+	if (!meta) {
+		return { credsJson: JSON.stringify(credentials), rawRefreshToken: null }
+	}
+	if (meta.provider === 'self' && meta.type === 'bearer' && typeof credentials.refreshToken === 'string') {
+		const rawRefreshToken = credentials.refreshToken
+		return {
+			credsJson: JSON.stringify({ ...credentials, refreshToken: hashSecret(rawRefreshToken) }),
+			rawRefreshToken
+		}
+	}
+	return {
+		credsJson: JSON.stringify(encryptUpstreamCredentials(credentials, meta)),
+		rawRefreshToken: null
+	}
 }
 
 function pruneRecentRefreshes (now = Date.now()) {
@@ -249,18 +266,11 @@ function create (opts = {}) {
 		ip = null,
 		ua = null
 	} = opts
-	const isSelfBearer = provider === 'self' && type === 'bearer'
 	const hashedToken = isHashedToken(provider, type)
 	const rawToken = hashedToken ? (opts.token || randomUUID()) : (opts.token || null)
 	const storedToken = hashedToken ? hashSecret(rawToken) : rawToken
-	const rawRefreshToken = isSelfBearer && credentials && typeof credentials === 'object' && typeof credentials.refreshToken === 'string'
-		? credentials.refreshToken
-		: null
-	const storedCreds = rawRefreshToken
-		? { ...credentials, refreshToken: hashSecret(rawRefreshToken) }
-		: encryptUpstreamCredentials(credentials, { id, provider, type })
+	const { credsJson, rawRefreshToken } = serializeCredentials(credentials, { id, provider, type })
 	const now = new Date().toISOString()
-	const credsJson = storedCreds && typeof storedCreds === 'object' ? JSON.stringify(storedCreds) : storedCreds
 	sqlite.prepare(`
 		INSERT INTO tokens (id, user_id, provider, type, name, token, credentials, expires_at, scopes, admin, ip, ua, created, updated)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -329,6 +339,11 @@ function getByToken (token) {
 		row.updated = new Date().toISOString()
 	}
 	return formatToken(row)
+}
+
+function resolveSession (auth) {
+	if (!auth) return null
+	return typeof auth === 'object' ? auth : getByToken(auth)
 }
 
 function findRevocable (token) {
@@ -606,21 +621,13 @@ function updateCredentials (id, opts = {}) {
 	const params = []
 	let rawSelfRefresh = null
 	if (opts.credentials !== undefined) {
-		let nextCreds = opts.credentials
-		if (nextCreds && typeof nextCreds === 'object') {
-			const meta = sqlite.prepare('SELECT provider, type FROM tokens WHERE id = ?').get(id)
-			if (meta) {
-				if (meta.provider === 'self' && meta.type === 'bearer' && typeof nextCreds.refreshToken === 'string') {
-					rawSelfRefresh = nextCreds.refreshToken
-					nextCreds = { ...nextCreds, refreshToken: hashSecret(rawSelfRefresh) }
-				} else {
-					nextCreds = encryptUpstreamCredentials(nextCreds, { id, provider: meta.provider, type: meta.type })
-				}
-			}
-		}
-		const credsJson = nextCreds && typeof nextCreds === 'object' ? JSON.stringify(nextCreds) : nextCreds
+		const meta = opts.credentials && typeof opts.credentials === 'object'
+			? sqlite.prepare('SELECT provider, type FROM tokens WHERE id = ?').get(id)
+			: null
+		const serialized = serializeCredentials(opts.credentials, meta ? { id, provider: meta.provider, type: meta.type } : null)
+		rawSelfRefresh = serialized.rawRefreshToken
 		sets.push('credentials = ?')
-		params.push(credsJson)
+		params.push(serialized.credsJson)
 	}
 	if (opts.expiresAt !== undefined) {
 		sets.push('expires_at = ?')

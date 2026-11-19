@@ -75,15 +75,9 @@ function formatSession (s, currentSessionId) {
 	}
 }
 
-function resolveSession (auth) {
-	if (!auth) return null
-	if (typeof auth === 'object') return auth
-	return db.tokens.getByToken(auth)
-}
-
 async function whoami (token, opts = {}) {
 	const appUrl = (opts.appUrl || 'http://localhost:8080').replace(/\/$/, '')
-	const session = resolveSession(token)
+	const session = db.tokens.resolveSession(token)
 	if (!session) {
 		return {
 			authenticated: false,
@@ -105,7 +99,7 @@ async function whoami (token, opts = {}) {
 
 function requireSession (token, opts = {}) {
 	const appUrl = (opts.appUrl || 'http://localhost:8080').replace(/\/$/, '')
-	const session = resolveSession(token)
+	const session = db.tokens.resolveSession(token)
 	if (!session) {
 		const error = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
 		error.status = 401
@@ -229,7 +223,7 @@ async function createSession (token, opts = {}) {
 }
 
 async function revokeSession (token, { sessionId, allOthers } = {}) {
-	const session = resolveSession(token)
+	const session = db.tokens.resolveSession(token)
 	if (!session) {
 		return {
 			revoked: false,

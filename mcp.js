@@ -289,8 +289,7 @@ async function executeTool (name, args = {}, token, appUrl) {
 }
 
 function getAvailableTools (auth) {
-	if (!auth) return []
-	const session = typeof auth === 'object' ? auth : db.tokens.getByToken(auth)
+	const session = db.tokens.resolveSession(auth)
 	if (!session) return []
 	const links = db.links.listBySessionId(session.id)
 	const list = []
@@ -354,7 +353,7 @@ const rpcMethods = {
 
 async function handleMcp (req, res, token) {
 	const base = getBaseUrl(req)
-	const session = token ? db.tokens.getByToken(token) : null
+	const session = db.tokens.resolveSession(token)
 	if (!session) {
 		const rawPath = new URL(req.url || '/mcp', 'http://localhost').pathname.replace(/\/+$/, '') || '/'
 		const resourceSuffix = rawPath.startsWith('/mcp/') ? rawPath : ''
