@@ -74,7 +74,7 @@ const adminTool = {
 			loginId: { type: 'string', description: 'Target login key ID (optional for unlink_login).' },
 			name: { type: 'string', description: 'Human-readable label for a session or upstream app.' },
 			account: { type: 'string', description: 'Upstream account, login key account, or recipient user account identifier (e.g. email, username, or "provider:account").' },
-			baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or API-key providers (e.g. "https://api.stripe.com").' },
+			baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or static-credential providers (e.g. "https://api.stripe.com").' },
 			credentials: {
 				type: ['string', 'object'],
 				description: 'Upstream static credentials for connect_app and update_app: pass a string shorthand "<token>" for Bearer auth, or a structured object { bearer?, basic?, headers?, query? } where bearer is "<token>", basic is "user:pass", headers is { [name]: value } (e.g. { "x-api-key": "..." }), and query is { [name]: value }.',

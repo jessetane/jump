@@ -1015,7 +1015,7 @@ test('oauth consent html page, post consent, callback login, and scanner-safe tw
 	const connectedApp = db.tokens.create({
 		userId: agentUser.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'Agent Stripe',
 		credentials: { headers: { authorization: 'Bearer sk_agent' }, baseUrl: 'https://api.stripe.com' }
 	})
@@ -2691,7 +2691,7 @@ test('in-place upstream re-auth flow enforces admin, ownership, and account cont
 	const apiKeyApp = db.tokens.create({
 		userId: user.id,
 		provider: 'google',
-		type: 'api_key',
+		type: 'static',
 		name: 'API Key App',
 		credentials: { headers: { authorization: 'Bearer key_123' }, baseUrl: 'https://www.googleapis.com' }
 	})
@@ -2960,14 +2960,14 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	const shayApp = db.tokens.create({
 		userId: shay.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'Shay Pre-Shared Stripe',
 		credentials: { headers: { authorization: 'Bearer sk_test_preshared' }, baseUrl: 'https://api.stripe.com' }
 	})
 	const shayApp2 = db.tokens.create({
 		userId: shay.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'Shay Overlap Stripe',
 		credentials: { headers: { authorization: 'Bearer sk_test_overlap' }, baseUrl: 'https://api.stripe.com' }
 	})
@@ -3020,7 +3020,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	const precApp = db.tokens.create({
 		userId: shay.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'Shay Precedence Stripe',
 		credentials: { headers: { authorization: 'Bearer sk_prec' }, baseUrl: 'https://api.stripe.com' }
 	})
@@ -3049,7 +3049,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	const seqApp = db.tokens.create({
 		userId: shay.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'Shay Sequential Precedence Stripe',
 		credentials: { headers: { authorization: 'Bearer sk_seq' }, baseUrl: 'https://api.stripe.com' }
 	})
@@ -3098,7 +3098,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	const staleSeqApp = db.tokens.create({
 		userId: shay.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'Shay Stale Pending Guard Stripe',
 		credentials: { headers: { authorization: 'Bearer sk_stale' }, baseUrl: 'https://api.stripe.com' }
 	})
@@ -3169,7 +3169,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	const selfOwnedApp = db.tokens.create({
 		userId: user.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'User Own App',
 		credentials: { headers: { authorization: 'Bearer sk_own' }, baseUrl: 'https://api.stripe.com' }
 	})
@@ -3407,7 +3407,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		const conflictSideEffectApp = db.tokens.create({
 			userId: shay.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			name: 'Conflict Side-Effect Guard App',
 			credentials: { headers: { authorization: 'Bearer sk_conflict' }, baseUrl: 'https://api.stripe.com' }
 		})
@@ -3598,7 +3598,7 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 			id: 'app:special/id%1',
 			userId: user.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			name: 'Encoded App',
 			credentials: { headers: { authorization: 'Bearer sk_enc' }, baseUrl: 'https://api.stripe.com' }
 		})
@@ -3728,7 +3728,7 @@ test('SSO_DOMAINS pinning, login isolation, strict outbound sharing, and verifie
 		const flexApp = db.tokens.create({
 			userId: flexOnlyUser.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			name: 'Flex Stripe',
 			credentials: { headers: { authorization: 'Bearer sk_flex' }, baseUrl: 'https://api.stripe.com' }
 		})
@@ -3821,7 +3821,7 @@ test('SSO_DOMAINS pinning, login isolation, strict outbound sharing, and verifie
 		const corpApp = db.tokens.create({
 			userId: corpUser.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			name: 'Non-Strict Corp Stripe',
 			credentials: { headers: { authorization: 'Bearer sk_corp' }, baseUrl: 'https://api.stripe.com' }
 		})
@@ -3848,7 +3848,7 @@ test('SSO_DOMAINS pinning, login isolation, strict outbound sharing, and verifie
 		const strictApp = db.tokens.create({
 			userId: strictUser.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			name: 'Strict Corp Stripe',
 			credentials: { headers: { authorization: 'Bearer sk_strict' }, baseUrl: 'https://api.stripe.com' }
 		})
@@ -3967,8 +3967,8 @@ test('admin update_app action', async () => {
 			appId: app.id,
 			...forbiddenPatch
 		}, adminSession.token)
-		assert.equal(res.isError, true, 'update_app must reject api_key-only fields on oauth apps')
-		assert.match(res.content[0].text, /can only be updated on api_key apps/)
+		assert.equal(res.isError, true, 'update_app must reject static-only fields on oauth apps')
+		assert.match(res.content[0].text, /can only be updated on static apps/)
 	}
 	assert.equal(db.tokens.get(app.id).credentials.account, 'owner@gmail.com')
 })
@@ -4290,7 +4290,7 @@ test('usage logging: 30-day rolling window, proxy log capture, MCP list_logs, an
 		const app = db.tokens.create({
 			userId: user.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			name: 'Stripe Logs App',
 			credentials: { headers: { authorization: 'Bearer sk_test_logs' }, baseUrl }
 		})
@@ -4497,7 +4497,7 @@ test('upstream credential conventions (Basic, Query-param, Bearer), form-urlenco
 		const preformattedBasicApp = db.tokens.create({
 			userId: user.id,
 			provider: 'twilio',
-			type: 'api_key',
+			type: 'static',
 			name: 'Twilio Preformatted',
 			credentials: { headers: { authorization: 'Basic dXNlcm5hbWU6cGFzc3dvcmQ=' }, baseUrl }
 		})
@@ -4883,7 +4883,7 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 		assert.equal(patConnectRes.isError, undefined)
 		const patApp = JSON.parse(patConnectRes.content[0].text).app
 		assert.equal(patApp.provider, 'github')
-		assert.equal(patApp.type, 'api_key')
+		assert.equal(patApp.type, 'static')
 		assert.equal(patApp.account, 'jessetane')
 		await executeTool('admin', {
 			action: 'link_app',
@@ -4971,7 +4971,7 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		const localApp = db.tokens.create({
 			userId: localUser.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			name: 'Local Stripe',
 			credentials: { headers: { authorization: 'Bearer sk_local' }, baseUrl: 'https://api.stripe.com' }
 		})
@@ -5650,7 +5650,7 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		const tempOwnerApp = db.tokens.create({
 			userId: tempOwner.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			name: 'Temp Owner Stripe',
 			credentials: { headers: { authorization: 'Bearer sk_temp' }, baseUrl }
 		})
@@ -6042,7 +6042,7 @@ test('strict requireBoolean parsing across admin, allOthers, revoke, and allowed
 	const tempApp = db.tokens.create({
 		userId: revUser.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'Revoke Bool Stripe',
 		credentials: { headers: { authorization: 'Bearer sk_rev_bool' }, baseUrl: 'https://api.stripe.com' }
 	})
@@ -6095,14 +6095,14 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 	const stripeApp = db.tokens.create({
 		userId: user.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'Stripe Existing',
 		credentials: { headers: { authorization: 'Bearer sk_existing' }, baseUrl: 'https://api.stripe.com' }
 	})
 	const ghPatApp = db.tokens.create({
 		userId: user.id,
 		provider: 'github',
-		type: 'api_key',
+		type: 'static',
 		name: 'GitHub PAT Existing',
 		credentials: { headers: { authorization: 'Bearer ghp_existing' }, baseUrl: 'https://api.github.com' }
 	})
@@ -6240,7 +6240,7 @@ test('connectApp and updateApp strict input validation parity and formatApp symm
 	const updApp = db.tokens.create({
 		userId: user.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'Update Parity Stripe',
 		credentials: { headers: { authorization: 'Bearer sk_keep_intact' }, baseUrl: 'https://api.stripe.com' }
 	})
@@ -6391,7 +6391,7 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 		const app = db.tokens.create({
 			userId: u.id,
 			provider: 'github',
-			type: 'api_key',
+			type: 'static',
 			credentials: { headers: { authorization: 'Bearer ghp_hdr' }, baseUrl: `http://127.0.0.1:${upPort}` }
 		})
 		db.links.create({ sessionId: s.id, appId: app.id })
@@ -6512,7 +6512,7 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 		const app = db.tokens.create({
 			userId: u.id,
 			provider: 'github',
-			type: 'api_key',
+			type: 'static',
 			credentials: { headers: { authorization: 'Bearer ghp_secret_token' }, baseUrl: `http://127.0.0.1:${apiPort}` }
 		})
 		db.links.create({
@@ -6545,7 +6545,7 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 		const qApp = db.tokens.create({
 			userId: u.id,
 			provider: 'namecheap',
-			type: 'api_key',
+			type: 'static',
 			credentials: { query: { ApiKey: 'nc_top_secret' }, baseUrl: `http://127.0.0.1:${apiPort}` }
 		})
 		db.links.create({ sessionId: s.id, appId: qApp.id, policy: [{ action: 'allow', path: '/qauth/**' }] })
@@ -6672,7 +6672,7 @@ test('upstream SSRF filter blocks IANA special-purpose IP literals and private/s
 			const app = db.tokens.create({
 				userId: u.id,
 				provider,
-				type: 'api_key',
+				type: 'static',
 				credentials: { headers: { authorization: 'Bearer sk_test' }, baseUrl: `https://${host}` }
 			})
 			db.links.create({ sessionId: s.id, appId: app.id })
@@ -6688,7 +6688,7 @@ test('upstream SSRF filter blocks IANA special-purpose IP literals and private/s
 		const pubApp = db.tokens.create({
 			userId: u.id,
 			provider: 'ssrf_pub',
-			type: 'api_key',
+			type: 'static',
 			credentials: { headers: { authorization: 'Bearer sk_pub' }, baseUrl: 'https://public.example.test' }
 		})
 		db.links.create({ sessionId: s.id, appId: pubApp.id })
@@ -6836,7 +6836,7 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 		const olderApp = db.tokens.create({
 			userId: olderUser.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			name: 'Older Stripe',
 			credentials: { headers: { authorization: 'Bearer sk_older' }, baseUrl: 'https://api.stripe.com' }
 		})
@@ -6846,7 +6846,7 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 		const absorbedApp = db.tokens.create({
 			userId: newerUser.id,
 			provider: 'linear',
-			type: 'api_key',
+			type: 'static',
 			name: 'Absorbed Linear',
 			credentials: { headers: { authorization: 'lin_api_absorbed_secret_99' }, baseUrl: 'https://api.linear.app' }
 		})
@@ -6871,7 +6871,7 @@ test('link_login merge: true atomically merges two accounts, preserves older use
 		const thirdApp = db.tokens.create({
 			userId: thirdParty.id,
 			provider: 'mailgun',
-			type: 'api_key',
+			type: 'static',
 			name: 'Shared Mailgun',
 			credentials: { headers: { authorization: `Basic ${Buffer.from('api:key-mg').toString('base64')}` }, baseUrl: 'https://api.mailgun.net' }
 		})
@@ -7033,7 +7033,7 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 		const stripeApp = db.tokens.create({
 			userId: encUser.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			name: 'Canary Stripe',
 			credentials: { headers: { authorization: 'Bearer sk_live_ALWAYS_ON_CANARY_112233' }, query: { canaryParam: 'qp_ALWAYS_ON_CANARY_998877' }, baseUrl: 'https://api.stripe.com', account: 'acct_canary' }
 		})
@@ -7079,47 +7079,47 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 		const rawFuture = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(futureFieldApp.id).credentials)
 		assert.deepEqual(Object.keys(rawFuture).sort(), ['account', 'secret'], 'Unlisted credential properties are encrypted inside secret by default (fail-closed)')
 		assert.equal(db.tokens.get(futureFieldApp.id).credentials.customSecretField, 'fail_closed_canary_secret')
-		assert.throws(() => cryptoMod.encryptSecret(12345, cryptoMod.secretContext('x', 'stripe', 'api_key')), /non-empty string plaintext/)
-		assert.throws(() => cryptoMod.encryptSecret('', cryptoMod.secretContext('x', 'stripe', 'api_key')), /non-empty string plaintext/)
+		assert.throws(() => cryptoMod.encryptSecret(12345, cryptoMod.secretContext('x', 'stripe', 'static')), /non-empty string plaintext/)
+		assert.throws(() => cryptoMod.encryptSecret('', cryptoMod.secretContext('x', 'stripe', 'static')), /non-empty string plaintext/)
 		const writeA = db.tokens.create({
 			userId: encUser.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			credentials: { headers: { authorization: 'Bearer sk_same_value' }, baseUrl: 'https://api.stripe.com' }
 		})
 		const writeB = db.tokens.create({
 			userId: encUser.id,
 			provider: 'stripe',
-			type: 'api_key',
+			type: 'static',
 			credentials: { headers: { authorization: 'Bearer sk_same_value' }, baseUrl: 'https://api.stripe.com' }
 		})
 		const ctA = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeA.id).credentials).secret
 		const ctB = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(writeB.id).credentials).secret
 		assert.notEqual(ctA, ctB, 'Identical secrets produce distinct ciphertexts per write')
 		assert.throws(() => {
-			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeB.id, 'stripe', 'api_key'))
+			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeB.id, 'stripe', 'static'))
 		}, /unable to authenticate data/i, 'Row-level AAD rejects transplanting ciphertext across rows')
 		assert.throws(() => {
-			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeA.id, 'github', 'api_key'))
+			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeA.id, 'github', 'static'))
 		}, /unable to authenticate data/i, 'Provider-level AAD rejects changing provider')
 		assert.throws(() => {
 			cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(writeA.id, 'stripe', 'oauth'))
 		}, /unable to authenticate data/i, 'Type-level AAD rejects changing token type')
 		assert.notEqual(
-			cryptoMod.secretContext('a:b', 'c', 'api_key'),
-			cryptoMod.secretContext('a', 'b:c', 'api_key'),
+			cryptoMod.secretContext('a:b', 'c', 'static'),
+			cryptoMod.secretContext('a', 'b:c', 'static'),
 			'JSON array AAD framing prevents colon delimiter collisions'
 		)
 		const ctParts = ctA.split(':')
 		const truncatedTag = `${ctParts[0]}:${ctParts[1]}:${ctParts[2].slice(0, 8)}:${ctParts[3]}`
 		assert.throws(() => {
-			cryptoMod.decryptSecret(truncatedTag, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key'))
+			cryptoMod.decryptSecret(truncatedTag, cryptoMod.secretContext(writeA.id, 'stripe', 'static'))
 		}, /Malformed encrypted credential parameters/, 'Truncated GCM auth tags are rejected immediately')
 		assert.throws(() => {
-			cryptoMod.decryptSecret('not-four-parts', cryptoMod.secretContext(writeA.id, 'stripe', 'api_key'))
+			cryptoMod.decryptSecret('not-four-parts', cryptoMod.secretContext(writeA.id, 'stripe', 'static'))
 		}, /Malformed encrypted credential envelope/, 'Non-4-part envelopes are rejected immediately')
 		assert.throws(() => {
-			cryptoMod.decryptSecret(`${ctParts[0]}:${ctParts[1]}:${ctParts[2]}:`, cryptoMod.secretContext(writeA.id, 'stripe', 'api_key'))
+			cryptoMod.decryptSecret(`${ctParts[0]}:${ctParts[1]}:${ctParts[2]}:`, cryptoMod.secretContext(writeA.id, 'stripe', 'static'))
 		}, /Malformed encrypted credential parameters/, 'Empty ciphertext part is rejected immediately')
 		const scopedState = db.tokens.createState({ mode: 'setup_connect', provider: 'google', sessionId: 'sess-1' })
 		const scopedStateRow = db.sqlite.prepare('SELECT id, token FROM tokens WHERE token = ?').get(db.tokens.hashSecret(scopedState))
@@ -7205,12 +7205,12 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			runMigrate(diyDb)
 			assert.equal(fs.existsSync(`${diyPath}.key`), true, 'Empty ENCRYPTION_KEY="" from .env uses auto-generated <dbPath>.key')
 			const diyKeys1 = cryptoMod.getKeys()
-			const ctx = cryptoMod.secretContext('app-1', 'stripe', 'api_key')
+			const ctx = cryptoMod.secretContext('app-1', 'stripe', 'static')
 			const ctUnderOld = cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_diy_rotate_secret' } }), ctx, diyKeys1)
 			const nowIso = new Date().toISOString()
 			diyDb.prepare(`
 				INSERT INTO tokens (id, provider, type, credentials, created, updated)
-				VALUES ('app-1', 'stripe', 'api_key', ?, ?, ?)
+				VALUES ('app-1', 'stripe', 'static', ?, ?, ?)
 			`).run(JSON.stringify({ secret: ctUnderOld, baseUrl: 'https://api.stripe.com' }), nowIso, nowIso)
 			diyDb.exec('PRAGMA wal_checkpoint(FULL);')
 			assert.equal(fs.readFileSync(diyPath).includes(ctUnderOld), true)
@@ -7251,12 +7251,12 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
 			runMigrate(tpmDb)
 			assert.equal(fs.existsSync(`${tpmDbPath}.key`), false, 'systemd jump.key mode never writes <dbPath>.key to disk')
-			const ctx = cryptoMod.secretContext('tpm-app-1', 'stripe', 'api_key')
+			const ctx = cryptoMod.secretContext('tpm-app-1', 'stripe', 'static')
 			const tpmCt1 = cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_tpm_sealed_secret' } }), ctx)
 			const nowIso = new Date().toISOString()
 			tpmDb.prepare(`
 				INSERT INTO tokens (id, provider, type, credentials, created, updated)
-				VALUES ('tpm-app-1', 'stripe', 'api_key', ?, ?, ?)
+				VALUES ('tpm-app-1', 'stripe', 'static', ?, ?, ?)
 			`).run(JSON.stringify({ secret: tpmCt1 }), nowIso, nowIso)
 			fs.renameSync(path.join(credDir, 'jump.key'), path.join(credDir, 'jump.key.old'))
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k2}\n`, { mode: 0o600 })
@@ -7279,11 +7279,11 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			process.env.ENCRYPTION_KEY = k1
 			runMigrate(envDb)
 			assert.equal(fs.existsSync(`${envDbPath}.key`), false, 'ENCRYPTION_KEY mode never writes <dbPath>.key to disk')
-			const ctx = cryptoMod.secretContext('env-app-1', 'stripe', 'api_key')
+			const ctx = cryptoMod.secretContext('env-app-1', 'stripe', 'static')
 			const nowIso = new Date().toISOString()
 			envDb.prepare(`
 				INSERT INTO tokens (id, provider, type, credentials, created, updated)
-				VALUES ('env-app-1', 'stripe', 'api_key', ?, ?, ?)
+				VALUES ('env-app-1', 'stripe', 'static', ?, ?, ?)
 			`).run(JSON.stringify({ secret: cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_env_secret' } }), ctx) }), nowIso, nowIso)
 			process.env.ENCRYPTION_KEY = `${k2},${k1}`
 			runMigrate(envDb)
@@ -7334,7 +7334,7 @@ test('proxy strips query-param API keys on upstream redirects', async () => {
 	const qApp = db.tokens.create({
 		userId: qOwner.id,
 		provider: 'customq',
-		type: 'api_key',
+		type: 'static',
 		name: 'Query Key App',
 		credentials: { query: { ApiKey: qSecret }, baseUrl: 'http://127.0.0.1:19999' }
 	})
@@ -7632,7 +7632,7 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 		}, adminSession.token)
 		assert.equal(ghNoOauthEnvRes.isError, undefined, 'OAuth provider with credentials connects statically without requiring GITHUB_CLIENT_ID/SECRET')
 		const ghStaticApp = JSON.parse(ghNoOauthEnvRes.content[0].text).app
-		assert.equal(ghStaticApp.type, 'api_key')
+		assert.equal(ghStaticApp.type, 'static')
 		assert.equal(ghStaticApp.baseUrl, 'https://api.github.com', 'Static override on OAuth provider inherits providerDef.baseUrl when baseUrl is omitted')
 		const invalidShapes = [
 			'',
@@ -7716,8 +7716,16 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 		const v3Path = path.join(tmpDir, 'v3-legacy.db')
 		const v3Db = new DatabaseSync(v3Path)
 		try {
-			v3Db.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
-			v3Db.exec(`${TOKEN_DDL} PRAGMA user_version = 3;`)
+			v3Db.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON; PRAGMA recursive_triggers = ON;')
+			v3Db.exec(`${TOKEN_DDL}
+				CREATE TRIGGER trg_tokens_cascade_shares
+				AFTER DELETE ON tokens
+				WHEN OLD.type IN ('oauth', 'api_key')
+				BEGIN
+					DELETE FROM tokens WHERE type = 'share' AND json_extract(credentials, '$.appId') = OLD.id;
+				END;
+				PRAGMA user_version = 3;
+			`)
 			const nowIso = new Date().toISOString()
 			const v3Rows = [
 				['v3-bearer', 'stripe', 'sk_live_v3_bearer_secret'],
@@ -7747,17 +7755,27 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 				nowIso,
 				nowIso
 			)
+			v3Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
+				'v3-share-of-bearer',
+				'stripe',
+				'share',
+				JSON.stringify({ appId: 'v3-bearer' }),
+				nowIso,
+				nowIso
+			)
 			runMigrate(v3Db)
 			assert.equal(v3Db.prepare('PRAGMA user_version').get().user_version, 4)
-			const readV3Creds = (id, prov, type = 'api_key') => {
-				const raw = JSON.parse(v3Db.prepare('SELECT credentials FROM tokens WHERE id = ?').get(id).credentials)
+			const readV3Creds = (id, prov, expectedType = 'static') => {
+				const row = v3Db.prepare('SELECT type, credentials FROM tokens WHERE id = ?').get(id)
+				assert.equal(row.type, expectedType, `Migrated row ${id} must have type "${expectedType}"`)
+				const raw = JSON.parse(row.credentials)
 				assert.equal('apiKey' in raw, false, `Migrated row ${id} must delete legacy apiKey`)
 				assert.equal('accessToken' in raw, false, `Migrated row ${id} must move accessToken into secret`)
 				assert.equal('refreshToken' in raw, false, `Migrated row ${id} must move refreshToken into secret`)
 				const { secret, ...meta } = raw
 				return {
 					...meta,
-					...(secret && JSON.parse(cryptoMod.decryptSecret(secret, cryptoMod.secretContext(id, prov, type), keysMig)))
+					...(secret && JSON.parse(cryptoMod.decryptSecret(secret, cryptoMod.secretContext(id, prov, expectedType), keysMig)))
 				}
 			}
 			assert.deepEqual(readV3Creds('v3-bearer', 'stripe'), {
@@ -7790,6 +7808,8 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 				accessToken: 'ya29.v3_oauth',
 				refreshToken: '1//v3_refresh'
 			})
+			v3Db.prepare("DELETE FROM tokens WHERE id = 'v3-bearer'").run()
+			assert.equal(v3Db.prepare("SELECT id FROM tokens WHERE id = 'v3-share-of-bearer'").get(), undefined, 'Upgraded trg_tokens_cascade_shares cascades shares when migrated static app is deleted')
 		} finally {
 			v3Db.close()
 		}
@@ -7820,16 +7840,20 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 			assert.equal(fs.readFileSync(v2Path).includes(v2PlainSecret), true)
 			runMigrate(v2Db)
 			assert.equal(v2Db.prepare('PRAGMA user_version').get().user_version, 4)
-			const rawV2Bearer = JSON.parse(v2Db.prepare("SELECT credentials FROM tokens WHERE id = 'v2-bearer'").get().credentials)
+			const v2BearerRow = v2Db.prepare("SELECT type, credentials FROM tokens WHERE id = 'v2-bearer'").get()
+			assert.equal(v2BearerRow.type, 'static')
+			const rawV2Bearer = JSON.parse(v2BearerRow.credentials)
 			assert.equal('apiKey' in rawV2Bearer, false)
 			assert.deepEqual(
-				JSON.parse(cryptoMod.decryptSecret(rawV2Bearer.secret, cryptoMod.secretContext('v2-bearer', 'stripe', 'api_key'), keysMig)),
+				JSON.parse(cryptoMod.decryptSecret(rawV2Bearer.secret, cryptoMod.secretContext('v2-bearer', 'stripe', 'static'), keysMig)),
 				{ headers: { authorization: `Bearer ${v2PlainSecret}` } }
 			)
-			const rawV2Query = JSON.parse(v2Db.prepare("SELECT credentials FROM tokens WHERE id = 'v2-query'").get().credentials)
+			const v2QueryRow = v2Db.prepare("SELECT type, credentials FROM tokens WHERE id = 'v2-query'").get()
+			assert.equal(v2QueryRow.type, 'static')
+			const rawV2Query = JSON.parse(v2QueryRow.credentials)
 			assert.equal('apiKey' in rawV2Query, false)
 			assert.deepEqual(
-				JSON.parse(cryptoMod.decryptSecret(rawV2Query.secret, cryptoMod.secretContext('v2-query', 'namecheap', 'api_key'), keysMig)),
+				JSON.parse(cryptoMod.decryptSecret(rawV2Query.secret, cryptoMod.secretContext('v2-query', 'namecheap', 'static'), keysMig)),
 				{ query: { ApiKey: 'v2_q_canary_334455' } }
 			)
 			for (const ext of ['', '-wal']) {
@@ -7870,7 +7894,7 @@ test('strict unknown parameter and empty update rejection across MCP and REST', 
 	const app = db.tokens.create({
 		userId: user.id,
 		provider: 'stripe',
-		type: 'api_key',
+		type: 'static',
 		name: 'Original Stripe',
 		credentials: {
 			baseUrl: 'https://api.stripe.com',

@@ -331,7 +331,7 @@ function requireNonEmptyString (val, label) {
 function requireValidBaseUrl (rawBase) {
 	const normalized = rawBase ? validateBaseUrl(rawBase) : null
 	if (!normalized) {
-		const error = new Error('Valid https:// baseUrl is required for api_key apps')
+		const error = new Error('Valid https:// baseUrl is required for static apps')
 		error.status = 400
 		throw error
 	}
@@ -533,7 +533,7 @@ async function connectApp (token, opts = {}, appUrl) {
 		}
 	}
 	if (!normalizedAuth) {
-		const error = new Error('credentials is required for api_key apps')
+		const error = new Error('credentials is required for static apps')
 		error.status = 400
 		throw error
 	}
@@ -547,7 +547,7 @@ async function connectApp (token, opts = {}, appUrl) {
 	const app = db.tokens.create({
 		userId: session.userId,
 		provider,
-		type: 'api_key',
+		type: 'static',
 		name: cleanName || providerDef.name,
 		credentials: creds
 	})
@@ -676,8 +676,8 @@ async function updateApp (token, opts = {}) {
 	if (name === undefined && account === undefined && baseUrl === undefined && credentials === undefined) {
 		throw badRequest('At least one of name, account, baseUrl, or credentials is required')
 	}
-	if ((account !== undefined || baseUrl !== undefined || credentials !== undefined) && targetApp.type !== 'api_key') {
-		const error = new Error('account, baseUrl, and credentials can only be updated on api_key apps')
+	if ((account !== undefined || baseUrl !== undefined || credentials !== undefined) && targetApp.type !== 'static') {
+		const error = new Error('account, baseUrl, and credentials can only be updated on static apps')
 		error.status = 400
 		throw error
 	}

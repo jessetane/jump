@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import * as users from './users.js'
-import { hashSecret, encryptUpstreamCredentials, parseLegacyApiKey } from './tokens.js'
+import { SHARES_CASCADE_TRIGGER_SQL, hashSecret, encryptUpstreamCredentials } from './tokens.js'
 import { loadKeys, secretContext, encryptSecret, openSecret, decryptSecret } from '../crypto.js'
 
 export {
@@ -10,6 +10,34 @@ export {
 const SCHEMA_VERSION = 4
 const ENCRYPTED_SCHEMA_VERSION = 3
 const LEGACY_V3_SECRET_FIELDS = ['accessToken', 'refreshToken', 'apiKey']
+
+function parseLegacyApiKey (raw) {
+	const clean = typeof raw === 'string' ? raw.trim() : ''
+	if (!clean) return {}
+	if (clean.startsWith('?')) {
+		const params = new URLSearchParams(clean.slice(1))
+		const query = {}
+		const seenLower = new Map()
+		for (const [k, v] of params.entries()) {
+			const param = k.trim()
+			if (!param) continue
+			const lower = param.toLowerCase()
+			if (seenLower.has(lower)) delete query[seenLower.get(lower)]
+			seenLower.set(lower, param)
+			query[param] = v
+		}
+		return Object.keys(query).length > 0 ? { query } : {}
+	}
+	if (/^(?:Bearer|Basic)\s+/i.test(clean)) {
+		const isBasic = /^basic/i.test(clean)
+		const rest = clean.replace(/^(?:Bearer|Basic)\s+/i, '').trim()
+		return rest ? { headers: { authorization: `${isBasic ? 'Basic' : 'Bearer'} ${rest}` } } : {}
+	}
+	if (clean.includes(':')) {
+		return { headers: { authorization: `Basic ${Buffer.from(clean).toString('base64')}` } }
+	}
+	return { headers: { authorization: `Bearer ${clean}` } }
+}
 
 function migrateUsersEmail (sqlite) {
 	const userCols = sqlite.prepare('PRAGMA table_info(users)').all()
@@ -109,13 +137,27 @@ function migrateUpstreamSecrets (sqlite, keys, fromVersion) {
 		const rows = sqlite.prepare(`
 			SELECT id, provider, type, credentials
 			FROM tokens
-			WHERE provider != 'self' AND type IN ('oauth', 'api_key') AND credentials IS NOT NULL
+			WHERE provider != 'self' AND type IN ('oauth', 'api_key', 'static')
 		`).all()
-		const stmt = sqlite.prepare('UPDATE tokens SET credentials = ? WHERE id = ?')
+		const stmt = sqlite.prepare('UPDATE tokens SET type = ?, credentials = ? WHERE id = ?')
 		let changedCount = 0
 		for (const row of rows) {
+			const nextType = row.type === 'api_key' ? 'static' : row.type
+			if (!row.credentials) {
+				if (nextType !== row.type) {
+					stmt.run(nextType, null, row.id)
+					changedCount++
+				}
+				continue
+			}
 			const rawCreds = JSON.parse(row.credentials)
-			if (!rawCreds || typeof rawCreds !== 'object') continue
+			if (!rawCreds || typeof rawCreds !== 'object') {
+				if (nextType !== row.type) {
+					stmt.run(nextType, row.credentials, row.id)
+					changedCount++
+				}
+				continue
+			}
 			const creds = { ...rawCreds }
 			if (fromVersion === 3) {
 				for (const field of LEGACY_V3_SECRET_FIELDS) {
@@ -125,14 +167,16 @@ function migrateUpstreamSecrets (sqlite, keys, fromVersion) {
 					}
 				}
 			}
-			if (row.type === 'api_key' && 'apiKey' in creds) {
+			if ((row.type === 'api_key' || row.type === 'static') && 'apiKey' in creds) {
 				const rawApiKey = creds.apiKey
 				delete creds.apiKey
 				Object.assign(creds, parseLegacyApiKey(rawApiKey))
 			}
-			stmt.run(JSON.stringify(encryptUpstreamCredentials(creds, row, keys)), row.id)
+			const encrypted = encryptUpstreamCredentials(creds, { id: row.id, provider: row.provider, type: nextType }, keys)
+			stmt.run(nextType, JSON.stringify(encrypted), row.id)
 			changedCount++
 		}
+		sqlite.exec(SHARES_CASCADE_TRIGGER_SQL)
 		sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 		sqlite.exec('COMMIT;')
 		return changedCount > 0
@@ -146,7 +190,7 @@ function verifyAndRotateUpstreamEncryption (sqlite, keys) {
 	const rows = sqlite.prepare(`
 		SELECT id, provider, type, credentials
 		FROM tokens
-		WHERE provider != 'self' AND type IN ('oauth', 'api_key') AND credentials IS NOT NULL
+		WHERE provider != 'self' AND type IN ('oauth', 'static') AND credentials IS NOT NULL
 	`).all()
 	const updates = []
 	for (const row of rows) {

@@ -5,10 +5,10 @@ import { secretContext, encryptSecret, decryptSecret } from '../crypto.js'
 import { createHash, randomUUID } from 'node:crypto'
 
 export {
+	SHARES_CASCADE_TRIGGER_SQL,
 	init,
 	hashSecret,
 	encryptUpstreamCredentials,
-	parseLegacyApiKey,
 	create,
 	get,
 	getActiveSession,
@@ -62,9 +62,13 @@ const CREATE_TOKENS_SQL = `
 	CREATE INDEX IF NOT EXISTS idx_tokens_user_provider ON tokens(user_id, provider);
 	CREATE INDEX IF NOT EXISTS idx_tokens_updated ON tokens(updated);
 	CREATE INDEX IF NOT EXISTS idx_tokens_share_app ON tokens(json_extract(credentials, '$.appId')) WHERE type = 'share';
-	CREATE TRIGGER IF NOT EXISTS trg_tokens_cascade_shares
+`
+
+const SHARES_CASCADE_TRIGGER_SQL = `
+	DROP TRIGGER IF EXISTS trg_tokens_cascade_shares;
+	CREATE TRIGGER trg_tokens_cascade_shares
 	AFTER DELETE ON tokens
-	WHEN OLD.type IN ('oauth', 'api_key')
+	WHEN OLD.type IN ('oauth', 'static')
 	BEGIN
 		DELETE FROM tokens WHERE type = 'share' AND json_extract(credentials, '$.appId') = OLD.id;
 	END;
@@ -89,34 +93,6 @@ const UPSTREAM_JOIN = `
 	LEFT JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
 `
 
-function parseLegacyApiKey (raw) {
-	const clean = typeof raw === 'string' ? raw.trim() : ''
-	if (!clean) return {}
-	if (clean.startsWith('?')) {
-		const params = new URLSearchParams(clean.slice(1))
-		const query = {}
-		const seenLower = new Map()
-		for (const [k, v] of params.entries()) {
-			const param = k.trim()
-			if (!param) continue
-			const lower = param.toLowerCase()
-			if (seenLower.has(lower)) delete query[seenLower.get(lower)]
-			seenLower.set(lower, param)
-			query[param] = v
-		}
-		return Object.keys(query).length > 0 ? { query } : {}
-	}
-	if (/^(?:Bearer|Basic)\s+/i.test(clean)) {
-		const isBasic = /^basic/i.test(clean)
-		const rest = clean.replace(/^(?:Bearer|Basic)\s+/i, '').trim()
-		return rest ? { headers: { authorization: `${isBasic ? 'Basic' : 'Bearer'} ${rest}` } } : {}
-	}
-	if (clean.includes(':')) {
-		return { headers: { authorization: `Basic ${Buffer.from(clean).toString('base64')}` } }
-	}
-	return { headers: { authorization: `Bearer ${clean}` } }
-}
-
 function hashSecret (secret) {
 	if (!secret || typeof secret !== 'string') return null
 	return createHash('sha256').update(secret).digest('hex')
@@ -127,7 +103,7 @@ function isHashedToken (provider, type) {
 }
 
 function isEncryptedTokenRow (provider, type) {
-	return provider !== 'self' && (type === 'oauth' || type === 'api_key')
+	return provider !== 'self' && (type === 'oauth' || type === 'static')
 }
 
 function encryptUpstreamCredentials (creds, { id, provider, type }, keys) {
@@ -177,6 +153,7 @@ function pruneRecentRefreshes (now = Date.now()) {
 
 function init () {
 	sqlite.exec(CREATE_TOKENS_SQL)
+	sqlite.exec(SHARES_CASCADE_TRIGGER_SQL)
 }
 
 function isSession (tok) {
@@ -185,7 +162,7 @@ function isSession (tok) {
 
 function isUpstreamApp (tok, { allowShare = false } = {}) {
 	if (!tok || tok.provider === 'self') return false
-	if (tok.type === 'oauth' || tok.type === 'api_key') return true
+	if (tok.type === 'oauth' || tok.type === 'static') return true
 	return Boolean(allowShare && tok.type === 'share')
 }
 
@@ -397,7 +374,7 @@ function listByUserId (userId, opts = {}) {
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
-		WHERE tokens.user_id = ? AND tokens.type IN ('bearer', 'oauth', 'api_key', 'share')
+		WHERE tokens.user_id = ? AND tokens.type IN ('bearer', 'oauth', 'static', 'share')
 			AND NOT (tokens.provider = 'self' AND tokens.type = 'bearer' AND tokens.expires_at IS NOT NULL AND tokens.updated < ?)
 	`
 	const params = [userId, minUpdated]

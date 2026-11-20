@@ -143,7 +143,7 @@ function createProvider (config) {
 	const id = String(rawConfig.id || '').toLowerCase()
 	const label = rawConfig.name || (id ? id.charAt(0).toUpperCase() + id.slice(1) : 'Upstream')
 	const oauth = rawConfig.oauth || null
-	const type = oauth ? 'oauth' : 'api_key'
+	const type = oauth ? 'oauth' : 'static'
 	const baseUrl = rawConfig.baseUrl || null
 	const parsedProviderBase = baseUrl ? new URL(baseUrl) : null
 	const allowedHosts = rawConfig.allowedHosts || (parsedProviderBase ? [parsedProviderBase.hostname] : [])
@@ -281,7 +281,7 @@ function createProvider (config) {
 		async resolveCredentials (appToken) {
 			if (!appToken) return null
 			const creds = appToken.credentials || {}
-			if (appToken.type === 'api_key') {
+			if (appToken.type === 'static') {
 				if (!creds.headers && !creds.query) return null
 				return {
 					...(creds.headers && { headers: creds.headers }),
