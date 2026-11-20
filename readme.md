@@ -13,7 +13,7 @@ Giving agents access to APIs usually means installing or writing bespoke scripts
 * **Linking & sharing** - Link multiple apps to one session, fan one app across many sessions, or share apps with other users without exposing secrets.
 * **Request policies** - Attach ordered `allow`/`deny` rules matching HTTP method, origin, path, query and body to any link or share.
 
-## Setup
+## Install
 ```sh
 $ git clone https://github.com/jessetane/jump.git
 $ cd jump
@@ -23,7 +23,7 @@ $ cp .env.example .env
 
 For upstream OAuth providers (`google`, `github`, etc.), register `https://<host>/oauth/callback` as the redirect URI in the provider's developer console and set `<PROVIDER>_CLIENT_ID` and `<PROVIDER>_CLIENT_SECRET` in `.env`. If no OAuth providers are configured, `jump` bootstraps a `localhost` admin bearer token on first startup and prints it to stdout.
 
-`jump` binds to `127.0.0.1` by default and derives public URLs and client IPs from `Host` (plus `X-Forwarded-*` on loopback connections), or uses `APP_URL` if set; in production, set `APP_URL` or run behind a local reverse proxy that overwrites `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto` and `X-Forwarded-For`. At rest, `jump` hashes its own tokens and OAuth codes (`SHA-256`) and encrypts all upstream credentials (`AES-256-GCM` with per-write `HKDF-SHA256`), reading a 32-byte `base64url` key from systemd `$CREDENTIALS_DIRECTORY/jump.key` (plus optional `jump.key.old` during rotation), `ENCRYPTION_KEY` (`<key>` or `<new>,<old>`), or an auto-generated `<DB_PATH>.key` (`0600`).
+On first run, `jump` auto-generates `<DB_PATH>.key` alongside the database unless an encryption key is configured; see [Security](#security) before deploying to production.
 
 ## Usage
 Point an OAuth-capable MCP client at `https://<host>/mcp` and sign in as an admin:
@@ -101,9 +101,9 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 }
 ```
 
-## MCP
+## API
 
-### Tools
+### MCP
 
 * `<provider>_api({ url, method?, body?, headers?, account?, appId? })` - Proxies an HTTP request to a linked upstream app.
 * `admin({ action, ... })` - Manages sessions, apps, shares, links, logins and usage logs (exposed on admin sessions):
@@ -125,7 +125,7 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 	* `unlink_login` - Unlink a sign-in provider from the current user.
 	* `list_logs` - Query proxied request audit logs.
 
-## HTTP
+### HTTP
 ```
 POST   /mcp                                     # json-rpc mcp endpoint (also POST /)
 GET    /style.css                               # shared ui stylesheet
@@ -163,6 +163,20 @@ DELETE /api/links                               # unlink app from session (admin
 GET    /api/logs                                # list usage logs
 ALL    /api/:provider/*                         # transparent rest proxy
 ```
+
+## Security
+
+### Storage at rest
+Jump-issued tokens and codes are stored as `SHA-256` digests, and upstream credentials are encrypted with `AES-256-GCM` + per-write `HKDF-SHA256` ([`crypto.js`](crypto.js), [`db/tokens.js`](db/tokens.js)). Keys load from systemd `$CREDENTIALS_DIRECTORY/jump.key`, `ENCRYPTION_KEY`, or `<DB_PATH>.key` (`0600`), with rotation via `.old` or `<new>,<old>`.
+
+### Authentication & sessions
+Client sign-in uses OAuth 2.1 with `S256` PKCE, `ALLOWED_REDIRECT_DOMAINS` and optional `SSO_DOMAINS` IdP pinning ([`oauth.js`](oauth.js), [`sso.js`](sso.js)). Non-admin sessions only see their linked `<provider>_api` tools and cannot inspect apps, policies, or other sessions ([`api/auth.js`](api/auth.js)).
+
+### Upstream isolation & policies
+Secrets never appear in tool schemas, API responses, or logs, and are stripped across cross-origin redirects ([`api/proxy.js`](api/proxy.js), [`mcp.js`](mcp.js)). Every hop resolves DNS against a private/metadata IP blocklist ([`util.js`](util.js)) and evaluates ordered `allow`/`deny` rules, with owner share policies enforced as an immutable ceiling ([`policy.js`](policy.js)).
+
+### Network & reverse proxy
+`jump` binds to `127.0.0.1` by default and resolves public URLs from `APP_URL` if set, or from `Host` (plus `X-Forwarded-*` on loopback connections). In production, set `APP_URL` or run behind a local reverse proxy that overwrites `Host` and `X-Forwarded-*`.
 
 ## Test
 ```sh
