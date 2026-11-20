@@ -6,6 +6,7 @@ export {
 	HOP_BY_HOP_HEADERS,
 	getRawBody,
 	getBody,
+	parseAppUrl,
 	getBaseUrl,
 	getClientIp,
 	serializeFormBody,
@@ -163,12 +164,9 @@ function redirect (res, location, status = 302) {
 	res.end()
 }
 
-let cachedAppUrlRaw = ''
-let cachedAppUrl = null
-
 function parseAppUrl (raw) {
 	const trimmed = typeof raw === 'string' ? raw.trim().replace(/\/+$/, '') : ''
-	if (!trimmed) return null
+	if (!trimmed) return ''
 	let parsed
 	try {
 		parsed = new URL(trimmed)
@@ -181,9 +179,8 @@ function parseAppUrl (raw) {
 	return parsed.origin
 }
 
-if (process.env.APP_URL?.trim()) {
-	cachedAppUrlRaw = process.env.APP_URL
-	cachedAppUrl = parseAppUrl(cachedAppUrlRaw)
+if (process.env.APP_URL !== undefined) {
+	process.env.APP_URL = parseAppUrl(process.env.APP_URL)
 }
 
 function isTrustedProxy (req) {
@@ -198,10 +195,10 @@ function parseHostOrigin (rawHost, rawProtoHeader) {
 	if (!host) return null
 	try {
 		const parsed = new URL(`http://${host}`)
-		const isLocal = isLoopbackHost(parsed.hostname)
+		const isLocal = isLoopbackHost(parsed.hostname) || (!parsed.hostname.includes('.') && !parsed.hostname.startsWith('['))
 		const proto = String(rawProtoHeader || (isLocal ? 'http' : 'https')).split(',')[0].trim().toLowerCase()
 		const validHost = parsed.host === host || (!parsed.port && host === `${parsed.hostname}:80`)
-		if ((proto !== 'http' && proto !== 'https') || parsed.port === '0' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || !validHost) {
+		if ((proto !== 'http' && proto !== 'https') || parsed.port === '0' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || parsed.hostname.endsWith('.') || !validHost) {
 			return null
 		}
 		const port = parsed.port || (host === `${parsed.hostname}:80` ? '80' : '')
@@ -216,12 +213,7 @@ function parseHostOrigin (rawHost, rawProtoHeader) {
 }
 
 function getBaseUrl (req) {
-	const rawConfigured = process.env.APP_URL || ''
-	if (rawConfigured !== cachedAppUrlRaw) {
-		cachedAppUrlRaw = rawConfigured
-		cachedAppUrl = parseAppUrl(rawConfigured)
-	}
-	if (cachedAppUrl) return cachedAppUrl
+	if (process.env.APP_URL) return process.env.APP_URL
 	if (!req?.headers) return 'http://localhost:8080'
 	const trustForwarded = isTrustedProxy(req)
 	const protoHeader = trustForwarded ? req.headers['x-forwarded-proto'] : undefined

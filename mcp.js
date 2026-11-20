@@ -264,11 +264,6 @@ async function executeTool (name, args = {}, token, appUrl) {
 	}
 	try {
 		if (name === 'admin') {
-			if (args !== undefined && args !== null && (typeof args !== 'object' || Array.isArray(args))) {
-				const err = new Error('Options must be a JSON object')
-				err.status = 400
-				throw err
-			}
 			const { action: rawAction, ...actionArgs } = args || {}
 			const action = rawAction || 'whoami'
 			const handle = adminActions[action]

@@ -33,7 +33,7 @@ const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
 const { parseSsoDomains, shouldClaimUnscoped } = await import('../sso.js')
-const { getBaseUrl, getClientIp, validateBaseUrl, resolveTargetUrl, hasPathTraversal, isPlainObject } = await import('../util.js')
+const { parseAppUrl, getBaseUrl, getClientIp, validateBaseUrl, resolveTargetUrl, hasPathTraversal, isPlainObject } = await import('../util.js')
 
 function createTestSession (opts = {}) {
 	const {
@@ -5754,10 +5754,15 @@ test('hasPathTraversal backslash handling and getBaseUrl host/port edge cases', 
 	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com?foo=bar' } }), 'http://localhost:8080')
 	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com#frag' } }), 'http://localhost:8080')
 	assert.equal(getBaseUrl({ headers: { host: '@jump.acme.com' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com.' } }), 'http://localhost:8080')
 	assert.equal(getBaseUrl({
 		socket: { remoteAddress: '127.0.0.1' },
 		headers: { host: 'jump.acme.com', 'x-forwarded-host': 'evil.com', 'x-forwarded-proto': 'https' }
 	}), 'https://jump.acme.com', 'non-loopback Host wins over client-spoofed X-Forwarded-Host behind nginx')
+	assert.equal(getBaseUrl({
+		socket: { remoteAddress: '127.0.0.1' },
+		headers: { host: 'jump_backend', 'x-forwarded-host': 'jump.acme.com', 'x-forwarded-proto': 'https' }
+	}), 'https://jump.acme.com', 'dotless internal upstream Host delegates to X-Forwarded-Host')
 	assert.equal(getBaseUrl({
 		socket: { remoteAddress: '::ffff:127.0.0.1' },
 		headers: { host: '127.0.0.1:8080', 'x-forwarded-host': 'jump.acme.com', 'x-forwarded-proto': 'https' }
@@ -5774,14 +5779,14 @@ test('hasPathTraversal backslash handling and getBaseUrl host/port edge cases', 
 		socket: { remoteAddress: '203.0.113.5' },
 		headers: { 'x-forwarded-for': '198.51.100.7' }
 	}), '203.0.113.5', 'remote socket ignores spoofed X-Forwarded-For')
+	assert.equal(parseAppUrl('https://pinned.acme.com:443///'), 'https://pinned.acme.com')
+	assert.equal(parseAppUrl('   '), '')
+	assert.throws(() => parseAppUrl('https://pinned.acme.com/subpath'), /Invalid APP_URL/)
+	assert.throws(() => parseAppUrl('javascript:alert(1)'), /Invalid APP_URL/)
 	try {
-		process.env.APP_URL = 'https://pinned.acme.com:443///'
+		process.env.APP_URL = parseAppUrl('https://pinned.acme.com:443///')
 		assert.equal(getBaseUrl({ headers: { host: 'evil.com', 'x-forwarded-host': 'evil.com' } }), 'https://pinned.acme.com')
 		assert.equal(getBaseUrl(), 'https://pinned.acme.com')
-		process.env.APP_URL = 'https://pinned.acme.com/subpath'
-		assert.throws(() => getBaseUrl(), /Invalid APP_URL/)
-		process.env.APP_URL = 'javascript:alert(1)'
-		assert.throws(() => getBaseUrl(), /Invalid APP_URL/)
 	} finally {
 		process.env.APP_URL = ''
 	}
