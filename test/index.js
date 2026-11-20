@@ -35,7 +35,7 @@ const { google, github, createProvider, getProvider, listAuthProviders, requireA
 const { isAllowedUrl: isGoogleAllowedUrl, services: googleServices } = google
 const { isAllowedUrl: isGithubAllowedUrl, services: githubServices } = github
 const { readResponseBody } = await import('../api/proxy.js')
-const { executeTool, redactLogArgs } = await import('../mcp.js')
+const { executeTool } = await import('../mcp.js')
 const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
@@ -1520,10 +1520,22 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 			body: JSON.stringify({ ok: false })
 		})
 		assert.equal(bodyPolicyDenied.status, 403, 'REST stream() buffers and enforces body policy when hasBodyPolicy is true')
-		const bodyPolicyTooLarge = await fetch(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
-			method: 'POST',
-			headers: { authorization: `Bearer ${bodyPolicySess.token}`, 'content-type': 'application/json' },
-			body: largeUploadPayload
+		const bodyPolicyTooLarge = await new Promise((resolve, reject) => {
+			const req = http.request(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
+				method: 'POST',
+				headers: {
+					authorization: `Bearer ${bodyPolicySess.token}`,
+					'content-type': 'application/json',
+					'content-length': String(largeUploadPayload.byteLength)
+				}
+			}, res => {
+				res.resume()
+				res.on('end', () => resolve({ status: res.statusCode }))
+			})
+			req.on('error', err => {
+				if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') reject(err)
+			})
+			req.end(largeUploadPayload)
 		})
 		assert.equal(bodyPolicyTooLarge.status, 413, 'REST stream() caps upload at 1 MB when body policy inspection is active')
 		const badHdrMcp = await executeTool('comp_api', { url: '/gzip', headers: { 'x-bad': 'val\r\ninjected' } }, s.token)
@@ -5911,32 +5923,42 @@ test('db.logins transactions use BEGIN IMMEDIATE to wait on WAL write locks inst
 	assert.throws(() => db.logins.remove(resolved.id, { provider: 'google' }), /Cannot unlink your only login key/)
 })
 
-test('redactLogArgs scrubs credentials and auth headers without mutating input', () => {
-	const raw = {
-		action: 'connect_app',
-		provider: 'stripe',
-		credentials: { bearer: 'sk_live_secret_123' },
-		token: 'bearer_xyz',
-		headers: {
-			Authorization: 'Bearer secret',
-			'X-Api-Key': 'key_123',
-			Cookie: 'sid=abc',
-			'Content-Type': 'application/json'
-		},
-		body: { amount: 500 }
+test('stdout access and mcp logs omit query strings and tool arguments', async () => {
+	const addr = server.address()
+	const { session } = createTestSession({ account: 'log-privacy@example.com', admin: true })
+	const origEnv = process.env.NODE_ENV
+	const origLog = console.log
+	const lines = []
+	console.log = (...args) => lines.push(args.map(String).join(' '))
+	process.env.NODE_ENV = 'production'
+	try {
+		await fetch(`http://127.0.0.1:${addr.port}/?secret=leak_me_123`)
+		await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${session.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({
+				jsonrpc: '2.0',
+				id: 1,
+				method: 'tools/call',
+				params: {
+					name: 'admin',
+					arguments: { action: 'whoami', credentials: 'sk_live_secret', body: 'private_email_body' }
+				}
+			})
+		})
+	} finally {
+		process.env.NODE_ENV = origEnv
+		console.log = origLog
 	}
-	const redacted = redactLogArgs(raw)
-	assert.equal(redacted.action, 'connect_app')
-	assert.equal(redacted.provider, 'stripe')
-	assert.equal(redacted.credentials, '[REDACTED]')
-	assert.equal(redacted.token, '[REDACTED]')
-	assert.equal(redacted.headers.Authorization, '[REDACTED]')
-	assert.equal(redacted.headers['X-Api-Key'], '[REDACTED]')
-	assert.equal(redacted.headers.Cookie, '[REDACTED]')
-	assert.equal(redacted.headers['Content-Type'], 'application/json')
-	assert.deepEqual(redacted.body, { amount: 500 })
-	assert.deepEqual(raw.credentials, { bearer: 'sk_live_secret_123' }, 'Original args must not be mutated')
-	assert.equal(raw.headers.Authorization, 'Bearer secret', 'Original headers must not be mutated')
+	const joined = lines.join('\n')
+	assert.match(joined, /\[200\] GET \/ \(/)
+	assert.match(joined, /\[mcp\] tools\/call: name=admin action=whoami/)
+	assert.equal(joined.includes('leak_me_123'), false, 'HTTP access log must omit query strings')
+	assert.equal(joined.includes('sk_live_secret'), false, 'MCP log must omit credentials')
+	assert.equal(joined.includes('private_email_body'), false, 'MCP log must omit request bodies')
 })
 
 test('hasPathTraversal backslash handling and getBaseUrl host/port edge cases', () => {

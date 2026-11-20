@@ -34,14 +34,14 @@ function resolveToken (req) {
 
 const server = http.createServer(async (req, res) => {
 	const start = Date.now()
+	const url = new URL(req.url, 'http://localhost')
+	const pathname = url.pathname.replace(/\/+$/, '') || '/'
 	res.on('finish', () => {
 		if (process.env.NODE_ENV !== 'test') {
 			const duration = Date.now() - start
-			console.log(`[${res.statusCode}] ${req.method} ${req.url} (${duration}ms)`)
+			console.log(`[${res.statusCode}] ${req.method} ${pathname} (${duration}ms)`)
 		}
 	})
-	const url = new URL(req.url, 'http://localhost')
-	const pathname = url.pathname.replace(/\/+$/, '') || '/'
 	if (isCorsRoute(pathname, req.method)) {
 		res.setHeader('access-control-allow-origin', corsOrigin)
 		res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
