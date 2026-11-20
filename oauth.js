@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import * as db from './db/index.js'
 import { getProvider, listAuthProviders, requireAuthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
-import { getBody, getBaseUrl, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
+import { getBody, getBaseUrl, getClientIp, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
 
 export {
 	handleOauth,
@@ -40,10 +40,6 @@ const DISALLOWED_REDIRECT_SCHEMES = new Set([
 	'blob:',
 	'about:'
 ])
-
-function getClientIp (req) {
-	return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || null
-}
 
 function checkFormOrigin (req, res) {
 	const origin = req.headers.origin

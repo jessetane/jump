@@ -7,6 +7,7 @@ export {
 	getRawBody,
 	getBody,
 	getBaseUrl,
+	getClientIp,
 	serializeFormBody,
 	sendJson,
 	sendText,
@@ -145,24 +146,83 @@ function redirect (res, location, status = 302) {
 	res.end()
 }
 
-function getBaseUrl (req) {
-	if (req && req.headers && (req.headers['x-forwarded-host'] || req.headers.host)) {
-		const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host).split(',')[0].trim().toLowerCase()
-		if (rawHost) {
-			try {
-				const parsed = new URL(`http://${rawHost}`)
-				const isLocal = isLoopbackHost(parsed.hostname)
-				const rawProto = String(req.headers['x-forwarded-proto'] || (isLocal ? 'http' : 'https')).split(',')[0].trim().toLowerCase()
-				const validHost = parsed.host === rawHost || (!parsed.port && rawHost === `${parsed.hostname}:80`)
-				if ((rawProto === 'http' || rawProto === 'https') && parsed.port !== '0' && !parsed.username && !parsed.password && parsed.pathname === '/' && !parsed.search && !parsed.hash && validHost) {
-					const port = parsed.port || (rawHost === `${parsed.hostname}:80` ? '80' : '')
-					const effectivePort = (rawProto === 'https' && port === '443') || (rawProto === 'http' && port === '80') ? '' : port
-					return `${rawProto}://${parsed.hostname}${effectivePort ? `:${effectivePort}` : ''}`
-				}
-			} catch {}
-		}
+let cachedAppUrlRaw = ''
+let cachedAppUrl = null
+
+function parseAppUrl (raw) {
+	const trimmed = typeof raw === 'string' ? raw.trim().replace(/\/+$/, '') : ''
+	if (!trimmed) return null
+	let parsed
+	try {
+		parsed = new URL(trimmed)
+	} catch {
+		throw new Error(`Invalid APP_URL: ${raw}`)
 	}
-	return 'http://localhost:8080'
+	if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.port === '0' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || parsed.hostname.endsWith('.')) {
+		throw new Error(`Invalid APP_URL: ${raw}`)
+	}
+	return parsed.origin
+}
+
+if (process.env.APP_URL?.trim()) {
+	cachedAppUrlRaw = process.env.APP_URL
+	cachedAppUrl = parseAppUrl(cachedAppUrlRaw)
+}
+
+function isTrustedProxy (req) {
+	const addr = req?.socket?.remoteAddress
+	if (!addr) return true
+	const clean = addr.toLowerCase().startsWith('::ffff:') ? addr.slice(7) : addr
+	return isLoopbackHost(clean)
+}
+
+function parseHostOrigin (rawHost, rawProtoHeader) {
+	const host = String(rawHost || '').split(',')[0].trim().toLowerCase()
+	if (!host) return null
+	try {
+		const parsed = new URL(`http://${host}`)
+		const isLocal = isLoopbackHost(parsed.hostname)
+		const proto = String(rawProtoHeader || (isLocal ? 'http' : 'https')).split(',')[0].trim().toLowerCase()
+		const validHost = parsed.host === host || (!parsed.port && host === `${parsed.hostname}:80`)
+		if ((proto !== 'http' && proto !== 'https') || parsed.port === '0' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash || !validHost) {
+			return null
+		}
+		const port = parsed.port || (host === `${parsed.hostname}:80` ? '80' : '')
+		const effectivePort = (proto === 'https' && port === '443') || (proto === 'http' && port === '80') ? '' : port
+		return {
+			origin: `${proto}://${parsed.hostname}${effectivePort ? `:${effectivePort}` : ''}`,
+			isLocal
+		}
+	} catch {
+		return null
+	}
+}
+
+function getBaseUrl (req) {
+	const rawConfigured = process.env.APP_URL || ''
+	if (rawConfigured !== cachedAppUrlRaw) {
+		cachedAppUrlRaw = rawConfigured
+		cachedAppUrl = parseAppUrl(rawConfigured)
+	}
+	if (cachedAppUrl) return cachedAppUrl
+	if (!req?.headers) return 'http://localhost:8080'
+	const trustForwarded = isTrustedProxy(req)
+	const protoHeader = trustForwarded ? req.headers['x-forwarded-proto'] : undefined
+	const direct = req.headers.host ? parseHostOrigin(req.headers.host, protoHeader) : null
+	if (direct && !direct.isLocal) return direct.origin
+	if (trustForwarded && req.headers['x-forwarded-host']) {
+		const forwarded = parseHostOrigin(req.headers['x-forwarded-host'], protoHeader)
+		return forwarded ? forwarded.origin : 'http://localhost:8080'
+	}
+	return direct ? direct.origin : 'http://localhost:8080'
+}
+
+function getClientIp (req) {
+	if (isTrustedProxy(req) && req?.headers?.['x-forwarded-for']) {
+		const forwarded = String(req.headers['x-forwarded-for']).split(',')[0].trim()
+		if (forwarded) return forwarded
+	}
+	return req?.socket?.remoteAddress || null
 }
 
 const LOOPBACK_IPV4 = new net.BlockList()

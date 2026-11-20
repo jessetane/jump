@@ -248,16 +248,15 @@ async function executeUpstream ({ credentials, url, method = 'GET', body, header
 	return result
 }
 
-async function request ({ provider: providerName = 'google', url, method = 'GET', body, headers, appId, account, appUrl: rawAppUrl, raw = false } = {}, auth) {
+async function request ({ provider: providerName = 'google', url, method = 'GET', body, headers, appId, account, raw = false } = {}, auth) {
 	if (!url) {
 		const err = new Error('URL is required')
 		err.status = 400
 		throw err
 	}
-	const appUrl = (rawAppUrl || 'http://localhost:8080').replace(/\/$/, '')
 	const session = db.tokens.resolveSession(auth)
 	if (!session) {
-		const err = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
+		const err = new Error('Authentication required')
 		err.status = 401
 		throw err
 	}
@@ -390,7 +389,7 @@ async function request ({ provider: providerName = 'google', url, method = 'GET'
 			throw error
 		}
 		if (!resolvedCreds?.headers && !resolvedCreds?.query) {
-			const err = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
+			const err = new Error('Missing upstream credentials')
 			err.status = 401
 			throw err
 		}

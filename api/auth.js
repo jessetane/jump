@@ -2,7 +2,7 @@ import * as db from '../db/index.js'
 import { getProvider, listAuthProviders, requireAuthProvider } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
+import { HOP_BY_HOP_HEADERS, getBaseUrl, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
 
 export {
 	whoami,
@@ -75,13 +75,16 @@ function formatSession (s, currentSessionId) {
 	}
 }
 
-async function whoami (token, opts = {}) {
-	const appUrl = (opts.appUrl || 'http://localhost:8080').replace(/\/$/, '')
+function resolveOrigin (appUrl) {
+	return appUrl ? appUrl.replace(/\/+$/, '') : getBaseUrl()
+}
+
+async function whoami (token, opts = {}, appUrl) {
 	const session = db.tokens.resolveSession(token)
 	if (!session) {
 		return {
 			authenticated: false,
-			signInUrl: `${appUrl}/oauth/authorize`,
+			signInUrl: `${resolveOrigin(appUrl)}/oauth/authorize`,
 			message: 'Missing or expired Bearer token.'
 		}
 	}
@@ -97,25 +100,24 @@ async function whoami (token, opts = {}) {
 	}
 }
 
-function requireSession (token, opts = {}) {
-	const appUrl = (opts.appUrl || 'http://localhost:8080').replace(/\/$/, '')
+function requireSession (token) {
 	const session = db.tokens.resolveSession(token)
 	if (!session) {
-		const error = new Error(`Authentication required: ${appUrl}/oauth/authorize`)
+		const error = new Error('Authentication required')
 		error.status = 401
 		throw error
 	}
-	return { session, appUrl }
+	return session
 }
 
-function requireAdmin (token, opts = {}, message = 'Access denied: app administration requires admin privileges') {
-	const { session, appUrl } = requireSession(token, opts)
+function requireAdmin (token, message = 'Access denied: app administration requires admin privileges') {
+	const session = requireSession(token)
 	if (!session.admin) {
 		const error = new Error(message)
 		error.status = 403
 		throw error
 	}
-	return { session, appUrl }
+	return session
 }
 
 function requireApp (userId, appId, { allowShare = true, requireId = false } = {}) {
@@ -148,7 +150,7 @@ function requireTargetSession (userId, sessionId) {
 
 function requireShareTarget (token, opts = {}) {
 	const { appId, account, provider = null } = opts
-	const { session } = requireAdmin(token, opts)
+	const session = requireAdmin(token)
 	if (!appId) {
 		const error = new Error('appId is required')
 		error.status = 400
@@ -165,13 +167,14 @@ function requireShareTarget (token, opts = {}) {
 }
 
 async function listSessions (token, opts = {}) {
-	const { session } = requireAdmin(token, opts, 'Access denied: session administration requires admin privileges')
+	const session = requireAdmin(token, 'Access denied: session administration requires admin privileges')
 	const rawSessions = db.tokens.listByUserId(session.userId, { provider: 'self' })
 	return { sessions: rawSessions.map(s => formatSession(s, session.id)) }
 }
 
-async function getSession (token, sessionId, opts = {}) {
-	const { session } = requireSession(token, opts)
+async function getSession (token, opts = {}) {
+	const { sessionId } = opts
+	const session = requireSession(token)
 	if (!session.admin && sessionId !== session.id) {
 		const error = new Error('Access denied: session administration requires admin privileges')
 		error.status = 403
@@ -183,7 +186,7 @@ async function getSession (token, sessionId, opts = {}) {
 
 async function createSession (token, opts = {}) {
 	const { name = 'New Session', admin, linkAppIds = [], policy = null } = opts
-	const { session } = requireAdmin(token, opts, 'Access denied: session administration requires admin privileges')
+	const session = requireAdmin(token, 'Access denied: session administration requires admin privileges')
 	const isAdmin = requireBoolean(admin, 'admin', false)
 	const policyCheck = validatePolicy(policy)
 	if (!policyCheck.valid) {
@@ -279,7 +282,7 @@ async function revokeSession (token, { sessionId, allOthers } = {}) {
 }
 
 async function listApps (token, opts = {}) {
-	const { session } = requireAdmin(token, opts)
+	const session = requireAdmin(token)
 	const allTokens = db.tokens.listByUserId(session.userId)
 	const ownedShares = db.tokens.listSharesByOwnerId(session.userId)
 	const sharesByAppId = new Map()
@@ -467,9 +470,9 @@ function normalizeCredentials (raw) {
 	}
 }
 
-async function connectApp (token, opts = {}) {
+async function connectApp (token, opts = {}, appUrl) {
 	let { provider, name, credentials, account, baseUrl, appId } = opts
-	const { session, appUrl } = requireAdmin(token, opts)
+	const session = requireAdmin(token)
 	if (provider === undefined || provider === null) {
 		provider = null
 	} else {
@@ -517,7 +520,7 @@ async function connectApp (token, opts = {}) {
 		})
 		return {
 			actionRequired: 'oauth_flow',
-			connectUrl: `${appUrl}/providers/${providerDef.id}/connect?code=${encodeURIComponent(setupCode)}`
+			connectUrl: `${resolveOrigin(appUrl)}/providers/${providerDef.id}/connect?code=${encodeURIComponent(setupCode)}`
 		}
 	}
 	if (!normalizedAuth) {
@@ -547,7 +550,7 @@ async function connectApp (token, opts = {}) {
 
 async function disconnectApp (token, opts = {}) {
 	const { appId, revoke } = opts
-	const { session } = requireAdmin(token, opts)
+	const session = requireAdmin(token)
 	const targetApp = requireApp(session.userId, appId)
 	const shouldRevoke = requireBoolean(revoke, 'revoke', true)
 	if (shouldRevoke) {
@@ -565,7 +568,7 @@ async function disconnectApp (token, opts = {}) {
 
 async function linkApp (token, opts = {}) {
 	const { sessionId, appId, policy = null } = opts
-	const { session } = requireAdmin(token, opts, 'Access denied: link administration requires admin privileges')
+	const session = requireAdmin(token, 'Access denied: link administration requires admin privileges')
 	const policyCheck = validatePolicy(policy)
 	if (!policyCheck.valid) {
 		const error = new Error(policyCheck.error)
@@ -589,7 +592,7 @@ async function linkApp (token, opts = {}) {
 
 async function unlinkApp (token, opts = {}) {
 	const { sessionId, appId } = opts
-	const { session } = requireAdmin(token, opts, 'Access denied: link administration requires admin privileges')
+	const session = requireAdmin(token, 'Access denied: link administration requires admin privileges')
 	const targetSession = requireTargetSession(session.userId, sessionId)
 	const targetApp = requireApp(session.userId, appId)
 	const removed = db.links.remove(targetSession.id, targetApp.id)
@@ -600,8 +603,8 @@ async function unlinkApp (token, opts = {}) {
 	}
 }
 
-async function linkLogin (token, opts = {}) {
-	const { session, appUrl } = requireAdmin(token, opts, 'Access denied: login administration requires admin privileges')
+async function linkLogin (token, opts = {}, appUrl) {
+	const session = requireAdmin(token, 'Access denied: login administration requires admin privileges')
 	const { provider, merge } = opts
 	const cleanProvider = optionalString(provider, 'provider')
 	const shouldMerge = requireBoolean(merge, 'merge', false)
@@ -625,12 +628,12 @@ async function linkLogin (token, opts = {}) {
 	})
 	return {
 		actionRequired: 'oauth_flow',
-		connectUrl: `${appUrl}/oauth/authorize?code=${encodeURIComponent(setupCode)}`
+		connectUrl: `${resolveOrigin(appUrl)}/oauth/authorize?code=${encodeURIComponent(setupCode)}`
 	}
 }
 
 async function unlinkLogin (token, opts = {}) {
-	const { session } = requireAdmin(token, opts, 'Access denied: login administration requires admin privileges')
+	const session = requireAdmin(token, 'Access denied: login administration requires admin privileges')
 	const { loginId = null, provider = null, account = null } = opts
 	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
 	if (!loginId && !cleanProvider && !cleanAccount) {
@@ -653,7 +656,7 @@ async function unlinkLogin (token, opts = {}) {
 
 async function updateApp (token, opts = {}) {
 	const { appId, name, account, baseUrl, credentials } = opts
-	const { session } = requireAdmin(token, opts)
+	const session = requireAdmin(token)
 	const targetApp = requireApp(session.userId, appId, { allowShare: false, requireId: true })
 	if ((account !== undefined || baseUrl !== undefined || credentials !== undefined) && targetApp.type !== 'api_key') {
 		const error = new Error('account, baseUrl, and credentials can only be updated on api_key apps')
@@ -762,7 +765,7 @@ async function unshareApp (token, opts = {}) {
 
 async function updateSession (token, opts = {}) {
 	const { sessionId, name, admin, rotateToken } = opts
-	const { session } = requireSession(token, opts)
+	const session = requireSession(token)
 	const targetId = sessionId || session.id
 	if (!session.admin && targetId !== session.id) {
 		const error = new Error('Access denied: session administration requires admin privileges')
@@ -793,7 +796,7 @@ async function updateSession (token, opts = {}) {
 
 async function listLogs (token, opts = {}) {
 	const { sessionId, appId, provider, allowed, limit } = opts
-	const { session } = requireSession(token, opts)
+	const session = requireSession(token)
 	if (!session.admin && sessionId && sessionId !== session.id) {
 		const error = new Error('Access denied: log administration requires admin privileges')
 		error.status = 403

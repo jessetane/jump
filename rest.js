@@ -71,7 +71,6 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 		headers,
 		appId,
 		account,
-		appUrl: getBaseUrl(req),
 		raw: true
 	}, token)
 	res.statusCode = upstream.status
@@ -93,18 +92,18 @@ const routes = {
 		}
 	},
 	'/api/whoami': {
-		async GET (req, res, { token, appUrl }) {
-			const result = await api.auth.whoami(token, { appUrl })
+		async GET (req, res, { token }) {
+			const result = await api.auth.whoami(token, {}, getBaseUrl(req))
 			sendJson(res, result)
 		}
 	},
 	'/api/logins': {
-		async POST (req, res, { token, appUrl }) {
+		async POST (req, res, { token }) {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.linkLogin(token, { ...body, appUrl })
+			const result = await api.auth.linkLogin(token, body, getBaseUrl(req))
 			sendJson(res, result)
 		},
-		async DELETE (req, res, { token, query, appUrl }) {
+		async DELETE (req, res, { token, query }) {
 			let body = {}
 			if (query.loginId === undefined && query.provider === undefined && query.account === undefined) {
 				body = await parseJsonBody(req)
@@ -112,20 +111,19 @@ const routes = {
 			const result = await api.auth.unlinkLogin(token, {
 				loginId: query.loginId ?? body.loginId,
 				provider: query.provider ?? body.provider,
-				account: query.account ?? body.account,
-				appUrl
+				account: query.account ?? body.account
 			})
 			sendJson(res, result)
 		}
 	},
 	'/api/sessions': {
-		async GET (req, res, { token, appUrl }) {
-			const result = await api.auth.listSessions(token, { appUrl })
+		async GET (req, res, { token }) {
+			const result = await api.auth.listSessions(token)
 			sendJson(res, result)
 		},
-		async POST (req, res, { token, appUrl }) {
+		async POST (req, res, { token }) {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.createSession(token, { ...body, appUrl })
+			const result = await api.auth.createSession(token, body)
 			sendJson(res, result, 201)
 		},
 		async DELETE (req, res, { token, query }) {
@@ -134,42 +132,41 @@ const routes = {
 		}
 	},
 	'/api/apps': {
-		async GET (req, res, { token, appUrl }) {
-			const result = await api.auth.listApps(token, { appUrl })
+		async GET (req, res, { token }) {
+			const result = await api.auth.listApps(token)
 			sendJson(res, result)
 		},
-		async POST (req, res, { token, appUrl }) {
+		async POST (req, res, { token }) {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.connectApp(token, { ...body, appUrl })
+			const result = await api.auth.connectApp(token, body, getBaseUrl(req))
 			sendJson(res, result, 201)
 		}
 	},
 	'/api/links': {
-		async POST (req, res, { token, appUrl }) {
+		async POST (req, res, { token }) {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.linkApp(token, { ...body, appUrl })
+			const result = await api.auth.linkApp(token, body)
 			sendJson(res, result, 201)
 		},
-		async DELETE (req, res, { token, query, appUrl }) {
+		async DELETE (req, res, { token, query }) {
 			let body = {}
 			if (query.sessionId === undefined && query.appId === undefined) {
 				body = await parseJsonBody(req)
 			}
 			const result = await api.auth.unlinkApp(token, {
 				sessionId: query.sessionId ?? body.sessionId,
-				appId: query.appId ?? body.appId,
-				appUrl
+				appId: query.appId ?? body.appId
 			})
 			sendJson(res, result)
 		}
 	},
 	'/api/shares': {
-		async POST (req, res, { token, appUrl }) {
+		async POST (req, res, { token }) {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.shareApp(token, { ...body, appUrl })
+			const result = await api.auth.shareApp(token, body)
 			sendJson(res, result, 201)
 		},
-		async DELETE (req, res, { token, query, appUrl }) {
+		async DELETE (req, res, { token, query }) {
 			let body = {}
 			if (query.appId === undefined && query.account === undefined && query.provider === undefined) {
 				body = await parseJsonBody(req)
@@ -177,21 +174,19 @@ const routes = {
 			const result = await api.auth.unshareApp(token, {
 				appId: query.appId ?? body.appId,
 				account: query.account ?? body.account,
-				provider: query.provider ?? body.provider,
-				appUrl
+				provider: query.provider ?? body.provider
 			})
 			sendJson(res, result)
 		}
 	},
 	'/api/logs': {
-		async GET (req, res, { token, query, appUrl }) {
+		async GET (req, res, { token, query }) {
 			const result = await api.auth.listLogs(token, {
 				sessionId: query.sessionId,
 				appId: query.appId,
 				provider: query.provider,
 				allowed: query.allowed,
-				limit: query.limit ? Number(query.limit) : undefined,
-				appUrl
+				limit: query.limit ? Number(query.limit) : undefined
 			})
 			sendJson(res, result)
 		}
@@ -211,11 +206,10 @@ function decodePathParam (raw) {
 }
 
 async function handleRest (req, res, { pathname, url, query, token }) {
-	const appUrl = getBaseUrl(req)
 	if (pathname.startsWith('/api/logins/')) {
 		const loginId = decodePathParam(pathname.slice('/api/logins/'.length))
 		if (req.method === 'DELETE') {
-			const result = await api.auth.unlinkLogin(token, { loginId, appUrl })
+			const result = await api.auth.unlinkLogin(token, { loginId })
 			sendJson(res, result)
 			return
 		}
@@ -226,7 +220,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 	if (pathname.startsWith('/api/sessions/')) {
 		const sessionId = decodePathParam(pathname.slice('/api/sessions/'.length))
 		if (req.method === 'GET') {
-			const result = await api.auth.getSession(token, sessionId, { appUrl })
+			const result = await api.auth.getSession(token, { sessionId })
 			sendJson(res, result)
 			return
 		}
@@ -237,7 +231,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 		}
 		if (req.method === 'PATCH' || req.method === 'PUT') {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.updateSession(token, { ...body, sessionId, appUrl })
+			const result = await api.auth.updateSession(token, { ...body, sessionId })
 			sendJson(res, result)
 			return
 		}
@@ -249,12 +243,12 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 		const appId = decodePathParam(pathname.slice('/api/apps/'.length))
 		if (req.method === 'PATCH' || req.method === 'PUT') {
 			const body = await parseJsonBody(req)
-			const result = await api.auth.updateApp(token, { ...body, appId, appUrl })
+			const result = await api.auth.updateApp(token, { ...body, appId })
 			sendJson(res, result)
 			return
 		}
 		if (req.method === 'DELETE') {
-			const result = await api.auth.disconnectApp(token, { appId, revoke: query?.revoke, appUrl })
+			const result = await api.auth.disconnectApp(token, { appId, revoke: query?.revoke })
 			sendJson(res, result)
 			return
 		}
@@ -270,7 +264,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 			err.status = 405
 			throw err
 		}
-		await handler(req, res, { token, query, appUrl })
+		await handler(req, res, { token, query })
 		return
 	}
 	const rawPathname = url?.pathname || pathname

@@ -187,23 +187,23 @@ function buildProviderTool (providerName, providerLinks = []) {
 }
 
 const adminActions = {
-	whoami: (args, token, appUrl) => api.auth.whoami(token, { appUrl }),
-	list_sessions: (args, token, appUrl) => api.auth.listSessions(token, { appUrl }),
-	get_session: (args, token, appUrl) => api.auth.getSession(token, args.sessionId, { appUrl }),
-	create_session: (args, token, appUrl) => api.auth.createSession(token, { ...args, appUrl }),
-	update_session: (args, token, appUrl) => api.auth.updateSession(token, { ...args, appUrl }),
-	revoke_session: (args, token) => api.auth.revokeSession(token, args),
-	list_apps: (args, token, appUrl) => api.auth.listApps(token, { appUrl }),
-	connect_app: (args, token, appUrl) => api.auth.connectApp(token, { ...args, appUrl }),
-	disconnect_app: (args, token, appUrl) => api.auth.disconnectApp(token, { ...args, appUrl }),
-	update_app: (args, token, appUrl) => api.auth.updateApp(token, { ...args, appUrl }),
-	share_app: (args, token, appUrl) => api.auth.shareApp(token, { ...args, appUrl }),
-	unshare_app: (args, token, appUrl) => api.auth.unshareApp(token, { ...args, appUrl }),
-	link_app: (args, token, appUrl) => api.auth.linkApp(token, { ...args, appUrl }),
-	unlink_app: (args, token, appUrl) => api.auth.unlinkApp(token, { ...args, appUrl }),
-	link_login: (args, token, appUrl) => api.auth.linkLogin(token, { ...args, appUrl }),
-	unlink_login: (args, token, appUrl) => api.auth.unlinkLogin(token, { ...args, appUrl }),
-	list_logs: (args, token, appUrl) => api.auth.listLogs(token, { ...args, appUrl })
+	whoami: api.auth.whoami,
+	list_sessions: api.auth.listSessions,
+	get_session: api.auth.getSession,
+	create_session: api.auth.createSession,
+	update_session: api.auth.updateSession,
+	revoke_session: api.auth.revokeSession,
+	list_apps: api.auth.listApps,
+	connect_app: api.auth.connectApp,
+	disconnect_app: api.auth.disconnectApp,
+	update_app: api.auth.updateApp,
+	share_app: api.auth.shareApp,
+	unshare_app: api.auth.unshareApp,
+	link_app: api.auth.linkApp,
+	unlink_app: api.auth.unlinkApp,
+	link_login: api.auth.linkLogin,
+	unlink_login: api.auth.unlinkLogin,
+	list_logs: api.auth.listLogs
 }
 
 function formatContent (result) {
@@ -236,7 +236,7 @@ function formatError (err, toolName = 'tool') {
 			isError: true,
 			content: [{ type: 'text', text: err.message }]
 		}
-	} else if (err.message?.startsWith('Authentication required:')) {
+	} else if (err.message?.startsWith('Authentication required')) {
 		console.warn(`[mcp] ${toolName} rejected: Authentication required`)
 	} else if (err.message?.startsWith('Failed to refresh ')) {
 		console.warn(`[mcp] ${err.message}`)
@@ -264,7 +264,8 @@ async function executeTool (name, args = {}, token, appUrl) {
 	}
 	try {
 		if (name === 'admin') {
-			const action = args.action || 'whoami'
+			const { action: rawAction, ...actionArgs } = args
+			const action = rawAction || 'whoami'
 			const handle = adminActions[action]
 			if (!handle) {
 				console.warn(`[mcp] admin action rejected: Unknown action "${action}"`)
@@ -272,13 +273,13 @@ async function executeTool (name, args = {}, token, appUrl) {
 				err.status = 400
 				throw err
 			}
-			const result = await handle(args, token, appUrl)
+			const result = await handle(token, actionArgs, appUrl)
 			return { content: formatContent(result) }
 		}
 		const apiMatch = name.match(/^([a-z0-9_-]+)_api$/i)
 		if (apiMatch) {
 			const provider = apiMatch[1].toLowerCase()
-			const result = await api.proxy.request({ ...args, provider, appUrl }, token)
+			const result = await api.proxy.request({ ...args, provider }, token)
 			return { content: formatContent(result) }
 		}
 		console.warn(`[mcp] tools/call rejected: Unknown tool "${name}"`)

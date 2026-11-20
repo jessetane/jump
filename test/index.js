@@ -11,6 +11,7 @@ const dirname = path.dirname(fileURLToPath(import.meta.url))
 const testDbPath = path.join(dirname, 'test.db')
 process.env.DB_PATH = testDbPath
 process.env.NODE_ENV = 'test'
+process.env.APP_URL = ''
 process.env.GOOGLE_CLIENT_ID = 'test-client-id'
 process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret'
 process.env.ALLOWED_REDIRECT_DOMAINS = 'chatgpt.com,*.antigravity.google,antigravity,cursor,vscode'
@@ -32,7 +33,7 @@ const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
 const { parseSsoDomains, shouldClaimUnscoped } = await import('../sso.js')
-const { getBaseUrl, validateBaseUrl, resolveTargetUrl, hasPathTraversal, isPlainObject } = await import('../util.js')
+const { getBaseUrl, getClientIp, validateBaseUrl, resolveTargetUrl, hasPathTraversal, isPlainObject } = await import('../util.js')
 
 function createTestSession (opts = {}) {
 	const {
@@ -2057,6 +2058,7 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	assert.match(unauthData.signInUrl, /\/oauth\/authorize/)
 	const unauthSessions = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`)
 	assert.equal(unauthSessions.status, 401)
+	assert.match(unauthSessions.headers.get('www-authenticate') || '', /Bearer authorization_uri="http:\/\/127\.0\.0\.1:\d+\/oauth\/authorize"/)
 	const user = db.logins.resolveUser('google', 'rest-test@example.com')
 	const session1 = db.tokens.create({
 		userId: user.id,
@@ -5752,6 +5754,37 @@ test('hasPathTraversal backslash handling and getBaseUrl host/port edge cases', 
 	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com?foo=bar' } }), 'http://localhost:8080')
 	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com#frag' } }), 'http://localhost:8080')
 	assert.equal(getBaseUrl({ headers: { host: '@jump.acme.com' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({
+		socket: { remoteAddress: '127.0.0.1' },
+		headers: { host: 'jump.acme.com', 'x-forwarded-host': 'evil.com', 'x-forwarded-proto': 'https' }
+	}), 'https://jump.acme.com', 'non-loopback Host wins over client-spoofed X-Forwarded-Host behind nginx')
+	assert.equal(getBaseUrl({
+		socket: { remoteAddress: '::ffff:127.0.0.1' },
+		headers: { host: '127.0.0.1:8080', 'x-forwarded-host': 'jump.acme.com', 'x-forwarded-proto': 'https' }
+	}), 'https://jump.acme.com', 'loopback Host delegates to X-Forwarded-Host from local reverse proxy')
+	assert.equal(getBaseUrl({
+		socket: { remoteAddress: '203.0.113.5' },
+		headers: { host: '127.0.0.1:8080', 'x-forwarded-host': 'evil.com', 'x-forwarded-proto': 'https' }
+	}), 'http://127.0.0.1:8080', 'remote socket ignores X-Forwarded-Host and X-Forwarded-Proto')
+	assert.equal(getClientIp({
+		socket: { remoteAddress: '127.0.0.1' },
+		headers: { 'x-forwarded-for': '198.51.100.7, 10.0.0.1' }
+	}), '198.51.100.7')
+	assert.equal(getClientIp({
+		socket: { remoteAddress: '203.0.113.5' },
+		headers: { 'x-forwarded-for': '198.51.100.7' }
+	}), '203.0.113.5', 'remote socket ignores spoofed X-Forwarded-For')
+	try {
+		process.env.APP_URL = 'https://pinned.acme.com:443///'
+		assert.equal(getBaseUrl({ headers: { host: 'evil.com', 'x-forwarded-host': 'evil.com' } }), 'https://pinned.acme.com')
+		assert.equal(getBaseUrl(), 'https://pinned.acme.com')
+		process.env.APP_URL = 'https://pinned.acme.com/subpath'
+		assert.throws(() => getBaseUrl(), /Invalid APP_URL/)
+		process.env.APP_URL = 'javascript:alert(1)'
+		assert.throws(() => getBaseUrl(), /Invalid APP_URL/)
+	} finally {
+		process.env.APP_URL = ''
+	}
 	assert.equal(typeof db.users.userAccountSql, 'function')
 })
 
