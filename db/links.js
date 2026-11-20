@@ -77,7 +77,7 @@ function listBySessionId (sessionId) {
 		JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
 		WHERE links.session_id = ?
-		ORDER BY links.created ASC
+		ORDER BY links.created ASC, links.rowid ASC
 	`).all(sessionId)
 	return rows.map(formatLink)
 }

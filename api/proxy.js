@@ -4,6 +4,7 @@ import { evaluatePolicy } from '../policy.js'
 import { assertKeys, assertUpstreamHost, serializeFormBody, validateBaseUrl } from '../util.js'
 
 export {
+	formatLinkedApps,
 	request,
 	readResponseBody
 }
@@ -248,7 +249,71 @@ async function executeUpstream ({ credentials, url, method = 'GET', body, header
 	return result
 }
 
-const PROXY_REQUEST_KEYS = ['provider', 'url', 'method', 'body', 'headers', 'appId', 'account']
+const PROXY_REQUEST_KEYS = ['provider', 'url', 'method', 'body', 'headers', 'app']
+
+function countValues (items, getKey) {
+	const counts = new Map()
+	for (const item of items) {
+		const k = getKey(item)
+		if (k) counts.set(k, (counts.get(k) || 0) + 1)
+	}
+	return counts
+}
+
+function formatLinkedApps (providerLinks, provider) {
+	const nameCounts = countValues(providerLinks, l => (l.app?.name || '').toLowerCase())
+	const accCounts = countValues(providerLinks, l => (l.app?.credentials?.account || '').toLowerCase())
+	const defaultName = provider.name.toLowerCase()
+	return providerLinks.map(l => {
+		const name = l.app?.name || ''
+		const acc = l.app?.credentials?.account || ''
+		const id = l.app?.id || ''
+		const nameDup = nameCounts.get(name.toLowerCase()) > 1
+		const accDup = accCounts.get(acc.toLowerCase()) > 1
+		if (name && (name.toLowerCase() !== defaultName || accDup || (nameDup && !acc))) {
+			if (!nameDup) return acc ? `${name} (${acc})` : name
+			return acc && !accDup ? `${name} (${acc})` : `${name} (${acc ? `${acc}, ` : ''}${id})`
+		}
+		if (acc) return accDup ? `${acc} (${id})` : acc
+		return name || id
+	}).filter(Boolean)
+}
+
+function resolveTargetLink (providerLinks, rawApp, provider) {
+	if (rawApp === undefined || rawApp === null) {
+		if (providerLinks.length === 1) return providerLinks[0]
+		const labels = formatLinkedApps(providerLinks, provider).join(', ')
+		const err = new Error(`Multiple ${provider.name} apps linked to session (${labels}); specify app`)
+		err.status = 400
+		throw err
+	}
+	if (typeof rawApp !== 'string' || !rawApp.trim()) {
+		const err = new Error('app must be a non-empty string')
+		err.status = 400
+		throw err
+	}
+	const trimmed = rawApp.trim()
+	const lower = trimmed.toLowerCase()
+	const byId = providerLinks.find(l => l.app?.id === trimmed)
+	if (byId) return byId
+	const byName = providerLinks.filter(l => (l.app?.name || '').toLowerCase() === lower)
+	if (byName.length === 1) return byName[0]
+	if (byName.length > 1) {
+		const err = new Error(`Ambiguous app "${trimmed}" matches multiple linked ${provider.name} apps; specify a unique app name, account, or ID`)
+		err.status = 400
+		throw err
+	}
+	const byAccount = providerLinks.filter(l => (l.app?.credentials?.account || '').toLowerCase() === lower)
+	if (byAccount.length === 1) return byAccount[0]
+	if (byAccount.length > 1) {
+		const err = new Error(`Ambiguous app "${trimmed}" matches multiple linked ${provider.name} apps; specify a unique app name or ID`)
+		err.status = 400
+		throw err
+	}
+	const err = new Error(`App not linked to session or not found: ${trimmed}`)
+	err.status = 404
+	throw err
+}
 
 async function request (opts = {}, auth, { raw = false } = {}) {
 	const session = db.tokens.resolveSession(auth)
@@ -258,7 +323,7 @@ async function request (opts = {}, auth, { raw = false } = {}) {
 		throw err
 	}
 	assertKeys(opts, PROXY_REQUEST_KEYS)
-	const { provider: providerName = 'google', url, method = 'GET', body, headers, appId, account } = opts
+	const { provider: providerName = 'google', url, method = 'GET', body, headers, app } = opts
 	if (!url) {
 		const err = new Error('URL is required')
 		err.status = 400
@@ -295,29 +360,7 @@ async function request (opts = {}, auth, { raw = false } = {}) {
 			err.status = 403
 			throw err
 		}
-		let targetLink = providerLinks[0]
-		if (appId) {
-			const found = providerLinks.find(l => l.app?.id === appId)
-			if (!found) {
-				const err = new Error(`App not linked to session or not found: ${appId}`)
-				err.status = 404
-				throw err
-			}
-			targetLink = found
-		} else if (account) {
-			const cleanAccount = String(account).trim().toLowerCase()
-			const found = providerLinks.find(l => {
-				const appAcc = (l.app?.credentials?.account || '').toLowerCase()
-				const appName = (l.app?.name || '').toLowerCase()
-				return appAcc === cleanAccount || appName === cleanAccount || l.app?.id === account
-			})
-			if (!found) {
-				const err = new Error(`App account not linked to session or not found: ${account}`)
-				err.status = 404
-				throw err
-			}
-			targetLink = found
-		}
+		const targetLink = resolveTargetLink(providerLinks, app, provider)
 		targetAppId = targetLink.app?.id || null
 		let upstreamApp = targetLink.app
 		if (upstreamApp?.type === 'share') {

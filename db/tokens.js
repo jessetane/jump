@@ -424,7 +424,7 @@ function listByUserId (userId, opts = {}) {
 		query += ' AND tokens.provider = ?'
 		params.push(opts.provider)
 	}
-	query += ' ORDER BY tokens.created DESC'
+	query += ' ORDER BY tokens.created DESC, tokens.rowid DESC'
 	const rows = sqlite.prepare(query).all(...params)
 	return rows.map(formatToken)
 }

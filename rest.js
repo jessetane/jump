@@ -49,11 +49,15 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 		err.status = 404
 		throw err
 	}
-	const appId = url?.searchParams?.get('app_id') || undefined
-	const account = url?.searchParams?.get('account') || undefined
+	const appValues = url?.searchParams?.getAll('app') || []
+	if (appValues.length > 1) {
+		const err = new Error('Duplicate query parameter "app"')
+		err.status = 400
+		throw err
+	}
+	const app = appValues.length === 1 ? appValues[0] : undefined
 	const forwardParams = new URLSearchParams(url?.searchParams)
-	forwardParams.delete('app_id')
-	forwardParams.delete('account')
+	forwardParams.delete('app')
 	const qs = forwardParams.toString()
 	const search = qs ? `?${qs}` : ''
 	const targetUrl = `${targetPath}${search}`
@@ -76,8 +80,7 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 		method: req.method,
 		body,
 		headers,
-		appId,
-		account
+		app
 	}, token, { raw: true })
 	res.statusCode = upstream.status
 	for (const [k, v] of upstream.headers.entries()) {

@@ -13,7 +13,7 @@ export {
 
 const PKG_VERSION = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 
-const REDACTED_KEYS = new Set(['apiKey', 'credentials', 'token'])
+const REDACTED_KEYS = new Set(['credentials', 'token'])
 const REDACTED_HEADERS = /^(?:authorization|proxy-authorization|x-api-key|cookie)$/i
 
 function redactLogArgs (args) {
@@ -145,14 +145,13 @@ const adminTool = {
 function buildProviderTool (providerName, providerLinks = []) {
 	const provider = getProvider(providerName)
 	const id = provider.id
-	const accounts = providerLinks
-		.map(l => l.app?.credentials?.account || l.app?.name)
-		.filter(Boolean)
-	const accountHint = accounts.length > 0 ? ` Linked accounts: ${accounts.join(', ')}.` : ''
+	const linkedApps = api.proxy.formatLinkedApps(providerLinks, provider)
+	const appsHint = linkedApps.length > 0 ? ` Linked apps: ${linkedApps.join(', ')}.` : ''
 	const baseHint = providerLinks.find(l => l.app?.credentials?.baseUrl)?.app?.credentials?.baseUrl || provider.baseUrl
+	const multi = providerLinks.length > 1
 	return {
 		name: `${id}_api`,
-		description: `${provider.toolDescription(baseHint)}${accountHint}`,
+		description: `${provider.toolDescription(baseHint)}${appsHint}`,
 		inputSchema: {
 			type: 'object',
 			properties: {
@@ -172,16 +171,12 @@ function buildProviderTool (providerName, providerLinks = []) {
 					type: 'object',
 					description: 'Optional additional HTTP headers to include with the request.'
 				},
-				appId: {
+				app: {
 					type: 'string',
-					description: `Optional target ${provider.name} app token ID if multiple accounts are linked.`
-				},
-				account: {
-					type: 'string',
-					description: `Optional target account identifier or app name if multiple ${provider.name} accounts are linked.`
+					description: `${multi ? 'Target' : 'Optional target'} ${provider.name} app name, account, or ID${multi ? ' (required when multiple apps are linked).' : '.'}`
 				}
 			},
-			required: ['url']
+			required: multi ? ['url', 'app'] : ['url']
 		}
 	}
 }
@@ -279,7 +274,7 @@ async function executeTool (name, args = {}, token, appUrl) {
 		const apiMatch = name.match(/^([a-z0-9_-]+)_api$/i)
 		if (apiMatch) {
 			const provider = apiMatch[1].toLowerCase()
-			assertKeys(args, ['url', 'method', 'body', 'headers', 'appId', 'account'])
+			assertKeys(args, ['url', 'method', 'body', 'headers', 'app'])
 			const result = await api.proxy.request({ ...args, provider }, token)
 			return { content: formatContent(result) }
 		}

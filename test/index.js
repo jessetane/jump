@@ -2575,7 +2575,8 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(db.tokens.get(stripeAppId), null)
 })
 
-test('multi-account disambiguation in google_api tool', async () => {
+test('app disambiguation in <provider>_api tool (id -> name -> account fallback and Linked apps formatting)', async () => {
+	const addr = server.address()
 	const user = db.logins.resolveUser('google', 'multi-account@example.com')
 	const session = db.tokens.create({
 		userId: user.id,
@@ -2586,7 +2587,7 @@ test('multi-account disambiguation in google_api tool', async () => {
 		provider: 'google',
 		type: 'oauth',
 		name: 'Personal Google',
-		credentials: { accessToken: 'ya29.personal' },
+		credentials: { account: 'personal@example.com', accessToken: 'ya29.personal' },
 		expiresAt: Date.now() + 3600000
 	})
 	const workApp = db.tokens.create({
@@ -2594,17 +2595,91 @@ test('multi-account disambiguation in google_api tool', async () => {
 		provider: 'google',
 		type: 'oauth',
 		name: 'Work Google',
-		credentials: { accessToken: 'ya29.work' },
+		credentials: { account: 'work@example.com', accessToken: 'ya29.work' },
+		expiresAt: Date.now() + 3600000
+	})
+	const workClassroomApp = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Classroom',
+		credentials: { account: 'work@example.com', accessToken: 'ya29.classroom' },
 		expiresAt: Date.now() + 3600000
 	})
 	db.links.create({ sessionId: session.id, appId: personalApp.id, policy: [{ action: 'allow', path: '/drive/**' }] })
 	db.links.create({ sessionId: session.id, appId: workApp.id, policy: [{ action: 'allow', path: '/calendar/**' }] })
-	const resWithAppId = await executeTool('google_api', {
-		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
-		appId: workApp.id
+	db.links.create({ sessionId: session.id, appId: workClassroomApp.id, policy: [{ action: 'allow', path: '/v1/courses/**' }] })
+	const toolsRes = await fetch(`http://127.0.0.1:${addr.port}/mcp`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${session.token}`
+		},
+		body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+	})
+	const googleTool = (await toolsRes.json()).result.tools.find(t => t.name === 'google_api')
+	assert.match(googleTool.description, /Linked apps: Personal Google \(personal@example\.com\), Work Google \(work@example\.com\), Classroom \(work@example\.com\)\./)
+	assert.deepEqual(Object.keys(googleTool.inputSchema.properties), ['url', 'method', 'body', 'headers', 'app'])
+	assert.deepEqual(googleTool.inputSchema.required, ['url', 'app'])
+	const omittedApp = await executeTool('google_api', {
+		url: 'https://www.googleapis.com/drive/v3/files'
 	}, session.token)
-	assert.equal(resWithAppId.isError, true)
-	assert.doesNotMatch(resWithAppId.content[0].text, /Policy violation/)
+	assert.equal(omittedApp.isError, true)
+	assert.match(omittedApp.content[0].text, /Multiple Google apps linked to session \(Personal Google \(personal@example\.com\), Work Google \(work@example\.com\), Classroom \(work@example\.com\)\); specify app/)
+	const resById = await executeTool('google_api', {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+		app: workApp.id
+	}, session.token)
+	assert.equal(resById.isError, true)
+	assert.doesNotMatch(resById.content[0].text, /Policy violation/)
+	const resByName = await executeTool('google_api', {
+		url: 'https://classroom.googleapis.com/v1/courses/123',
+		app: 'classroom'
+	}, session.token)
+	assert.equal(resByName.isError, true)
+	assert.doesNotMatch(resByName.content[0].text, /Policy violation/)
+	const resByAccountFallback = await executeTool('google_api', {
+		url: 'https://www.googleapis.com/drive/v3/files',
+		app: 'PERSONAL@example.com'
+	}, session.token)
+	assert.equal(resByAccountFallback.isError, true)
+	assert.doesNotMatch(resByAccountFallback.content[0].text, /Policy violation/)
+	const ambiguousAccount = await executeTool('google_api', {
+		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+		app: 'work@example.com'
+	}, session.token)
+	assert.equal(ambiguousAccount.isError, true)
+	assert.match(ambiguousAccount.content[0].text, /Ambiguous app "work@example\.com" matches multiple linked Google apps; specify a unique app name or ID/)
+	const dupNameApp = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Google',
+		credentials: { account: 'dup1@example.com', accessToken: 'ya29.dup1' },
+		expiresAt: Date.now() + 3600000
+	})
+	const dupNameApp2 = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Google',
+		credentials: { account: 'dup2@example.com', accessToken: 'ya29.dup2' },
+		expiresAt: Date.now() + 3600000
+	})
+	db.links.create({ sessionId: session.id, appId: dupNameApp.id, policy: [{ action: 'allow', path: '/gmail/**' }] })
+	db.links.create({ sessionId: session.id, appId: dupNameApp2.id, policy: [{ action: 'allow', path: '/sheets/**' }] })
+	const ambiguousName = await executeTool('google_api', {
+		url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages',
+		app: 'Google'
+	}, session.token)
+	assert.equal(ambiguousName.isError, true)
+	assert.match(ambiguousName.content[0].text, /Ambiguous app "Google" matches multiple linked Google apps; specify a unique app name, account, or ID/)
+	const emptyApp = await executeTool('google_api', {
+		url: 'https://www.googleapis.com/drive/v3/files',
+		app: '   '
+	}, session.token)
+	assert.equal(emptyApp.isError, true)
+	assert.match(emptyApp.content[0].text, /app must be a non-empty string/)
 })
 
 test('in-place upstream re-auth flow enforces admin, ownership, and account continuity without changing session token', async () => {
@@ -4084,7 +4159,7 @@ test('provider_api fail-loud on unlinked session or missing appId', async () => 
 	const { session } = createTestSession({ account: 'linked-fail@example.com' })
 	const invalidAppRes = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/drive/v3/files',
-		appId: 'non-existent-app-id'
+		app: 'non-existent-app-id'
 	}, session.token)
 	assert.equal(invalidAppRes.isError, true)
 	assert.match(invalidAppRes.content[0].text, /App not linked to session or not found: non-existent-app-id/)
@@ -4093,7 +4168,7 @@ test('provider_api fail-loud on unlinked session or missing appId', async () => 
 			await api.proxy.request({
 				provider: 'google',
 				url: 'https://www.googleapis.com/drive/v3/files',
-				appId: 'non-existent-app-id'
+				app: 'non-existent-app-id'
 			}, session.token)
 		},
 		err => {
@@ -4213,26 +4288,48 @@ test('provider-agnostic dynamic <provider>_api tools, REST /api/:provider/* prox
 		assert.ok(adminSchemaProps.linkAppIds, 'admin tool schema exposes linkAppIds for create_session')
 		const allowedRes = await executeTool('stripe_api', {
 			url: '/v1/customers/cus_123',
-			account: 'acct_test_1'
+			app: 'acct_test_1'
 		}, session.token)
 		assert.equal(allowedRes.isError, undefined)
 		const allowedBody = JSON.parse(allowedRes.content[0].text)
 		assert.equal(allowedBody.ok, true)
 		assert.equal(allowedBody.path, '/v1/customers/cus_123')
 		assert.equal(allowedBody.auth, 'Bearer sk_test_mock_999')
+		const allowedByNameRes = await executeTool('stripe_api', {
+			url: '/v1/customers/cus_123',
+			app: 'Stripe Test'
+		}, session.token)
+		assert.equal(allowedByNameRes.isError, undefined)
+		const legacyAccountParam = await executeTool('stripe_api', {
+			url: '/v1/customers/cus_123',
+			account: 'acct_test_1'
+		}, session.token)
+		assert.equal(legacyAccountParam.isError, true)
+		assert.match(legacyAccountParam.content[0].text, /Unknown parameter "account"/)
+		const legacyAppIdParam = await executeTool('stripe_api', {
+			url: '/v1/customers/cus_123',
+			appId: stripeAppId
+		}, session.token)
+		assert.equal(legacyAppIdParam.isError, true)
+		assert.match(legacyAppIdParam.content[0].text, /Unknown parameter "appId"/)
 		const deniedMethodRes = await executeTool('stripe_api', {
 			url: '/v1/customers/cus_123',
 			method: 'DELETE'
 		}, session.token)
 		assert.equal(deniedMethodRes.isError, true)
 		assert.match(deniedMethodRes.content[0].text, /Policy violation/)
-		const restRes = await fetch(`http://127.0.0.1:${addr.port}/api/stripe/v1/customers/cus_456/?expand=subscriptions&account=acct_test_1&app_id=${stripeAppId}`, {
+		const restRes = await fetch(`http://127.0.0.1:${addr.port}/api/stripe/v1/customers/cus_456/?expand=subscriptions&account=acct_upstream_kept&app=${stripeAppId}`, {
 			headers: { authorization: `Bearer ${session.token}` }
 		})
 		assert.equal(restRes.status, 200)
 		const restData = await restRes.json()
 		assert.equal(restData.ok, true)
-		assert.equal(restData.path, '/v1/customers/cus_456/?expand=subscriptions')
+		assert.equal(restData.path, '/v1/customers/cus_456/?expand=subscriptions&account=acct_upstream_kept')
+		const dupAppRes = await fetch(`http://127.0.0.1:${addr.port}/api/stripe/v1/customers/cus_456/?app=${stripeAppId}&app=Stripe%20Test`, {
+			headers: { authorization: `Bearer ${session.token}` }
+		})
+		assert.equal(dupAppRes.status, 400)
+		assert.match((await dupAppRes.json()).error, /Duplicate query parameter "app"/)
 		const allowedPostRes = await executeTool('stripe_api', {
 			url: '/v1/charges',
 			method: 'POST',
@@ -5576,7 +5673,6 @@ test('redactLogArgs scrubs credentials and auth headers without mutating input',
 	const raw = {
 		action: 'connect_app',
 		provider: 'stripe',
-		apiKey: 'sk_live_legacy_hallucinated_123',
 		credentials: { bearer: 'sk_live_secret_123' },
 		token: 'bearer_xyz',
 		headers: {
@@ -5590,7 +5686,6 @@ test('redactLogArgs scrubs credentials and auth headers without mutating input',
 	const redacted = redactLogArgs(raw)
 	assert.equal(redacted.action, 'connect_app')
 	assert.equal(redacted.provider, 'stripe')
-	assert.equal(redacted.apiKey, '[REDACTED]')
 	assert.equal(redacted.credentials, '[REDACTED]')
 	assert.equal(redacted.token, '[REDACTED]')
 	assert.equal(redacted.headers.Authorization, '[REDACTED]')
@@ -5598,7 +5693,6 @@ test('redactLogArgs scrubs credentials and auth headers without mutating input',
 	assert.equal(redacted.headers.Cookie, '[REDACTED]')
 	assert.equal(redacted.headers['Content-Type'], 'application/json')
 	assert.deepEqual(redacted.body, { amount: 500 })
-	assert.equal(raw.apiKey, 'sk_live_legacy_hallucinated_123', 'Original args must not be mutated')
 	assert.deepEqual(raw.credentials, { bearer: 'sk_live_secret_123' }, 'Original args must not be mutated')
 	assert.equal(raw.headers.Authorization, 'Bearer secret', 'Original headers must not be mutated')
 })

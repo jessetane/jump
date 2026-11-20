@@ -105,7 +105,7 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 
 ### MCP
 
-* `<provider>_api({ url, method?, body?, headers?, account?, appId? })` - Proxies an HTTP request to a linked upstream app.
+* `<provider>_api({ url, method?, body?, headers?, app? })` - Proxies an HTTP request to a linked upstream app.
 * `admin({ action, ... })` - Manages sessions, apps, shares, links, logins and usage logs (exposed on admin sessions):
 	* `whoami` - Current user, linked logins, session info and linked apps.
 	* `list_sessions` - List active sessions.
