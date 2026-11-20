@@ -7957,6 +7957,28 @@ test('strict unknown parameter and empty update rejection across MCP and REST', 
 	})
 	assert.equal(arrayBodyRes.status, 400)
 	assert.match((await arrayBodyRes.json()).error, /JSON body must be an object/)
+	const typoRevokeRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions?all_others=true`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${adminSession.token}` }
+	})
+	assert.equal(typoRevokeRes.status, 400)
+	assert.match((await typoRevokeRes.json()).error, /Unknown parameter "all_others"/)
+	assert.ok(db.tokens.getByToken(adminSession.token), 'typo query param on DELETE /api/sessions must not revoke current session')
+	const listAppsQueryRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps?provider=stripe`, {
+		headers: { authorization: `Bearer ${adminSession.token}` }
+	})
+	assert.equal(listAppsQueryRes.status, 400)
+	assert.match((await listAppsQueryRes.json()).error, /Unknown parameter "provider"/)
+	const conflictingIdRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${encodeURIComponent(app.id)}`, {
+		method: 'PATCH',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ appId: 'different-id', name: 'Renamed' })
+	})
+	assert.equal(conflictingIdRes.status, 400)
+	assert.match((await conflictingIdRes.json()).error, /Conflicting appId/)
 })
 
 test('teardown server', (t, done) => {
