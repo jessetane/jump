@@ -34,8 +34,14 @@ export default {
 		services: {
 			drive: {
 				name: 'Google Drive',
-				ro: ['https://www.googleapis.com/auth/drive.readonly'],
-				rw: ['https://www.googleapis.com/auth/drive']
+				ro: [
+					'https://www.googleapis.com/auth/drive.readonly',
+					'https://www.googleapis.com/auth/drive.activity.readonly'
+				],
+				rw: [
+					'https://www.googleapis.com/auth/drive',
+					'https://www.googleapis.com/auth/drive.activity'
+				]
 			},
 			docs: {
 				name: 'Google Docs',
@@ -74,8 +80,14 @@ export default {
 			},
 			youtube: {
 				name: 'YouTube',
-				ro: ['https://www.googleapis.com/auth/youtube.readonly'],
-				rw: ['https://www.googleapis.com/auth/youtube']
+				ro: [
+					'https://www.googleapis.com/auth/youtube.readonly',
+					'https://www.googleapis.com/auth/yt-analytics.readonly'
+				],
+				rw: [
+					'https://www.googleapis.com/auth/youtube',
+					'https://www.googleapis.com/auth/yt-analytics.readonly'
+				]
 			},
 			gmail: {
 				name: 'Gmail',
@@ -84,10 +96,14 @@ export default {
 			},
 			photos: {
 				name: 'Google Photos',
-				ro: ['https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata'],
+				ro: [
+					'https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata',
+					'https://www.googleapis.com/auth/photospicker.mediaitems.readonly'
+				],
 				rw: [
 					'https://www.googleapis.com/auth/photoslibrary.appendonly',
-					'https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata'
+					'https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata',
+					'https://www.googleapis.com/auth/photospicker.mediaitems.readonly'
 				]
 			},
 			meet: {
@@ -105,6 +121,85 @@ export default {
 					'https://www.googleapis.com/auth/chat.spaces',
 					'https://www.googleapis.com/auth/chat.messages'
 				]
+			},
+			search_console: {
+				name: 'Google Search Console',
+				ro: ['https://www.googleapis.com/auth/webmasters.readonly'],
+				rw: [
+					'https://www.googleapis.com/auth/webmasters',
+					'https://www.googleapis.com/auth/indexing'
+				]
+			},
+			analytics: {
+				name: 'Google Analytics',
+				ro: ['https://www.googleapis.com/auth/analytics.readonly'],
+				rw: [
+					'https://www.googleapis.com/auth/analytics',
+					'https://www.googleapis.com/auth/analytics.edit'
+				]
+			},
+			tag_manager: {
+				name: 'Google Tag Manager',
+				ro: ['https://www.googleapis.com/auth/tagmanager.readonly'],
+				rw: [
+					'https://www.googleapis.com/auth/tagmanager.edit.containers',
+					'https://www.googleapis.com/auth/tagmanager.edit.containerversions',
+					'https://www.googleapis.com/auth/tagmanager.delete.containers',
+					'https://www.googleapis.com/auth/tagmanager.publish',
+					'https://www.googleapis.com/auth/tagmanager.manage.accounts',
+					'https://www.googleapis.com/auth/tagmanager.manage.users'
+				]
+			},
+			postmaster: {
+				name: 'Gmail Postmaster Tools',
+				ro: ['https://www.googleapis.com/auth/postmaster.traffic.readonly'],
+				rw: ['https://www.googleapis.com/auth/postmaster']
+			},
+			apps_script: {
+				name: 'Google Apps Script',
+				ro: [
+					'https://www.googleapis.com/auth/script.projects.readonly',
+					'https://www.googleapis.com/auth/script.deployments.readonly',
+					'https://www.googleapis.com/auth/script.metrics',
+					'https://www.googleapis.com/auth/script.processes'
+				],
+				rw: [
+					'https://www.googleapis.com/auth/script.projects',
+					'https://www.googleapis.com/auth/script.deployments',
+					'https://www.googleapis.com/auth/script.metrics',
+					'https://www.googleapis.com/auth/script.processes'
+				]
+			},
+			classroom: {
+				name: 'Google Classroom',
+				ro: [
+					'https://www.googleapis.com/auth/classroom.courses.readonly',
+					'https://www.googleapis.com/auth/classroom.rosters.readonly',
+					'https://www.googleapis.com/auth/classroom.coursework.students.readonly',
+					'https://www.googleapis.com/auth/classroom.coursework.me.readonly',
+					'https://www.googleapis.com/auth/classroom.announcements.readonly',
+					'https://www.googleapis.com/auth/classroom.courseworkmaterials.readonly',
+					'https://www.googleapis.com/auth/classroom.topics.readonly'
+				],
+				rw: [
+					'https://www.googleapis.com/auth/classroom.courses',
+					'https://www.googleapis.com/auth/classroom.rosters',
+					'https://www.googleapis.com/auth/classroom.coursework.students',
+					'https://www.googleapis.com/auth/classroom.coursework.me',
+					'https://www.googleapis.com/auth/classroom.announcements',
+					'https://www.googleapis.com/auth/classroom.courseworkmaterials',
+					'https://www.googleapis.com/auth/classroom.topics'
+				]
+			},
+			books: {
+				name: 'Google Books',
+				ro: [],
+				rw: ['https://www.googleapis.com/auth/books']
+			},
+			blogger: {
+				name: 'Blogger',
+				ro: ['https://www.googleapis.com/auth/blogger.readonly'],
+				rw: ['https://www.googleapis.com/auth/blogger']
 			},
 			admin: {
 				name: 'Google Admin',
