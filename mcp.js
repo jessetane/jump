@@ -227,20 +227,14 @@ function formatError (err, toolName = 'tool') {
 		console.warn(`[mcp] ${toolName} policy violation: ${err.message.replace(/^Policy violation:\s*/, '')}`)
 	} else if (err.message?.startsWith('Access denied:')) {
 		console.warn(`[mcp] ${toolName} access denied: ${err.message}`)
-		return {
-			isError: true,
-			content: [{ type: 'text', text: err.message }]
-		}
 	} else if (err.message?.startsWith('Authentication required')) {
 		console.warn(`[mcp] ${toolName} rejected: Authentication required`)
 	} else if (err.message?.startsWith('Failed to refresh ')) {
 		console.warn(`[mcp] ${err.message}`)
 	} else if (err.status) {
 		console.warn(`[mcp] ${toolName} error (${err.status}): ${err.message}`)
-		const providerMatch = toolName.match(/^([a-z0-9_-]+)_api$/i)
-		const prefix = providerMatch
-			? `${getProvider(providerMatch[1]).name} API Error (${err.status}): `
-			: ''
+		const providerMatch = 'data' in err ? toolName.match(/^([a-z0-9_-]+)_api$/i) : null
+		const prefix = providerMatch ? `${getProvider(providerMatch[1]).name} API Error (${err.status}): ` : ''
 		return {
 			isError: true,
 			content: [{ type: 'text', text: `${prefix}${err.message}` }]

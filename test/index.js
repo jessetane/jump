@@ -2625,7 +2625,7 @@ test('app disambiguation in <provider>_api tool (id -> name -> account fallback 
 		url: 'https://www.googleapis.com/drive/v3/files'
 	}, session.token)
 	assert.equal(omittedApp.isError, true)
-	assert.match(omittedApp.content[0].text, /Multiple Google apps linked to session \(Personal Google \(personal@example\.com\), Work Google \(work@example\.com\), Classroom \(work@example\.com\)\); specify app/)
+	assert.equal(omittedApp.content[0].text, 'Multiple Google apps linked to session (Personal Google (personal@example.com), Work Google (work@example.com), Classroom (work@example.com)); specify app')
 	const resById = await executeTool('google_api', {
 		url: 'https://www.googleapis.com/calendar/v3/calendars/primary/events',
 		app: workApp.id
@@ -4408,6 +4408,7 @@ test('usage logging: 30-day rolling window, proxy log capture, MCP list_logs, an
 		assert.equal(deniedRes.isError, true)
 		const failRes = await executeTool('stripe_api', { url: '/v1/fail' }, workerSession.token)
 		assert.equal(failRes.isError, true)
+		assert.match(failRes.content[0].text, /^Stripe API Error \(500\): /)
 		const oldLog = db.logs.create({
 			userId: user.id,
 			sessionId: workerSession.id,
