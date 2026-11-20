@@ -1,6 +1,6 @@
 import http from 'node:http'
 import https from 'node:https'
-import { PassThrough } from 'node:stream'
+import { PassThrough, Transform, Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import zlib from 'node:zlib'
 import * as db from '../db/index.js'
@@ -72,118 +72,76 @@ function createDecompressor (encoding) {
 	return null
 }
 
+function createDecompressTransform (encoding) {
+	let decoder = null
+	return new Transform({
+		transform (chunk, _enc, cb) {
+			if (chunk.byteLength === 0) {
+				cb()
+				return
+			}
+			if (!decoder) {
+				decoder = createDecompressor(encoding)
+				decoder.on('data', out => this.push(out))
+				decoder.on('error', err => this.destroy(normalizeUpstreamError(err)))
+			}
+			if (!decoder.write(chunk)) {
+				decoder.once('drain', cb)
+			} else {
+				cb()
+			}
+		},
+		flush (cb) {
+			if (!decoder) {
+				cb()
+				return
+			}
+			decoder.once('end', cb)
+			decoder.end()
+		},
+		destroy (err, cb) {
+			decoder?.destroy()
+			cb(err)
+		}
+	})
+}
+
 async function readResponseBody (source, maxBytes) {
 	if (!source) return Buffer.alloc(0)
 	const encoding = typeof source.headers?.['content-encoding'] === 'string'
 		? source.headers['content-encoding'].split(',')[0].trim().toLowerCase()
 		: ''
-	if (!encoding || encoding === 'identity') {
-		return readStreamBytes(source, maxBytes)
-	}
-	const decompressor = createDecompressor(encoding)
-	if (!decompressor) {
+	const needsDecode = Boolean(encoding && encoding !== 'identity')
+	if (needsDecode && !createDecompressor(encoding)) {
 		const err = new Error(`Unsupported upstream Content-Encoding: ${encoding}`)
 		err.status = 502
 		source.destroy()
 		throw err
 	}
-	return readCompressedBytes(source, decompressor, maxBytes)
-}
-
-function readCompressedBytes (source, decompressor, maxBytes) {
-	return new Promise((resolve, reject) => {
-		const chunks = []
-		let totalBytes = 0
-		let started = false
-		let settled = false
-		const fail = err => {
-			if (settled) return
-			settled = true
-			source.destroy()
-			decompressor.destroy()
-			reject(normalizeUpstreamError(err))
-		}
-		decompressor.on('data', chunk => {
-			if (settled) return
-			totalBytes += chunk.byteLength
-			if (totalBytes > maxBytes) {
-				fail(fileTooLargeError(totalBytes, maxBytes))
-				return
-			}
-			chunks.push(chunk)
-		})
-		decompressor.on('end', () => {
-			if (settled) return
-			settled = true
-			resolve(Buffer.concat(chunks))
-		})
-		decompressor.on('error', fail)
-		source.on('data', chunk => {
-			if (settled || chunk.byteLength === 0) return
-			started = true
-			if (!decompressor.write(chunk)) {
-				source.pause()
-				decompressor.once('drain', () => source.resume())
-			}
-		})
-		source.on('end', () => {
-			if (settled) return
-			if (!started) {
-				settled = true
-				decompressor.destroy()
-				resolve(Buffer.alloc(0))
-				return
-			}
-			decompressor.end()
-		})
-		source.on('error', fail)
-		source.on('aborted', () => {
-			if (!settled) setImmediate(() => fail(new Error('Upstream response stream aborted')))
-		})
-		source.on('close', () => {
-			if (!settled && !source.readableEnded) {
-				setImmediate(() => fail(new Error('Upstream response stream closed prematurely')))
-			}
-		})
-	})
-}
-
-function readStreamBytes (source, maxBytes) {
-	return new Promise((resolve, reject) => {
-		const chunks = []
-		let totalBytes = 0
-		let settled = false
-		const fail = err => {
-			if (settled) return
-			settled = true
-			source.destroy()
-			reject(normalizeUpstreamError(err))
-		}
-		source.on('data', chunk => {
-			if (settled) return
+	const chunks = []
+	let totalBytes = 0
+	const collector = new Writable({
+		write (chunk, _enc, cb) {
 			const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
 			totalBytes += buf.byteLength
 			if (totalBytes > maxBytes) {
-				fail(fileTooLargeError(totalBytes, maxBytes))
+				cb(fileTooLargeError(totalBytes, maxBytes))
 				return
 			}
 			chunks.push(buf)
-		})
-		source.on('end', () => {
-			if (settled) return
-			settled = true
-			resolve(Buffer.concat(chunks))
-		})
-		source.on('error', fail)
-		source.on('aborted', () => {
-			if (!settled) setImmediate(() => fail(new Error('Upstream response stream aborted')))
-		})
-		source.on('close', () => {
-			if (!settled && !source.readableEnded) {
-				setImmediate(() => fail(new Error('Upstream response stream closed prematurely')))
-			}
-		})
+			cb()
+		}
 	})
+	try {
+		if (needsDecode) {
+			await pipeline(source, createDecompressTransform(encoding), collector)
+		} else {
+			await pipeline(source, collector)
+		}
+	} catch (err) {
+		throw normalizeUpstreamError(err)
+	}
+	return Buffer.concat(chunks)
 }
 
 function sanitizeCallerHeaders (headers, extraStrip = null) {
@@ -226,6 +184,16 @@ function stripLocationAuth (rawLocation, baseUrl, queryEntries) {
 	if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed)) return parsed.toString()
 	if (trimmed.startsWith('//')) return `//${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`
 	return `${parsed.pathname}${parsed.search}${parsed.hash}`
+}
+
+function toAuthEntries (credentials) {
+	const authHeaders = credentials?.headers && typeof credentials.headers === 'object'
+		? Object.entries(credentials.headers).map(([k, v]) => [k.toLowerCase(), String(v)])
+		: []
+	const queryEntries = credentials?.query && typeof credentials.query === 'object'
+		? Object.entries(credentials.query).map(([k, v]) => [k, String(v)])
+		: []
+	return { authHeaders, queryEntries }
 }
 
 function attachAuth (hopUrl, baseHeaders, authHeaders, queryEntries) {
@@ -320,12 +288,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, header
 			}
 		}
 	}
-	const authHeaders = credentials?.headers && typeof credentials.headers === 'object'
-		? Object.entries(credentials.headers).map(([k, v]) => [k.toLowerCase(), String(v)])
-		: []
-	const queryEntries = credentials?.query && typeof credentials.query === 'object'
-		? Object.entries(credentials.query).map(([k, v]) => [k, String(v)])
-		: []
+	const { authHeaders, queryEntries } = toAuthEntries(credentials)
 	const initialOrigin = new URL(url).origin
 	let curUrl = url
 	let curBody = reqBody
@@ -543,6 +506,10 @@ function resolveUpstreamContext (session, provider, rawApp, url, headers) {
 	const objectFormat = contentType.split(';')[0].trim().toLowerCase() === 'application/x-www-form-urlencoded' ? 'form' : 'json'
 	const sharePolicy = targetLink.app?.type === 'share' ? targetLink.app.credentials?.policy : null
 	const inspectsBody = hasBodyPolicy(sharePolicy) || hasBodyPolicy(targetLink.policy)
+	const policies = [
+		[sharePolicy, 'Operation not permitted by shared app policy'],
+		[targetLink.policy, 'Operation not permitted by session policy']
+	]
 	const checkTargetPolicy = (targetUrl, targetMethod, targetBody, targetContentType) => {
 		const urlCheck = provider.isAllowedUrl(targetUrl, upstreamApp)
 		if (!urlCheck.allowed) {
@@ -550,8 +517,9 @@ function resolveUpstreamContext (session, provider, rawApp, url, headers) {
 			err.status = 403
 			throw err
 		}
-		if (sharePolicy) {
-			const check = evaluatePolicy(sharePolicy, {
+		for (const [policy, fallbackMsg] of policies) {
+			if (!policy) continue
+			const check = evaluatePolicy(policy, {
 				url: targetUrl,
 				method: targetMethod,
 				body: targetBody,
@@ -559,21 +527,7 @@ function resolveUpstreamContext (session, provider, rawApp, url, headers) {
 				contentType: targetContentType
 			})
 			if (!check.allowed) {
-				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by shared app policy'}`)
-				err.status = 403
-				throw err
-			}
-		}
-		if (targetLink.policy) {
-			const check = evaluatePolicy(targetLink.policy, {
-				url: targetUrl,
-				method: targetMethod,
-				body: targetBody,
-				objectFormat,
-				contentType: targetContentType
-			})
-			if (!check.allowed) {
-				const err = new Error(`Policy violation: ${check.reason || 'Operation not permitted by session policy'}`)
+				const err = new Error(`Policy violation: ${check.reason || fallbackMsg}`)
 				err.status = 403
 				throw err
 			}
@@ -604,15 +558,13 @@ async function resolveUpstreamCredentials (session, provider, targetLink, upstre
 	return resolvedCreds
 }
 
-async function request (opts = {}, auth) {
+async function runProxyCall ({ auth, providerName = 'google', url, method, app, headers }, fn) {
 	const session = db.tokens.resolveSession(auth)
 	if (!session) {
 		const err = new Error('Authentication required')
 		err.status = 401
 		throw err
 	}
-	assertKeys(opts, PROXY_REQUEST_KEYS)
-	const { provider: providerName = 'google', url, method = 'GET', body, headers, app } = opts
 	if (!url) {
 		const err = new Error('URL is required')
 		err.status = 400
@@ -621,18 +573,21 @@ async function request (opts = {}, auth) {
 	const start = Date.now()
 	const normalizedMethod = normalizeMethod(method)
 	const provider = getProvider(providerName)
-	let targetAppId = null
-	let resolvedUrl = String(url)
-	let allowed = false
+	const timeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS
+	const logState = {
+		targetAppId: null,
+		resolvedUrl: String(url),
+		allowed: false
+	}
 	const recordLog = (status, error = null) => {
 		db.logs.create({
 			userId: session.userId,
 			sessionId: session.id,
-			appId: targetAppId,
+			appId: logState.targetAppId,
 			provider: provider.id,
 			method: normalizedMethod,
-			url: resolvedUrl,
-			allowed,
+			url: logState.resolvedUrl,
+			allowed: logState.allowed,
 			status,
 			duration: Date.now() - start,
 			error
@@ -640,73 +595,46 @@ async function request (opts = {}, auth) {
 	}
 	try {
 		const ctx = resolveUpstreamContext(session, provider, app, url, headers)
-		targetAppId = ctx.targetAppId
-		resolvedUrl = ctx.resolvedUrl
-		ctx.checkTargetPolicy(resolvedUrl, normalizedMethod, body, ctx.contentType)
-		allowed = true
-		const resolvedCreds = await resolveUpstreamCredentials(session, provider, ctx.targetLink, ctx.upstreamApp)
-		const timeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS
-		let upstreamStatus = 200
-		const result = await executeBufferedUpstream({
-			credentials: resolvedCreds,
-			url: resolvedUrl,
-			method: normalizedMethod,
-			body,
-			headers,
-			timeoutMs,
-			onStatus: s => { upstreamStatus = s },
-			onSameOriginRedirect: ({ url: nextUrl, method: nextMethod, hasBody }) => {
-				allowed = false
-				resolvedUrl = nextUrl
-				ctx.checkTargetPolicy(nextUrl, nextMethod, hasBody ? body : undefined, hasBody ? ctx.contentType : '')
-				allowed = true
-			}
-		})
-		recordLog(upstreamStatus, null)
-		return result
+		logState.targetAppId = ctx.targetAppId
+		logState.resolvedUrl = ctx.resolvedUrl
+		return await fn({ session, provider, normalizedMethod, timeoutMs, ctx, logState, recordLog })
 	} catch (err) {
 		recordLog(err.status || 502, err.message)
 		throw err
 	}
 }
 
-async function stream (opts = {}, auth, req, res) {
-	const session = db.tokens.resolveSession(auth)
-	if (!session) {
-		const err = new Error('Authentication required')
-		err.status = 401
-		throw err
-	}
-	const { provider: providerName = 'google', url, app } = opts
-	if (!url) {
-		const err = new Error('URL is required')
-		err.status = 400
-		throw err
-	}
-	const start = Date.now()
-	const normalizedMethod = normalizeMethod(req.method)
-	const provider = getProvider(providerName)
-	let targetAppId = null
-	let resolvedUrl = String(url)
-	let allowed = false
-	const recordLog = (status, error = null) => {
-		db.logs.create({
-			userId: session.userId,
-			sessionId: session.id,
-			appId: targetAppId,
-			provider: provider.id,
+async function request (opts = {}, auth) {
+	assertKeys(opts, PROXY_REQUEST_KEYS)
+	const { provider: providerName = 'google', url, method = 'GET', body, headers, app } = opts
+	return runProxyCall({ auth, providerName, url, method, app, headers }, async ({ session, provider, normalizedMethod, timeoutMs, ctx, logState, recordLog }) => {
+		ctx.checkTargetPolicy(ctx.resolvedUrl, normalizedMethod, body, ctx.contentType)
+		logState.allowed = true
+		const credentials = await resolveUpstreamCredentials(session, provider, ctx.targetLink, ctx.upstreamApp)
+		let upstreamStatus = 200
+		const result = await executeBufferedUpstream({
+			credentials,
+			url: ctx.resolvedUrl,
 			method: normalizedMethod,
-			url: resolvedUrl,
-			allowed,
-			status,
-			duration: Date.now() - start,
-			error
+			body,
+			headers,
+			timeoutMs,
+			onStatus: s => { upstreamStatus = s },
+			onSameOriginRedirect: ({ url: nextUrl, method: nextMethod, hasBody }) => {
+				logState.allowed = false
+				logState.resolvedUrl = nextUrl
+				ctx.checkTargetPolicy(nextUrl, nextMethod, hasBody ? body : undefined, hasBody ? ctx.contentType : '')
+				logState.allowed = true
+			}
 		})
-	}
-	try {
-		const ctx = resolveUpstreamContext(session, provider, app, url, req.headers)
-		targetAppId = ctx.targetAppId
-		resolvedUrl = ctx.resolvedUrl
+		recordLog(upstreamStatus, null)
+		return result
+	})
+}
+
+async function stream (opts = {}, auth, req, res) {
+	const { provider: providerName = 'google', url, app } = opts
+	return runProxyCall({ auth, providerName, url, method: req.method, app, headers: req.headers }, async ({ session, provider, normalizedMethod, timeoutMs, ctx, logState, recordLog }) => {
 		const allowsBody = reqMethodAllowsBody(normalizedMethod)
 		let bufferedBody = undefined
 		let bodyStream = null
@@ -718,9 +646,9 @@ async function stream (opts = {}, auth, req, res) {
 				bodyStream = req
 			}
 		}
-		ctx.checkTargetPolicy(resolvedUrl, normalizedMethod, bufferedBody, ctx.contentType)
-		allowed = true
-		const resolvedCreds = await resolveUpstreamCredentials(session, provider, ctx.targetLink, ctx.upstreamApp)
+		ctx.checkTargetPolicy(ctx.resolvedUrl, normalizedMethod, bufferedBody, ctx.contentType)
+		logState.allowed = true
+		const credentials = await resolveUpstreamCredentials(session, provider, ctx.targetLink, ctx.upstreamApp)
 		const baseHeaders = sanitizeCallerHeaders(req.headers, REST_EXTRA_STRIPPED_HEADERS)
 		baseHeaders['user-agent'] ||= 'jump'
 		if (allowsBody && !bodyStream) {
@@ -730,14 +658,8 @@ async function stream (opts = {}, auth, req, res) {
 		} else if (bodyStream && req.headers['content-length'] !== undefined) {
 			baseHeaders['content-length'] = String(req.headers['content-length'])
 		}
-		const authHeaders = resolvedCreds?.headers && typeof resolvedCreds.headers === 'object'
-			? Object.entries(resolvedCreds.headers).map(([k, v]) => [k.toLowerCase(), String(v)])
-			: []
-		const queryEntries = resolvedCreds?.query && typeof resolvedCreds.query === 'object'
-			? Object.entries(resolvedCreds.query).map(([k, v]) => [k, String(v)])
-			: []
-		const hopReq = attachAuth(new URL(resolvedUrl), baseHeaders, authHeaders, queryEntries)
-		const timeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS
+		const { authHeaders, queryEntries } = toAuthEntries(credentials)
+		const hopReq = attachAuth(new URL(ctx.resolvedUrl), baseHeaders, authHeaders, queryEntries)
 		const upstreamRes = await sendUpstreamHop(hopReq.url, {
 			method: normalizedMethod,
 			headers: hopReq.headers,
@@ -750,7 +672,7 @@ async function stream (opts = {}, auth, req, res) {
 		let cleanedLocation = null
 		if (rawLocation !== undefined) {
 			try {
-				cleanedLocation = stripLocationAuth(rawLocation, resolvedUrl, queryEntries)
+				cleanedLocation = stripLocationAuth(rawLocation, ctx.resolvedUrl, queryEntries)
 			} catch (err) {
 				upstreamRes.destroy()
 				throw err
@@ -790,8 +712,5 @@ async function stream (opts = {}, auth, req, res) {
 		}
 		await pipeline(upstreamRes, res)
 		recordLog(status, null)
-	} catch (err) {
-		recordLog(err.status || 502, err.message)
-		throw err
-	}
+	})
 }

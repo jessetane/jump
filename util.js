@@ -346,6 +346,17 @@ async function resolveDnsRecords (hostname, host, options) {
 	return records
 }
 
+async function resolveAndDeliver (hostname, host, options, wantAll, callback) {
+	let records
+	try {
+		records = await resolveDnsRecords(hostname, host, options)
+	} catch (err) {
+		callback(err)
+		return
+	}
+	deliverLookup(records, wantAll, callback)
+}
+
 function lookupUpstreamHost (hostname, opts, cb) {
 	const callback = typeof opts === 'function' ? opts : cb
 	const options = typeof opts === 'object' && opts !== null ? opts : {}
@@ -360,16 +371,7 @@ function lookupUpstreamHost (hostname, opts, cb) {
 		queueMicrotask(() => deliverLookup([{ address: host, family: ipFamily }], wantAll, callback))
 		return
 	}
-	;(async () => {
-		let records
-		try {
-			records = await resolveDnsRecords(hostname, host, options)
-		} catch (err) {
-			callback(err)
-			return
-		}
-		deliverLookup(records, wantAll, callback)
-	})()
+	resolveAndDeliver(hostname, host, options, wantAll, callback)
 }
 
 function validateBaseUrl (baseUrl) {
