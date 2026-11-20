@@ -97,10 +97,13 @@ const server = http.createServer(async (req, res) => {
 			console.error(err)
 			message = 'Internal Server Error'
 		}
-		if (!res.headersSent && !res.writableEnded) {
+		if (!res.headersSent && !res.writableEnded && !res.destroyed) {
 			const headers = statusCode === 401 && message === 'Authentication required'
 				? { 'www-authenticate': `Bearer authorization_uri="${getBaseUrl(req)}/oauth/authorize"` }
-				: null
+				: {}
+			if (!req.readableEnded) {
+				headers.connection = 'close'
+			}
 			sendJson(res, { error: message }, statusCode, headers)
 		}
 	}

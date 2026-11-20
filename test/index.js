@@ -1371,15 +1371,37 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 			return
 		}
 		if (req.url === '/drive-large-stream') {
+			const totalLen = 2560 * 1024
 			res.statusCode = 200
 			res.setHeader('content-type', 'application/octet-stream')
+			res.setHeader('content-length', String(totalLen))
 			res.setHeader('accept-ranges', 'bytes')
+			if (req.method === 'HEAD') {
+				res.end()
+				return
+			}
 			const chunk = Buffer.alloc(256 * 1024, 0x5a)
 			for (let i = 0; i < 10; i++) {
 				if (!res.write(chunk)) {
 					await new Promise(resolve => res.once('drain', resolve))
 				}
 			}
+			res.end()
+			return
+		}
+		if (req.url === '/pre-byte-reset') {
+			res.writeHead(200, { 'content-type': 'application/json' })
+			res.flushHeaders()
+			setTimeout(() => res.socket?.destroy(), 10)
+			return
+		}
+		if (req.url === '/head-303') {
+			res.writeHead(303, { location: '/head-303-dest' })
+			res.end()
+			return
+		}
+		if (req.url === '/head-303-dest') {
+			res.writeHead(200, { 'x-seen-method': req.method, 'content-length': '0' })
 			res.end()
 			return
 		}
@@ -1397,7 +1419,7 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 			res.statusCode = 200
 			res.setHeader('content-type', 'text/plain')
 			for (let i = 0; i < 4; i++) {
-				await new Promise(resolve => setTimeout(resolve, 35))
+				await new Promise(resolve => setTimeout(resolve, 65))
 				res.write(`part-${i};`)
 			}
 			res.end()
@@ -1456,9 +1478,22 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 			headers: { authorization: `Bearer ${s.token}` }
 		})
 		assert.equal(largeDriveRest.status, 200, 'REST /api/:provider/* streams responses larger than MAX_FILE_SIZE_MB without 413')
+		assert.equal(largeDriveRest.headers.get('content-length'), String(2560 * 1024), 'REST stream() must preserve Content-Length header')
 		assert.equal(largeDriveRest.headers.get('accept-ranges'), 'bytes')
 		const streamedBuf = Buffer.from(await largeDriveRest.arrayBuffer())
 		assert.equal(streamedBuf.byteLength, 2560 * 1024, 'Full 2.5 MB binary payload streamed intact despite MAX_FILE_SIZE_MB=1')
+		const headDriveRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/drive-large-stream`, {
+			method: 'HEAD',
+			headers: { authorization: `Bearer ${s.token}` }
+		})
+		assert.equal(headDriveRest.status, 200)
+		assert.equal(headDriveRest.headers.get('content-length'), String(2560 * 1024), 'REST HEAD preserves Content-Length')
+		const head303Mcp = await executeTool('comp_api', { url: '/head-303', method: 'HEAD' }, s.token)
+		assert.equal(head303Mcp.isError, undefined, 'HEAD request following 303 must stay HEAD')
+		const preByteResetRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/pre-byte-reset`, {
+			headers: { authorization: `Bearer ${s.token}` }
+		})
+		assert.equal(preByteResetRest.status, 502, 'Pre-first-byte upstream reset in stream() returns clean 502 JSON instead of socket reset')
 		const largeUploadPayload = Buffer.alloc(1536 * 1024, 0x42)
 		const largeUploadRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
 			method: 'POST',
@@ -1467,20 +1502,58 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 		})
 		assert.equal(largeUploadRest.status, 200, 'REST /api/:provider/* streams >1 MB uploads when policy does not inspect body')
 		assert.deepEqual(await largeUploadRest.json(), { receivedBytes: 1536 * 1024 })
-		const rawRestGz = await fetch(`http://127.0.0.1:${addr.port}/api/comp/gzip`, {
-			headers: { authorization: `Bearer ${s.token}` }
+		const bodyPolicySess = db.tokens.create({ userId: u.id, provider: 'self', admin: 0 })
+		db.links.create({
+			sessionId: bodyPolicySess.id,
+			appId: app.id,
+			policy: [{ action: 'allow', methods: ['POST'], path: '/upload-large-stream', body: { ok: true } }]
 		})
-		assert.equal(rawRestGz.status, 200)
-		assert.deepEqual(await rawRestGz.json(), { compressed: 'gzip-ok' })
+		const bodyPolicyAllowed = await fetch(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
+			method: 'POST',
+			headers: { authorization: `Bearer ${bodyPolicySess.token}`, 'content-type': 'application/json' },
+			body: JSON.stringify({ ok: true })
+		})
+		assert.equal(bodyPolicyAllowed.status, 200)
+		const bodyPolicyDenied = await fetch(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
+			method: 'POST',
+			headers: { authorization: `Bearer ${bodyPolicySess.token}`, 'content-type': 'application/json' },
+			body: JSON.stringify({ ok: false })
+		})
+		assert.equal(bodyPolicyDenied.status, 403, 'REST stream() buffers and enforces body policy when hasBodyPolicy is true')
+		const bodyPolicyTooLarge = await fetch(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
+			method: 'POST',
+			headers: { authorization: `Bearer ${bodyPolicySess.token}`, 'content-type': 'application/json' },
+			body: largeUploadPayload
+		})
+		assert.equal(bodyPolicyTooLarge.status, 413, 'REST stream() caps upload at 1 MB when body policy inspection is active')
+		const badHdrMcp = await executeTool('comp_api', { url: '/gzip', headers: { 'x-bad': 'val\r\ninjected' } }, s.token)
+		assert.equal(badHdrMcp.isError, true)
+		const badHdrRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/gzip`, {
+			headers: { authorization: `Bearer ${s.token}`, 'x-bad': 'val' }
+		})
+		assert.equal(badHdrRest.status, 200)
+		const rawWireGz = await new Promise((resolve, reject) => {
+			const req = http.get(`http://127.0.0.1:${addr.port}/api/comp/gzip`, {
+				headers: { authorization: `Bearer ${s.token}`, 'accept-encoding': 'gzip' }
+			}, res => {
+				const chunks = []
+				res.on('data', c => chunks.push(c))
+				res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }))
+			})
+			req.on('error', reject)
+		})
+		assert.equal(rawWireGz.status, 200)
+		assert.equal(rawWireGz.headers['content-encoding'], 'gzip', 'REST stream() preserves upstream Content-Encoding without decompressing')
+		assert.deepEqual(JSON.parse(zlib.gunzipSync(rawWireGz.body).toString('utf8')), { compressed: 'gzip-ok' })
 		const upgradeMcp = await executeTool('comp_api', { url: '/ws-upgrade' }, s.token)
 		assert.equal(upgradeMcp.isError, true, '101 Switching Protocols must reject cleanly with 502 instead of hanging forever')
 		const forbiddenConnect = await executeTool('comp_api', { url: '/gzip', method: 'CONNECT' }, s.token)
 		assert.equal(forbiddenConnect.isError, true, 'CONNECT method must be rejected upfront')
-		process.env.UPSTREAM_TIMEOUT_MS = '80'
+		process.env.UPSTREAM_TIMEOUT_MS = '180'
 		const activeTrickleRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/active-trickle`, {
 			headers: { authorization: `Bearer ${s.token}` }
 		})
-		assert.equal(activeTrickleRest.status, 200, 'Active stream taking 140ms total succeeds when chunks arrive within 80ms idle timeout')
+		assert.equal(activeTrickleRest.status, 200, 'Active stream taking 260ms total succeeds when chunks arrive within 180ms idle timeout')
 		assert.equal(await activeTrickleRest.text(), 'part-0;part-1;part-2;part-3;')
 		const hungMcp = await executeTool('comp_api', { url: '/hung-silence' }, s.token)
 		assert.equal(hungMcp.isError, true, 'Hung silent upstream aborts once idle timeout elapses')
@@ -6766,7 +6839,7 @@ test('upstream SSRF filter performs single-lookup socket-pinned DNS resolution, 
 		'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
 		'-keyout', '/dev/stdout', '-out', '/dev/stdout',
 		'-days', '1', '-nodes', '-subj', '/CN=*.example.test',
-		'-addext', 'subjectAltName=DNS:*.example.test,DNS:example.test'
+		'-addext', 'subjectAltName=DNS:*.example.test,DNS:example.test,IP:93.184.216.34'
 	], { encoding: 'utf8' })
 	const defaultCas = tls.getCACertificates('default')
 	tls.setDefaultCACertificates([...defaultCas, pem])
@@ -6832,24 +6905,30 @@ test('upstream SSRF filter performs single-lookup socket-pinned DNS resolution, 
 	}
 	net.Socket.prototype.connect = function (...args) {
 		const opts = args[0]
-		if (opts && typeof opts === 'object' && typeof opts.lookup === 'function' && (opts.port === tlsPort || opts.port === trapPort)) {
-			const realLookup = opts.lookup
-			args[0] = {
-				...opts,
-				lookup (hostname, lookupOpts, cb) {
-					realLookup(hostname, lookupOpts, (err, res, fam) => {
-						if (err) {
-							cb(err)
-							return
-						}
-						if (Array.isArray(res)) {
-							for (const r of res) dialedIps.push(r.address)
-							cb(null, res.map(r => r.address === '93.184.216.34' ? { address: '127.0.0.1', family: 4 } : r))
-							return
-						}
-						dialedIps.push(res)
-						cb(null, res === '93.184.216.34' ? '127.0.0.1' : res, fam)
-					})
+		const port = Number(opts?.port)
+		if (opts && typeof opts === 'object' && (port === tlsPort || port === trapPort)) {
+			if (opts.host === '93.184.216.34') {
+				dialedIps.push(opts.host)
+				args[0] = { ...opts, host: '127.0.0.1' }
+			} else if (typeof opts.lookup === 'function') {
+				const realLookup = opts.lookup
+				args[0] = {
+					...opts,
+					lookup (hostname, lookupOpts, cb) {
+						realLookup(hostname, lookupOpts, (err, res, fam) => {
+							if (err) {
+								cb(err)
+								return
+							}
+							if (Array.isArray(res)) {
+								for (const r of res) dialedIps.push(r.address)
+								cb(null, res.map(r => r.address === '93.184.216.34' ? { address: '127.0.0.1', family: 4 } : r))
+								return
+							}
+							dialedIps.push(res)
+							cb(null, res === '93.184.216.34' ? '127.0.0.1' : res, fam)
+						})
+					}
 				}
 			}
 		}
@@ -6911,6 +6990,17 @@ test('upstream SSRF filter performs single-lookup socket-pinned DNS resolution, 
 		const redirectToPrivate = await executeTool('ssrf_pub_api', { url: '/bounce-to-cgnat' }, s.token)
 		assert.equal(redirectToPrivate.isError, true, 'Redirect hop resolving to RFC 6598 IP must be blocked')
 		assert.match(redirectToPrivate.content[0].text, /Blocked unsafe upstream host/)
+		const ip4App = db.tokens.create({
+			userId: u.id,
+			provider: 'ssrf_ip4',
+			type: 'static',
+			credentials: { headers: { authorization: 'Bearer sk_ip4' }, baseUrl: `https://93.184.216.34:${tlsPort}` }
+		})
+		db.links.create({ sessionId: s.id, appId: ip4App.id })
+		dialedIps.length = 0
+		const okIp4 = await executeTool('ssrf_ip4_api', { url: '/v1/ip4' }, s.token)
+		assert.equal(okIp4.isError, undefined, 'HTTPS IPv4 literal must succeed without throwing ERR_INVALID_ARG_VALUE on TLS servername')
+		assert.deepEqual(dialedIps, ['93.184.216.34'])
 		const rebindApp = db.tokens.create({
 			userId: u.id,
 			provider: 'ssrf_rebind',

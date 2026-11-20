@@ -1,6 +1,8 @@
+import { once } from 'node:events'
 import http from 'node:http'
 import https from 'node:https'
-import { PassThrough, Transform, Writable } from 'node:stream'
+import net from 'node:net'
+import { Transform, Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import zlib from 'node:zlib'
 import * as db from '../db/index.js'
@@ -24,6 +26,7 @@ const SUPPORTED_ENCODINGS = 'gzip, br, zstd'
 
 const STRIPPED_REQUEST_HEADERS = new Set([
 	...HOP_BY_HOP_HEADERS,
+	'content-length',
 	'host',
 	'authorization',
 	'proxy-authorization',
@@ -220,7 +223,8 @@ function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeou
 	}
 	const isHttps = parsed.protocol === 'https:'
 	const transport = isHttps ? https : http
-	const servername = isHttps && !parsed.hostname.startsWith('[') ? parsed.hostname : undefined
+	const cleanHost = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '')
+	const servername = isHttps && cleanHost && !net.isIP(cleanHost) ? cleanHost : undefined
 	return new Promise((resolve, reject) => {
 		let settled = false
 		const fail = err => {
@@ -228,16 +232,26 @@ function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeou
 			settled = true
 			reject(normalizeUpstreamError(err))
 		}
-		const req = transport.request(parsed, {
-			method,
-			headers,
-			lookup: lookupUpstreamHost,
-			...(servername && { servername })
-		}, res => {
-			settled = true
-			res.setTimeout(timeoutMs, () => res.destroy(timeoutError(timeoutMs)))
-			resolve(res)
-		})
+		let req
+		try {
+			req = transport.request(parsed, {
+				method,
+				headers,
+				lookup: lookupUpstreamHost,
+				...(servername && { servername })
+			}, res => {
+				settled = true
+				req.setTimeout(0)
+				res.setTimeout(timeoutMs, () => res.destroy(timeoutError(timeoutMs)))
+				resolve(res)
+			})
+		} catch (err) {
+			if (err?.code === 'ERR_INVALID_CHAR' || err?.code === 'ERR_HTTP_INVALID_HEADER_VALUE') {
+				err.status = 400
+			}
+			fail(err)
+			return
+		}
 		req.setTimeout(timeoutMs, () => req.destroy(timeoutError(timeoutMs)))
 		req.on('upgrade', (_res, socket) => {
 			socket.destroy()
@@ -252,7 +266,12 @@ function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeou
 			if (!settled) fail(new Error('Upstream connection closed before response'))
 		})
 		if (bodyStream) {
-			bodyStream.on('error', err => req.destroy(err))
+			const onStreamErr = err => req.destroy(err)
+			bodyStream.on('error', onStreamErr)
+			req.on('close', () => {
+				bodyStream.off('error', onStreamErr)
+				if (!bodyStream.readableEnded) bodyStream.destroy()
+			})
 			bodyStream.pipe(req)
 			return
 		}
@@ -331,7 +350,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, header
 			err.status = 403
 			throw err
 		}
-		if (res.statusCode === 303 || ((res.statusCode === 301 || res.statusCode === 302) && curMethod === 'POST')) {
+		if ((res.statusCode === 303 && curMethod !== 'HEAD') || ((res.statusCode === 301 || res.statusCode === 302) && curMethod === 'POST')) {
 			curMethod = 'GET'
 			curBody = undefined
 			delete baseHeaders['content-type']
@@ -697,20 +716,34 @@ async function stream (opts = {}, auth, req, res) {
 		}
 		const errorChunks = []
 		let errorBytes = 0
-		if (status >= 400) {
-			const tap = new PassThrough()
-			tap.on('data', chunk => {
-				if (errorBytes >= 512) return
-				const slice = chunk.subarray(0, 512 - errorBytes)
-				errorChunks.push(Buffer.from(slice))
-				errorBytes += slice.byteLength
-			})
-			await pipeline(upstreamRes, tap, res)
-			const errText = errorBytes > 0 ? Buffer.concat(errorChunks).toString('utf8') : `HTTP ${status}`
-			recordLog(status, errText)
-			return
+		const onResClose = () => {
+			if (!upstreamRes.readableEnded) upstreamRes.destroy()
 		}
-		await pipeline(upstreamRes, res)
-		recordLog(status, null)
+		res.once('close', onResClose)
+		try {
+			for await (const chunk of upstreamRes) {
+				if (status >= 400 && errorBytes < 512) {
+					const slice = chunk.subarray(0, 512 - errorBytes)
+					errorChunks.push(Buffer.from(slice))
+					errorBytes += slice.byteLength
+				}
+				if (!res.write(chunk)) {
+					await once(res, 'drain')
+				}
+			}
+			res.end()
+		} catch (err) {
+			normalizeUpstreamError(err)
+			if (!res.headersSent) throw err
+			res.destroy(err)
+			recordLog(status, err.message)
+			return
+		} finally {
+			res.off('close', onResClose)
+		}
+		const errText = status >= 400
+			? (errorBytes > 0 ? Buffer.concat(errorChunks).toString('utf8') : `HTTP ${status}`)
+			: null
+		recordLog(status, errText)
 	})
 }

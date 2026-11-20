@@ -33,8 +33,7 @@ const HOP_BY_HOP_HEADERS = [
 	'transfer-encoding',
 	'te',
 	'trailer',
-	'upgrade',
-	'content-length'
+	'upgrade'
 ]
 
 function serializeFormBody (body) {
