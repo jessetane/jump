@@ -153,6 +153,8 @@ function sendText (res, text, status = 200) {
 function sendHtml (res, html, status = 200) {
 	res.statusCode = status
 	res.setHeader('content-type', 'text/html; charset=utf-8')
+	res.setHeader('cache-control', 'no-store')
+	res.setHeader('content-security-policy', "frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
 	res.setHeader('referrer-policy', 'same-origin')
 	res.setHeader('x-frame-options', 'DENY')
 	res.end(html)

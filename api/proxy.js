@@ -36,6 +36,8 @@ const STRIPPED_REQUEST_HEADERS = new Set([
 const STRIPPED_RESPONSE_HEADERS = new Set([
 	...HOP_BY_HOP_HEADERS,
 	'set-cookie',
+	'content-security-policy',
+	'x-content-type-options',
 	'access-control-allow-origin',
 	'access-control-allow-methods',
 	'access-control-allow-headers',
@@ -708,6 +710,7 @@ async function stream (opts = {}, auth, req, res) {
 		if (cleanedLocation !== null) {
 			res.setHeader('location', cleanedLocation)
 		}
+		res.setHeader('content-security-policy', 'sandbox')
 		if (normalizedMethod === 'HEAD' || BODILESS_STATUSES.has(status)) {
 			upstreamRes.resume()
 			res.end()

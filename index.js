@@ -34,6 +34,7 @@ function resolveToken (req) {
 
 const server = http.createServer(async (req, res) => {
 	const start = Date.now()
+	res.setHeader('x-content-type-options', 'nosniff')
 	const url = new URL(req.url, 'http://localhost')
 	const pathname = url.pathname.replace(/\/+$/, '') || '/'
 	res.on('finish', () => {
@@ -108,6 +109,8 @@ const server = http.createServer(async (req, res) => {
 		}
 	}
 })
+server.headersTimeout = 15000
+server.requestTimeout = 0
 
 function bootstrapLocalAdmin () {
 	if (listAuthProviders().length > 0) return null

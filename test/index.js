@@ -6564,6 +6564,16 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 	}
 	const headHealth = await fetch(`http://127.0.0.1:${addr.port}/api/health`, { method: 'HEAD' })
 	assert.equal(headHealth.status, 200)
+	assert.equal(headHealth.headers.get('x-content-type-options'), 'nosniff')
+	const rootHtmlRes = await fetch(`http://127.0.0.1:${addr.port}/`)
+	assert.equal(rootHtmlRes.status, 200)
+	assert.equal(rootHtmlRes.headers.get('x-content-type-options'), 'nosniff')
+	assert.equal(rootHtmlRes.headers.get('x-frame-options'), 'DENY')
+	assert.equal(rootHtmlRes.headers.get('referrer-policy'), 'same-origin')
+	assert.equal(rootHtmlRes.headers.get('cache-control'), 'no-store')
+	assert.equal(rootHtmlRes.headers.get('content-security-policy'), "frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
+	assert.equal(server.headersTimeout, 15000)
+	assert.equal(server.requestTimeout, 0)
 	const regRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/register`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -6612,11 +6622,13 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 	const http = await import('node:http')
 	const headerUpstream = http.createServer((req, res) => {
 		res.statusCode = 200
-		res.setHeader('content-type', 'application/json')
+		res.setHeader('content-type', 'text/html')
 		res.setHeader('etag', '"v1-abc"')
 		res.setHeader('x-ratelimit-remaining', '49')
 		res.setHeader('set-cookie', 'upstream_secret=1; HttpOnly')
-		res.end(JSON.stringify({ ok: true }))
+		res.setHeader('content-security-policy', "default-src * 'unsafe-inline'")
+		res.setHeader('x-content-type-options', 'bogus')
+		res.end('<h1>hello</h1>')
 	})
 	await new Promise(resolve => headerUpstream.listen(0, '127.0.0.1', resolve))
 	try {
@@ -6637,6 +6649,8 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 		assert.equal(restRes.headers.get('etag'), '"v1-abc"')
 		assert.equal(restRes.headers.get('x-ratelimit-remaining'), '49')
 		assert.equal(restRes.headers.get('set-cookie'), null, 'Upstream Set-Cookie must not attach to jump origin')
+		assert.equal(restRes.headers.get('x-content-type-options'), 'nosniff', 'Proxy enforces nosniff despite upstream header')
+		assert.equal(restRes.headers.get('content-security-policy'), 'sandbox', 'REST stream() enforces CSP sandbox despite upstream header')
 	} finally {
 		await new Promise(resolve => headerUpstream.close(resolve))
 	}
