@@ -1,14 +1,13 @@
 import { sqlite } from './index.js'
 import { userAccountSql } from './users.js'
 import { parseAccountSpec, isPlainObject } from '../util.js'
-import { secretContext, encryptSecret, decryptSecret } from '../crypto.js'
+import { loadKeys, secretContext, encryptSecret, openSecret, decryptSecret } from '../crypto.js'
 import { createHash, randomUUID } from 'node:crypto'
 
 export {
-	SHARES_CASCADE_TRIGGER_SQL,
 	init,
+	initKeys,
 	hashSecret,
-	encryptUpstreamCredentials,
 	create,
 	get,
 	getActiveSession,
@@ -62,11 +61,7 @@ const CREATE_TOKENS_SQL = `
 	CREATE INDEX IF NOT EXISTS idx_tokens_user_provider ON tokens(user_id, provider);
 	CREATE INDEX IF NOT EXISTS idx_tokens_updated ON tokens(updated);
 	CREATE INDEX IF NOT EXISTS idx_tokens_share_app ON tokens(json_extract(credentials, '$.appId')) WHERE type = 'share';
-`
-
-const SHARES_CASCADE_TRIGGER_SQL = `
-	DROP TRIGGER IF EXISTS trg_tokens_cascade_shares;
-	CREATE TRIGGER trg_tokens_cascade_shares
+	CREATE TRIGGER IF NOT EXISTS trg_tokens_cascade_shares
 	AFTER DELETE ON tokens
 	WHEN OLD.type IN ('oauth', 'static')
 	BEGIN
@@ -151,9 +146,56 @@ function pruneRecentRefreshes (now = Date.now()) {
 	}
 }
 
+function vacuumDatabase (targetDb) {
+	if (targetDb.isTransaction) return
+	const prevUmask = process.umask(0o077)
+	try {
+		targetDb.exec('VACUUM;')
+		targetDb.exec('PRAGMA wal_checkpoint(TRUNCATE);')
+	} finally {
+		process.umask(prevUmask)
+	}
+}
+
+function initKeys (targetDb = sqlite) {
+	const dbList = targetDb.prepare('PRAGMA database_list').get()
+	const dbPath = dbList && 'file' in dbList ? (dbList.file || ':memory:') : (process.env.DB_PATH || './data.db')
+	const rows = targetDb.prepare(`
+		SELECT id, provider, type, credentials
+		FROM tokens
+		WHERE provider != 'self' AND type IN ('oauth', 'static') AND credentials IS NOT NULL
+	`).all()
+	const encrypted = rows.some(r => Boolean(JSON.parse(r.credentials)?.secret))
+	const keys = loadKeys({ dbPath, encrypted })
+	const updates = []
+	for (const row of rows) {
+		const creds = JSON.parse(row.credentials)
+		if (!creds?.secret) continue
+		const context = secretContext(row.id, row.provider, row.type)
+		const { plaintext, keyIndex } = openSecret(creds.secret, context, keys)
+		if (keyIndex > 0) {
+			creds.secret = encryptSecret(plaintext, context, keys)
+			updates.push({ id: row.id, credentials: JSON.stringify(creds) })
+		}
+	}
+	if (updates.length === 0) return
+	targetDb.exec('BEGIN IMMEDIATE;')
+	try {
+		const stmt = targetDb.prepare('UPDATE tokens SET credentials = ? WHERE id = ?')
+		for (const u of updates) {
+			stmt.run(u.credentials, u.id)
+		}
+		targetDb.exec('COMMIT;')
+	} catch (err) {
+		targetDb.exec('ROLLBACK;')
+		throw err
+	}
+	vacuumDatabase(targetDb)
+}
+
 function init () {
 	sqlite.exec(CREATE_TOKENS_SQL)
-	sqlite.exec(SHARES_CASCADE_TRIGGER_SQL)
+	initKeys(sqlite)
 }
 
 function isSession (tok) {

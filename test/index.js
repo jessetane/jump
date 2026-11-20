@@ -4906,9 +4906,8 @@ test('unified provider factory, github oauth + api_key provider, and unauthentic
 	}
 })
 
-test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite legacy user migration', async () => {
+test('local token sign-in fallback and bootstrapLocalAdmin', async () => {
 	const addr = server.address()
-	const freshMaster = db.sqlite.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE tbl_name = 'users' ORDER BY type, name").all()
 	const origGoogleId = process.env.GOOGLE_CLIENT_ID
 	const origGithubId = process.env.GITHUB_CLIENT_ID
 	const gatedAdminUser = db.users.create()
@@ -5006,133 +5005,6 @@ test('local token sign-in fallback, bootstrapLocalAdmin, and in-place SQLite leg
 		if (origGoogleId !== undefined) process.env.GOOGLE_CLIENT_ID = origGoogleId
 		if (origGithubId !== undefined) process.env.GITHUB_CLIENT_ID = origGithubId
 	}
-	const now = new Date().toISOString()
-	const legacyUserId = 'legacy-google-user-1'
-	const legacyDupUserId = 'legacy-dup-user-1'
-	const legacyDormantLogsId = 'legacy-dormant-logs-1'
-	db.sqlite.exec('PRAGMA foreign_keys = OFF;')
-	db.sqlite.exec('DELETE FROM links; DELETE FROM tokens; DELETE FROM logins; DELETE FROM logs; DELETE FROM users;')
-	db.sqlite.exec(`
-		PRAGMA user_version = 0;
-		CREATE TEMP TABLE users_mig_tmp AS SELECT id, created, updated FROM users;
-		DROP TABLE users;
-		CREATE TABLE users (
-			id TEXT PRIMARY KEY,
-			email TEXT UNIQUE NOT NULL,
-			name TEXT,
-			picture TEXT,
-			created TEXT NOT NULL,
-			updated TEXT NOT NULL
-		);
-		CREATE INDEX idx_users_email ON users(email);
-		INSERT INTO users (id, email, name, picture, created, updated)
-			SELECT id, id || '@placeholder.local', 'Placeholder', NULL, created, updated FROM users_mig_tmp;
-		DROP TABLE users_mig_tmp;
-	`)
-	db.sqlite.exec('PRAGMA foreign_keys = ON;')
-	db.sqlite.prepare('INSERT INTO users (id, email, name, picture, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
-		legacyUserId,
-		'legacy@gmail.com',
-		'Legacy User',
-		'https://example.com/avatar.png',
-		now,
-		now
-	)
-	const legacyAdminSessionId = 'legacy-admin-session-1'
-	const legacyAdminBearer = '11111111-2222-4333-8444-555555555555'
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, name, token, admin, created, updated)
-		VALUES (?, ?, 'self', 'bearer', 'Legacy Real User Session', ?, 1, ?, ?)
-	`).run(legacyAdminSessionId, legacyUserId, legacyAdminBearer, now, now)
-	const legacyGoogleAppId = 'legacy-google-app-1'
-	const legacyPlainAccess = 'ya29.legacy_plain_canary_887766'
-	const legacyPlainGoogleRefresh = '1//legacy_plain_canary_554433'
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, name, credentials, created, updated)
-		VALUES (?, ?, 'google', 'oauth', 'Google', ?, ?, ?)
-	`).run(legacyGoogleAppId, legacyUserId, JSON.stringify({ accessToken: legacyPlainAccess, refreshToken: legacyPlainGoogleRefresh, account: 'legacy@gmail.com' }), now, now)
-	db.sqlite.prepare(`
-		INSERT INTO links (session_id, app_id, policy, created, updated)
-		VALUES (?, ?, NULL, ?, ?)
-	`).run(legacyAdminSessionId, legacyGoogleAppId, now, now)
-	db.sqlite.prepare('INSERT INTO users (id, email, name, picture, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
-		legacyDupUserId,
-		'LEGACY@gmail.com',
-		'Duplicate Case User',
-		null,
-		now,
-		now
-	)
-	const dupSessionId = 'legacy-dup-session-1'
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, name, token, admin, created, updated)
-		VALUES (?, ?, 'self', 'bearer', 'Duplicate Case Session', '22222222-3333-4444-8555-666666666666', 0, ?, ?)
-	`).run(dupSessionId, legacyDupUserId, now, now)
-	db.sqlite.prepare('INSERT INTO users (id, email, name, picture, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
-		legacyDormantLogsId,
-		'dormant-logs@gmail.com',
-		'Dormant User With Logs',
-		null,
-		now,
-		now
-	)
-	db.logs.create({
-		userId: legacyDormantLogsId,
-		provider: 'stripe',
-		method: 'GET',
-		url: 'https://api.stripe.com/v1/charges',
-		allowed: true,
-		status: 200,
-		duration: 12
-	})
-	const legacyUnmigratedSessionId = 'legacy-unhashed-session-1'
-	const legacyPlainToken = '00000000-1111-4222-8333-444444444444'
-	const legacyPlainRefresh = '55555555-6666-4777-8888-999999999999'
-	db.sqlite.prepare(`
-		INSERT INTO tokens (id, user_id, provider, type, name, token, credentials, expires_at, admin, created, updated)
-		VALUES (?, ?, 'self', 'bearer', 'Legacy Unhashed OAuth Session', ?, ?, ?, 1, ?, ?)
-	`).run(legacyUnmigratedSessionId, legacyUserId, legacyPlainToken, JSON.stringify({ refreshToken: legacyPlainRefresh }), Date.now() + 3600000, now, now)
-	db.sqlite.exec('PRAGMA wal_checkpoint(FULL);')
-	db.init()
-	assert.equal(db.sqlite.prepare('PRAGMA user_version').get().user_version, 4)
-	assert.equal(db.sqlite.prepare('PRAGMA foreign_key_check').all().length, 0, 'Zero foreign-key violations after users.email, token hash, and encryption migrations')
-	for (const ext of ['', '-wal']) {
-		const p = `${testDbPath}${ext}`
-		if (fs.existsSync(p)) {
-			const rawBytes = fs.readFileSync(p)
-			assert.equal(rawBytes.includes(legacyPlainToken), false, `Migration VACUUM scrubs plaintext bearer token from ${p}`)
-			assert.equal(rawBytes.includes(legacyPlainRefresh), false, `Migration VACUUM scrubs plaintext refresh token from ${p}`)
-			assert.equal(rawBytes.includes(legacyPlainAccess), false, `Migration VACUUM scrubs plaintext upstream accessToken from ${p}`)
-			assert.equal(rawBytes.includes(legacyPlainGoogleRefresh), false, `Migration VACUUM scrubs plaintext upstream refreshToken from ${p}`)
-		}
-	}
-	assert.equal(db.tokens.get(legacyGoogleAppId).credentials.accessToken, legacyPlainAccess, 'SCHEMA_VERSION 3 encrypts legacy upstream credentials and decrypts cleanly')
-	const migratedTokenRow = db.sqlite.prepare('SELECT token, credentials FROM tokens WHERE id = ?').get(legacyUnmigratedSessionId)
-	assert.equal(migratedTokenRow.token, db.tokens.hashSecret(legacyPlainToken), 'SCHEMA_VERSION 2 hashes existing plaintext self bearer tokens in-place')
-	assert.equal(JSON.parse(migratedTokenRow.credentials).refreshToken, db.tokens.hashSecret(legacyPlainRefresh), 'SCHEMA_VERSION 2 hashes existing plaintext self refreshTokens in-place')
-	assert.equal(db.tokens.getByToken(legacyPlainToken)?.id, legacyUnmigratedSessionId, 'Migrated legacy bearer token continues to authenticate')
-	const migratedRefreshed = db.tokens.refreshOauthSession(legacyPlainRefresh)
-	assert.equal(migratedRefreshed?.id, legacyUnmigratedSessionId, 'Migrated legacy refresh token continues to refresh session')
-	const migratedEmailMaster = db.sqlite.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE tbl_name = 'users' ORDER BY type, name").all()
-	assert.deepEqual(migratedEmailMaster, freshMaster, 'Migrated users.email DB matches fresh pure-anchor DDL with no leftover columns or indexes')
-	const migratedUser = db.users.get(legacyUserId)
-	assert.ok(migratedUser)
-	assert.deepEqual(Object.keys(migratedUser).sort(), ['created', 'id', 'updated'])
-	assert.equal(db.tokens.getByToken(legacyAdminBearer)?.userId, legacyUserId, 'Existing bearer sessions remain active after migration')
-	assert.equal(db.links.listBySessionId(legacyAdminSessionId).length, 1, 'Existing session-to-app links survive users table rebuild without CASCADE deletion')
-	assert.equal(db.users.get(legacyDupUserId), null, 'Case-insensitive duplicate legacy user row is merged into survivor')
-	assert.equal(db.tokens.get(dupSessionId).userId, legacyUserId, 'Duplicate legacy user session is re-parented to surviving user')
-	assert.ok(db.users.get(legacyDormantLogsId), 'Zero-session legacy user with historical logs is preserved as real user')
-	assert.equal(db.logins.getAccountByUserId(legacyDormantLogsId), 'dormant-logs@gmail.com')
-	assert.equal(db.logs.listByUserId(legacyDormantLogsId).length, 1, 'Historical logs for zero-session legacy user are preserved')
-	assert.equal(db.logins.getAccountByUserId(legacyUserId), 'legacy@gmail.com')
-	const backfilledLogins = db.logins.listByUserId(legacyUserId)
-	assert.equal(backfilledLogins.length, 1)
-	assert.equal(backfilledLogins[0].provider, 'google')
-	assert.equal(backfilledLogins[0].account, 'legacy@gmail.com')
-	assert.equal(backfilledLogins[0].userId, legacyUserId)
-	const resolvedLegacy = db.logins.resolveUser('google', 'LEGACY@gmail.com')
-	assert.equal(resolvedLegacy.id, legacyUserId)
 })
 
 test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit logs, and REST /api/shares', async () => {
@@ -7018,7 +6890,6 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 	const { randomBytes } = await import('node:crypto')
 	const os = await import('node:os')
 	const { DatabaseSync } = await import('node:sqlite')
-	const { migrate: runMigrate } = await import('../db/migrate.js')
 	const origKey = process.env.ENCRYPTION_KEY
 	const origCredDir = process.env.CREDENTIALS_DIRECTORY
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jump-crypto-'))
@@ -7153,53 +7024,6 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 				updated TEXT NOT NULL
 			);
 		`
-		const v1OnlySelfPath = path.join(tmpDir, 'v1-self-only.db')
-		const v1OnlySelfDb = new DatabaseSync(v1OnlySelfPath)
-		try {
-			v1OnlySelfDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
-			v1OnlySelfDb.exec(`${TOKEN_DDL} PRAGMA user_version = 1;`)
-			const v1CanaryBearer = 'v1-plaintext-session-canary-99887766'
-			const v1CanaryRefresh = 'v1-plaintext-refresh-canary-55443322'
-			const nowIso = new Date().toISOString()
-			v1OnlySelfDb.prepare(`
-				INSERT INTO tokens (id, provider, type, token, credentials, created, updated)
-				VALUES ('s1', 'self', 'bearer', ?, ?, ?, ?)
-			`).run(v1CanaryBearer, JSON.stringify({ refreshToken: v1CanaryRefresh }), nowIso, nowIso)
-			v1OnlySelfDb.exec('PRAGMA wal_checkpoint(FULL);')
-			assert.equal(fs.readFileSync(v1OnlySelfPath).includes(v1CanaryBearer), true)
-			process.env.ENCRYPTION_KEY = ''
-			delete process.env.CREDENTIALS_DIRECTORY
-			runMigrate(v1OnlySelfDb)
-			for (const ext of ['', '-wal']) {
-				const f = `${v1OnlySelfPath}${ext}`
-				if (fs.existsSync(f)) {
-					const bytes = fs.readFileSync(f)
-					assert.equal(bytes.includes(v1CanaryBearer), false, `v1->v2 self token hash migration scrubs bearer token from ${f} even with 0 upstream apps`)
-					assert.equal(bytes.includes(v1CanaryRefresh), false, `v1->v2 self token hash migration scrubs refresh token from ${f} even with 0 upstream apps`)
-				}
-			}
-		} finally {
-			v1OnlySelfDb.close()
-		}
-		const v2FreelistPath = path.join(tmpDir, 'v2-freelist.db')
-		const v2FreelistDb = new DatabaseSync(v2FreelistPath)
-		try {
-			v2FreelistDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = OFF;')
-			v2FreelistDb.exec(`${TOKEN_DDL} PRAGMA user_version = 2;`)
-			const freelistCanary = 'sk_live_DELETED_FREELIST_REMNANT_77665544'
-			const nowIso = new Date().toISOString()
-			v2FreelistDb.prepare(`
-				INSERT INTO tokens (id, provider, type, credentials, created, updated)
-				VALUES ('del-1', 'stripe', 'api_key', ?, ?, ?)
-			`).run(JSON.stringify({ apiKey: freelistCanary }), nowIso, nowIso)
-			v2FreelistDb.exec("PRAGMA wal_checkpoint(FULL); DELETE FROM tokens WHERE id = 'del-1'; PRAGMA wal_checkpoint(FULL);")
-			assert.equal(fs.readFileSync(v2FreelistPath).includes(freelistCanary), true, 'Sanity check: deleted secret remains in SQLite freelist when secure_delete was OFF')
-			v2FreelistDb.exec('PRAGMA secure_delete = ON;')
-			runMigrate(v2FreelistDb)
-			assert.equal(fs.readFileSync(v2FreelistPath).includes(freelistCanary), false, 'v2->v3 upgrade VACUUM scrubs historical freelist remnants even when 0 active rows exist')
-		} finally {
-			v2FreelistDb.close()
-		}
 		const diyPath = path.join(tmpDir, 'diy.db')
 		const diyDb = new DatabaseSync(diyPath)
 		try {
@@ -7207,7 +7031,7 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			diyDb.exec(TOKEN_DDL)
 			process.env.ENCRYPTION_KEY = ''
 			delete process.env.CREDENTIALS_DIRECTORY
-			runMigrate(diyDb)
+			db.tokens.initKeys(diyDb)
 			assert.equal(fs.existsSync(`${diyPath}.key`), true, 'Empty ENCRYPTION_KEY="" from .env uses auto-generated <dbPath>.key')
 			const diyKeys1 = cryptoMod.getKeys()
 			const ctx = cryptoMod.secretContext('app-1', 'stripe', 'static')
@@ -7220,9 +7044,9 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			diyDb.exec('PRAGMA wal_checkpoint(FULL);')
 			assert.equal(fs.readFileSync(diyPath).includes(ctUnderOld), true)
 			fs.renameSync(`${diyPath}.key`, `${diyPath}.key.old`)
-			runMigrate(diyDb)
+			db.tokens.initKeys(diyDb)
 			assert.equal(fs.existsSync(`${diyPath}.key`), true, 'DIY rotation auto-generates fresh <dbPath>.key when .key.old is present')
-			runMigrate(diyDb)
+			db.tokens.initKeys(diyDb)
 			for (const ext of ['', '-wal']) {
 				const f = `${diyPath}${ext}`
 				if (fs.existsSync(f)) {
@@ -7231,13 +7055,13 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			}
 			fs.rmSync(`${diyPath}.key.old`)
 			fs.chmodSync(`${diyPath}.key`, 0o400)
-			runMigrate(diyDb)
+			db.tokens.initKeys(diyDb)
 			assert.equal(fs.statSync(`${diyPath}.key`).mode & 0o777, 0o400, 'Read-only 0400 key file is accepted without forcing chmod 0600')
 			const rotatedRaw = JSON.parse(diyDb.prepare("SELECT credentials FROM tokens WHERE id = 'app-1'").get().credentials).secret
 			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(rotatedRaw, ctx)), { headers: { authorization: 'Bearer sk_diy_rotate_secret' } }, 'Rotated DIY DB decrypts cleanly after .key.old is deleted')
 			fs.chmodSync(`${diyPath}.key`, 0o600)
 			fs.rmSync(`${diyPath}.key`)
-			assert.throws(() => runMigrate(diyDb), /Missing encryption key file/, 'Encrypted DB fails loud if .key is missing without .key.old')
+			assert.throws(() => db.tokens.initKeys(diyDb), /Missing encryption key file/, 'Encrypted DB fails loud if .key is missing without .key.old')
 			assert.equal(fs.existsSync(`${diyPath}.key`), false, 'Failed boot on missing key never creates an orphan .key file')
 		} finally {
 			diyDb.close()
@@ -7249,12 +7073,13 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 		try {
 			tpmDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
 			tpmDb.exec(TOKEN_DDL)
-			delete process.env.ENCRYPTION_KEY
+			delete process.env.CREDENTIALS_DIRECTORY
 			process.env.CREDENTIALS_DIRECTORY = credDir
-			assert.throws(() => runMigrate(tpmDb), /Missing systemd credential/, 'CREDENTIALS_DIRECTORY without jump.key fails loud')
+			delete process.env.ENCRYPTION_KEY
+			assert.throws(() => db.tokens.initKeys(tpmDb), /Missing systemd credential/, 'CREDENTIALS_DIRECTORY without jump.key fails loud')
 			assert.equal(fs.existsSync(`${tpmDbPath}.key`), false, 'CREDENTIALS_DIRECTORY mode never falls back to creating <dbPath>.key')
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
-			runMigrate(tpmDb)
+			db.tokens.initKeys(tpmDb)
 			assert.equal(fs.existsSync(`${tpmDbPath}.key`), false, 'systemd jump.key mode never writes <dbPath>.key to disk')
 			const ctx = cryptoMod.secretContext('tpm-app-1', 'stripe', 'static')
 			const tpmCt1 = cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_tpm_sealed_secret' } }), ctx)
@@ -7265,13 +7090,13 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			`).run(JSON.stringify({ secret: tpmCt1 }), nowIso, nowIso)
 			fs.renameSync(path.join(credDir, 'jump.key'), path.join(credDir, 'jump.key.old'))
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k2}\n`, { mode: 0o600 })
-			runMigrate(tpmDb)
+			db.tokens.initKeys(tpmDb)
 			fs.rmSync(path.join(credDir, 'jump.key.old'))
-			runMigrate(tpmDb)
+			db.tokens.initKeys(tpmDb)
 			const tpmRotatedCt = JSON.parse(tpmDb.prepare("SELECT credentials FROM tokens WHERE id = 'tpm-app-1'").get().credentials).secret
 			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(tpmRotatedCt, ctx)), { headers: { authorization: 'Bearer sk_tpm_sealed_secret' } }, 'systemd jump.key + jump.key.old rotates cleanly onto new key')
 			fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
-			assert.throws(() => runMigrate(tpmDb), /unable to authenticate data/i, 'Booting with wrong systemd jump.key fails loud immediately at startup')
+			assert.throws(() => db.tokens.initKeys(tpmDb), /unable to authenticate data/i, 'Booting with wrong systemd jump.key fails loud immediately at startup')
 		} finally {
 			tpmDb.close()
 		}
@@ -7282,7 +7107,7 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			envDb.exec(TOKEN_DDL)
 			delete process.env.CREDENTIALS_DIRECTORY
 			process.env.ENCRYPTION_KEY = k1
-			runMigrate(envDb)
+			db.tokens.initKeys(envDb)
 			assert.equal(fs.existsSync(`${envDbPath}.key`), false, 'ENCRYPTION_KEY mode never writes <dbPath>.key to disk')
 			const ctx = cryptoMod.secretContext('env-app-1', 'stripe', 'static')
 			const nowIso = new Date().toISOString()
@@ -7291,9 +7116,9 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 				VALUES ('env-app-1', 'stripe', 'static', ?, ?, ?)
 			`).run(JSON.stringify({ secret: cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_env_secret' } }), ctx) }), nowIso, nowIso)
 			process.env.ENCRYPTION_KEY = `${k2},${k1}`
-			runMigrate(envDb)
+			db.tokens.initKeys(envDb)
 			process.env.ENCRYPTION_KEY = k2
-			runMigrate(envDb)
+			db.tokens.initKeys(envDb)
 			const envRotatedCt = JSON.parse(envDb.prepare("SELECT credentials FROM tokens WHERE id = 'env-app-1'").get().credentials).secret
 			assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(envRotatedCt, ctx)), { headers: { authorization: 'Bearer sk_env_secret' } }, 'ENCRYPTION_KEY=<new>,<old> rotates cleanly onto <new>')
 		} finally {
@@ -7304,9 +7129,12 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 			memDb.exec(TOKEN_DDL)
 			delete process.env.CREDENTIALS_DIRECTORY
 			delete process.env.ENCRYPTION_KEY
-			runMigrate(memDb)
+			db.tokens.initKeys(memDb)
 			assert.equal(fs.existsSync(':memory:.key'), false, ':memory: DB never writes :memory:.key to disk')
-			assert.throws(() => runMigrate(memDb), /Missing encryption key for encrypted in-memory database/, 'Encrypted :memory: DB without env key fails loud')
+			const memCt = cryptoMod.encryptSecret(JSON.stringify({ accessToken: 'tok' }), cryptoMod.secretContext('m1', 'google', 'oauth'))
+			const nowIso = new Date().toISOString()
+			memDb.prepare("INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES ('m1', 'google', 'oauth', ?, ?, ?)").run(JSON.stringify({ secret: memCt }), nowIso, nowIso)
+			assert.throws(() => db.tokens.initKeys(memDb), /Missing encryption key for encrypted in-memory database/, 'Encrypted :memory: DB without env key fails loud')
 		} finally {
 			memDb.close()
 		}
@@ -7443,12 +7271,8 @@ test('proxy strips query-param API keys on upstream redirects', async () => {
 	}
 })
 
-test('structured credentials model: zero-magic shapes, OAuth static override, proxy attachment, unit replacement, and SCHEMA_VERSION 4 migration', async () => {
+test('structured credentials model: zero-magic shapes, OAuth static override, proxy attachment, and unit replacement', async () => {
 	const http = await import('node:http')
-	const os = await import('node:os')
-	const { DatabaseSync } = await import('node:sqlite')
-	const cryptoMod = await import('../crypto.js')
-	const { migrate: runMigrate } = await import('../db/migrate.js')
 	const captured = []
 	let cdnCaptured = null
 	const cdnServer = http.createServer((req, res) => {
@@ -7473,9 +7297,6 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 	})
 	await new Promise(resolve => upstreamServer.listen(0, '127.0.0.1', resolve))
 	const baseUrl = `http://127.0.0.1:${upstreamServer.address().port}`
-	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jump-v4-'))
-	const origKey = process.env.ENCRYPTION_KEY
-	const origCredDir = process.env.CREDENTIALS_DIRECTORY
 	const origGhId = process.env.GITHUB_CLIENT_ID
 	const origGhSecret = process.env.GITHUB_CLIENT_SECRET
 	try {
@@ -7696,192 +7517,20 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 			})
 			assert.equal(res.status, 400, `connectApp via REST must reject invalid credentials ${JSON.stringify(bad)} with 400`)
 		}
-		const TOKEN_DDL = `
-			CREATE TABLE tokens (
-				id TEXT PRIMARY KEY,
-				user_id TEXT,
-				provider TEXT NOT NULL,
-				type TEXT NOT NULL,
-				name TEXT,
-				token TEXT UNIQUE,
-				credentials TEXT,
-				expires_at INTEGER,
-				scopes TEXT,
-				admin INTEGER DEFAULT 0,
-				ip TEXT,
-				ua TEXT,
-				created TEXT NOT NULL,
-				updated TEXT NOT NULL
-			);
-		`
-		const kMig = cryptoMod.generateKey()
-		delete process.env.CREDENTIALS_DIRECTORY
-		process.env.ENCRYPTION_KEY = kMig
-		const keysMig = cryptoMod.loadKeys({ encrypted: true })
-		const v3Path = path.join(tmpDir, 'v3-legacy.db')
-		const v3Db = new DatabaseSync(v3Path)
-		try {
-			v3Db.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON; PRAGMA recursive_triggers = ON;')
-			v3Db.exec(`${TOKEN_DDL}
-				CREATE TRIGGER trg_tokens_cascade_shares
-				AFTER DELETE ON tokens
-				WHEN OLD.type IN ('oauth', 'api_key')
-				BEGIN
-					DELETE FROM tokens WHERE type = 'share' AND json_extract(credentials, '$.appId') = OLD.id;
-				END;
-				PRAGMA user_version = 3;
-			`)
-			const nowIso = new Date().toISOString()
-			const v3Rows = [
-				['v3-bearer', 'stripe', 'sk_live_v3_bearer_secret'],
-				['v3-prefixed-basic', 'twilio', 'basic dXNlcjpwYXNz'],
-				['v3-colon-basic', 'mailgun', 'api:key-v3-mailgun'],
-				['v3-query', 'namecheap', '?ApiUser=jt&ApiKey=v3_nc_secret'],
-				['v3-dedup', 'customq', '?ApiKey=old_val&apikey=new_val']
-			]
-			for (const [id, prov, rawKey] of v3Rows) {
-				const ct = cryptoMod.encryptSecret(rawKey, JSON.stringify([id, prov, 'api_key', 'apiKey']), keysMig)
-				v3Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
-					id,
-					prov,
-					'api_key',
-					JSON.stringify({ apiKey: ct, baseUrl: 'https://api.example.com', account: `acct_${id}` }),
-					nowIso,
-					nowIso
-				)
-			}
-			const oauthAccCt = cryptoMod.encryptSecret('ya29.v3_oauth', JSON.stringify(['v3-oauth', 'google', 'oauth', 'accessToken']), keysMig)
-			const oauthRefCt = cryptoMod.encryptSecret('1//v3_refresh', JSON.stringify(['v3-oauth', 'google', 'oauth', 'refreshToken']), keysMig)
-			v3Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
-				'v3-oauth',
-				'google',
-				'oauth',
-				JSON.stringify({ accessToken: oauthAccCt, refreshToken: oauthRefCt, account: 'u@example.com' }),
-				nowIso,
-				nowIso
-			)
-			v3Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
-				'v3-share-of-bearer',
-				'stripe',
-				'share',
-				JSON.stringify({ appId: 'v3-bearer' }),
-				nowIso,
-				nowIso
-			)
-			runMigrate(v3Db)
-			assert.equal(v3Db.prepare('PRAGMA user_version').get().user_version, 4)
-			const readV3Creds = (id, prov, expectedType = 'static') => {
-				const row = v3Db.prepare('SELECT type, credentials FROM tokens WHERE id = ?').get(id)
-				assert.equal(row.type, expectedType, `Migrated row ${id} must have type "${expectedType}"`)
-				const raw = JSON.parse(row.credentials)
-				assert.equal('apiKey' in raw, false, `Migrated row ${id} must delete legacy apiKey`)
-				assert.equal('accessToken' in raw, false, `Migrated row ${id} must move accessToken into secret`)
-				assert.equal('refreshToken' in raw, false, `Migrated row ${id} must move refreshToken into secret`)
-				const { secret, ...meta } = raw
-				return {
-					...meta,
-					...(secret && JSON.parse(cryptoMod.decryptSecret(secret, cryptoMod.secretContext(id, prov, expectedType), keysMig)))
-				}
-			}
-			assert.deepEqual(readV3Creds('v3-bearer', 'stripe'), {
-				baseUrl: 'https://api.example.com',
-				account: 'acct_v3-bearer',
-				headers: { authorization: 'Bearer sk_live_v3_bearer_secret' }
-			})
-			assert.deepEqual(readV3Creds('v3-prefixed-basic', 'twilio'), {
-				baseUrl: 'https://api.example.com',
-				account: 'acct_v3-prefixed-basic',
-				headers: { authorization: 'Basic dXNlcjpwYXNz' }
-			})
-			assert.deepEqual(readV3Creds('v3-colon-basic', 'mailgun'), {
-				baseUrl: 'https://api.example.com',
-				account: 'acct_v3-colon-basic',
-				headers: { authorization: `Basic ${Buffer.from('api:key-v3-mailgun').toString('base64')}` }
-			})
-			assert.deepEqual(readV3Creds('v3-query', 'namecheap'), {
-				baseUrl: 'https://api.example.com',
-				account: 'acct_v3-query',
-				query: { ApiUser: 'jt', ApiKey: 'v3_nc_secret' }
-			})
-			assert.deepEqual(readV3Creds('v3-dedup', 'customq'), {
-				baseUrl: 'https://api.example.com',
-				account: 'acct_v3-dedup',
-				query: { apikey: 'new_val' }
-			})
-			assert.deepEqual(readV3Creds('v3-oauth', 'google', 'oauth'), {
-				account: 'u@example.com',
-				accessToken: 'ya29.v3_oauth',
-				refreshToken: '1//v3_refresh'
-			})
-			v3Db.prepare("DELETE FROM tokens WHERE id = 'v3-bearer'").run()
-			assert.equal(v3Db.prepare("SELECT id FROM tokens WHERE id = 'v3-share-of-bearer'").get(), undefined, 'Upgraded trg_tokens_cascade_shares cascades shares when migrated static app is deleted')
-		} finally {
-			v3Db.close()
-		}
-		const v2Path = path.join(tmpDir, 'v2-legacy.db')
-		const v2Db = new DatabaseSync(v2Path)
-		try {
-			v2Db.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
-			v2Db.exec(`${TOKEN_DDL} PRAGMA user_version = 2;`)
-			const nowIso = new Date().toISOString()
-			const v2PlainSecret = 'sk_v2_plaintext_canary_secret_991122'
-			v2Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
-				'v2-bearer',
-				'stripe',
-				'api_key',
-				JSON.stringify({ apiKey: v2PlainSecret, baseUrl: 'https://api.stripe.com' }),
-				nowIso,
-				nowIso
-			)
-			v2Db.prepare('INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES (?, ?, ?, ?, ?, ?)').run(
-				'v2-query',
-				'namecheap',
-				'api_key',
-				JSON.stringify({ apiKey: '?ApiKey=v2_q_canary_334455', baseUrl: 'https://api.namecheap.com' }),
-				nowIso,
-				nowIso
-			)
-			v2Db.exec('PRAGMA wal_checkpoint(FULL);')
-			assert.equal(fs.readFileSync(v2Path).includes(v2PlainSecret), true)
-			runMigrate(v2Db)
-			assert.equal(v2Db.prepare('PRAGMA user_version').get().user_version, 4)
-			const v2BearerRow = v2Db.prepare("SELECT type, credentials FROM tokens WHERE id = 'v2-bearer'").get()
-			assert.equal(v2BearerRow.type, 'static')
-			const rawV2Bearer = JSON.parse(v2BearerRow.credentials)
-			assert.equal('apiKey' in rawV2Bearer, false)
-			assert.deepEqual(
-				JSON.parse(cryptoMod.decryptSecret(rawV2Bearer.secret, cryptoMod.secretContext('v2-bearer', 'stripe', 'static'), keysMig)),
-				{ headers: { authorization: `Bearer ${v2PlainSecret}` } }
-			)
-			const v2QueryRow = v2Db.prepare("SELECT type, credentials FROM tokens WHERE id = 'v2-query'").get()
-			assert.equal(v2QueryRow.type, 'static')
-			const rawV2Query = JSON.parse(v2QueryRow.credentials)
-			assert.equal('apiKey' in rawV2Query, false)
-			assert.deepEqual(
-				JSON.parse(cryptoMod.decryptSecret(rawV2Query.secret, cryptoMod.secretContext('v2-query', 'namecheap', 'static'), keysMig)),
-				{ query: { ApiKey: 'v2_q_canary_334455' } }
-			)
-			for (const ext of ['', '-wal']) {
-				const f = `${v2Path}${ext}`
-				if (fs.existsSync(f)) {
-					assert.equal(fs.readFileSync(f).includes(v2PlainSecret), false, `v2->v4 migration VACUUM scrubs plaintext apiKey from ${f}`)
-					assert.equal(fs.readFileSync(f).includes('v2_q_canary_334455'), false, `v2->v4 migration VACUUM scrubs plaintext query apiKey from ${f}`)
-				}
-			}
-		} finally {
-			v2Db.close()
-		}
+		const cascadeShare = db.tokens.upsertShare({
+			account: 'cascade-recipient@example.com',
+			authProvider: 'google',
+			appId: colonBearerId,
+			provider: 'colon_bearer'
+		})
+		assert.ok(db.tokens.get(cascadeShare.id))
+		db.tokens.remove(colonBearerId)
+		assert.equal(db.tokens.get(cascadeShare.id), null, 'trg_tokens_cascade_shares removes shares when static app is deleted')
 	} finally {
-		if (origKey === undefined) delete process.env.ENCRYPTION_KEY
-		else process.env.ENCRYPTION_KEY = origKey
-		if (origCredDir === undefined) delete process.env.CREDENTIALS_DIRECTORY
-		else process.env.CREDENTIALS_DIRECTORY = origCredDir
 		if (origGhId === undefined) delete process.env.GITHUB_CLIENT_ID
 		else process.env.GITHUB_CLIENT_ID = origGhId
 		if (origGhSecret === undefined) delete process.env.GITHUB_CLIENT_SECRET
 		else process.env.GITHUB_CLIENT_SECRET = origGhSecret
-		cryptoMod.loadKeys({ dbPath: testDbPath, encrypted: true })
-		fs.rmSync(tmpDir, { recursive: true, force: true })
 		await new Promise(resolve => upstreamServer.close(resolve))
 		await new Promise(resolve => cdnServer.close(resolve))
 	}
