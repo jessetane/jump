@@ -1,8 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import dns from 'node:dns'
 import fs from 'node:fs'
+import http from 'node:http'
+import https from 'node:https'
+import net from 'node:net'
 import path from 'node:path'
+import { Readable } from 'node:stream'
+import tls from 'node:tls'
+import zlib from 'node:zlib'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { Worker } from 'node:worker_threads'
@@ -361,37 +368,46 @@ test('rejects non-googleapis URLs in google_api tool', async () => {
 	assert.match(result.content[0].text, /Target URL domain not allowed/)
 })
 
-test('mcp google_api tool ignores body on GET requests', async () => {
-	const { session } = createTestSession({ account: 'getbody@example.com' })
-	const origFetch = globalThis.fetch
-	const origLookup = dns.promises.lookup
-	let capturedInit = null
-	dns.promises.lookup = async (host, opts) => {
-		if (host === 'www.googleapis.com') return [{ address: '142.250.80.46', family: 4 }]
-		return origLookup(host, opts)
-	}
-	globalThis.fetch = async (input, init) => {
-		const u = typeof input === 'string' ? input : input.url
-		if (u === 'https://www.googleapis.com/drive/v3/files') {
-			capturedInit = init
-			return new Response(JSON.stringify({ files: [] }), {
-				status: 200,
-				headers: { 'content-type': 'application/json' }
-			})
+test('mcp proxy tool strips body on GET requests against real upstream server', async () => {
+	let received = null
+	const upstream = http.createServer(async (req, res) => {
+		const chunks = []
+		for await (const chunk of req) chunks.push(chunk)
+		received = {
+			method: req.method,
+			url: req.url,
+			headers: req.headers,
+			body: Buffer.concat(chunks).toString('utf8')
 		}
-		return origFetch(input, init)
-	}
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.end(JSON.stringify({ files: [] }))
+	})
+	await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
 	try {
-		const result = await executeTool('google_api', {
-			url: 'https://www.googleapis.com/drive/v3/files',
+		const user = db.logins.resolveUser('google', 'getbody@example.com')
+		const session = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
+		const app = db.tokens.create({
+			userId: user.id,
+			provider: 'drive_get',
+			type: 'static',
+			credentials: {
+				headers: { authorization: 'Bearer tok_get' },
+				baseUrl: `http://127.0.0.1:${upstream.address().port}`
+			}
+		})
+		db.links.create({ sessionId: session.id, appId: app.id })
+		const result = await executeTool('drive_get_api', {
+			url: '/drive/v3/files',
 			method: 'GET',
 			body: { unwanted: 'payload' }
 		}, session.token)
 		assert.equal(result.isError, undefined)
-		assert.equal(capturedInit?.body, undefined, 'GET request must strip body before fetch')
+		assert.equal(received.method, 'GET')
+		assert.equal(received.body, '', 'GET request must never transmit a request body upstream')
+		assert.equal(received.headers['content-type'], undefined, 'GET request must not inject Content-Type for stripped body')
 	} finally {
-		globalThis.fetch = origFetch
-		dns.promises.lookup = origLookup
+		await new Promise(resolve => upstream.close(resolve))
 	}
 })
 
@@ -1296,34 +1312,186 @@ test('mcp non-POST request returns 405 Method Not Allowed', async () => {
 	assert.equal(data.error, 'Method Not Allowed')
 })
 
-test('readResponseBody enforces size limit on streams', async () => {
-	const stream = new ReadableStream({
-		start (controller) {
-			controller.enqueue(new Uint8Array(500))
-			controller.enqueue(new Uint8Array(600))
-			controller.close()
-		}
-	})
-	const response = new Response(stream)
+test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, while REST /api/:provider/* streams unbounded payloads and idle timeouts cleanly', async () => {
+	const overLimit = Readable.from([Buffer.alloc(500, 0x61), Buffer.alloc(600, 0x62)])
 	await assert.rejects(
-		async () => {
-			await readResponseBody(response, 1000)
-		},
+		() => readResponseBody(overLimit, 1000),
 		err => {
 			assert.equal(err.status, 413)
 			assert.match(err.message, /File too large/)
 			return true
 		}
 	)
-	const smallStream = new ReadableStream({
-		start (controller) {
-			controller.enqueue(new TextEncoder().encode('hello world'))
-			controller.close()
+	const withinLimit = Readable.from([Buffer.from('hello '), Buffer.from('world')])
+	const buf = await readResponseBody(withinLimit, 1000)
+	assert.equal(buf.toString('utf8'), 'hello world')
+	const addr = server.address()
+	const gzJson = zlib.gzipSync(Buffer.from(JSON.stringify({ compressed: 'gzip-ok' })))
+	const brJson = zlib.brotliCompressSync(Buffer.from(JSON.stringify({ compressed: 'br-ok' })))
+	const zstdJson = zlib.zstdCompressSync(Buffer.from(JSON.stringify({ compressed: 'zstd-ok' })))
+	const gzBomb = zlib.gzipSync(Buffer.alloc(2 * 1024 * 1024, 0x41))
+	let lastAcceptEncoding = null
+	const compUpstream = http.createServer(async (req, res) => {
+		lastAcceptEncoding = req.headers['accept-encoding'] || null
+		if (req.url === '/gzip') {
+			res.setHeader('content-type', 'application/json')
+			res.setHeader('content-encoding', 'gzip')
+			res.end(gzJson)
+			return
 		}
+		if (req.url === '/br') {
+			res.setHeader('content-type', 'application/json')
+			res.setHeader('content-encoding', 'br')
+			res.end(brJson)
+			return
+		}
+		if (req.url === '/zstd') {
+			res.setHeader('content-type', 'application/json')
+			res.setHeader('content-encoding', 'zstd')
+			res.end(zstdJson)
+			return
+		}
+		if (req.url === '/empty-204-gzip') {
+			res.statusCode = 204
+			res.setHeader('content-encoding', 'gzip')
+			res.end()
+			return
+		}
+		if (req.url === '/empty-200-br') {
+			res.statusCode = 200
+			res.setHeader('content-type', 'text/plain')
+			res.setHeader('content-encoding', 'br')
+			res.end()
+			return
+		}
+		if (req.url === '/bomb') {
+			res.setHeader('content-type', 'text/plain')
+			res.setHeader('content-encoding', 'gzip')
+			res.end(gzBomb)
+			return
+		}
+		if (req.url === '/drive-large-stream') {
+			res.statusCode = 200
+			res.setHeader('content-type', 'application/octet-stream')
+			res.setHeader('accept-ranges', 'bytes')
+			const chunk = Buffer.alloc(256 * 1024, 0x5a)
+			for (let i = 0; i < 10; i++) {
+				if (!res.write(chunk)) {
+					await new Promise(resolve => res.once('drain', resolve))
+				}
+			}
+			res.end()
+			return
+		}
+		if (req.url === '/upload-large-stream') {
+			let receivedBytes = 0
+			for await (const chunk of req) {
+				receivedBytes += chunk.byteLength
+			}
+			res.statusCode = 200
+			res.setHeader('content-type', 'application/json')
+			res.end(JSON.stringify({ receivedBytes }))
+			return
+		}
+		if (req.url === '/active-trickle') {
+			res.statusCode = 200
+			res.setHeader('content-type', 'text/plain')
+			for (let i = 0; i < 4; i++) {
+				await new Promise(resolve => setTimeout(resolve, 35))
+				res.write(`part-${i};`)
+			}
+			res.end()
+			return
+		}
+		if (req.url === '/hung-silence') {
+			res.statusCode = 200
+			res.setHeader('content-type', 'text/plain')
+			res.write('start;')
+			return
+		}
+		if (req.url === '/ws-upgrade') {
+			res.writeHead(101, { Connection: 'Upgrade', Upgrade: 'websocket' })
+			res.end()
+			return
+		}
+		res.statusCode = 404
+		res.end()
 	})
-	const smallResponse = new Response(smallStream)
-	const buf = await readResponseBody(smallResponse, 1000)
-	assert.equal(buf.toString(), 'hello world')
+	await new Promise(resolve => compUpstream.listen(0, '127.0.0.1', resolve))
+	const origMaxMb = process.env.MAX_FILE_SIZE_MB
+	const origUpTimeout = process.env.UPSTREAM_TIMEOUT_MS
+	process.env.MAX_FILE_SIZE_MB = '1'
+	try {
+		const u = db.logins.resolveUser('google', 'compression@example.com')
+		const s = db.tokens.create({ userId: u.id, provider: 'self', admin: 1 })
+		const app = db.tokens.create({
+			userId: u.id,
+			provider: 'comp',
+			type: 'static',
+			credentials: { headers: { authorization: 'Bearer sk_comp' }, baseUrl: `http://127.0.0.1:${compUpstream.address().port}` }
+		})
+		db.links.create({ sessionId: s.id, appId: app.id })
+		const gzMcp = await executeTool('comp_api', { url: '/gzip', headers: { 'accept-encoding': 'lz4-bogus' } }, s.token)
+		assert.equal(gzMcp.isError, undefined)
+		assert.equal(lastAcceptEncoding, 'gzip, br, zstd', 'MCP overwrites caller Accept-Encoding with supported encodings')
+		assert.deepEqual(JSON.parse(gzMcp.content[0].text), { compressed: 'gzip-ok' })
+		const brMcp = await executeTool('comp_api', { url: '/br' }, s.token)
+		assert.equal(brMcp.isError, undefined)
+		assert.deepEqual(JSON.parse(brMcp.content[0].text), { compressed: 'br-ok' })
+		const zstdMcp = await executeTool('comp_api', { url: '/zstd' }, s.token)
+		assert.equal(zstdMcp.isError, undefined)
+		assert.deepEqual(JSON.parse(zstdMcp.content[0].text), { compressed: 'zstd-ok' })
+		const empty204Mcp = await executeTool('comp_api', { url: '/empty-204-gzip', method: 'DELETE' }, s.token)
+		assert.equal(empty204Mcp.isError, undefined, '204 No Content with Content-Encoding: gzip must succeed cleanly')
+		const empty200Mcp = await executeTool('comp_api', { url: '/empty-200-br' }, s.token)
+		assert.equal(empty200Mcp.isError, undefined, '0-byte 200 OK with Content-Encoding: br must return empty string cleanly')
+		assert.equal(empty200Mcp.content[0].text, '')
+		const bombMcp = await executeTool('comp_api', { url: '/bomb' }, s.token)
+		assert.equal(bombMcp.isError, true, 'Decompressed body exceeding MAX_FILE_SIZE_MB in MCP must fail with 413')
+		assert.match(bombMcp.content[0].text, /File too large/)
+		const largeDriveMcp = await executeTool('comp_api', { url: '/drive-large-stream' }, s.token)
+		assert.equal(largeDriveMcp.isError, true, 'MCP still blocks >MAX_FILE_SIZE_MB responses to protect LLM context')
+		assert.match(largeDriveMcp.content[0].text, /File too large/)
+		const largeDriveRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/drive-large-stream`, {
+			headers: { authorization: `Bearer ${s.token}` }
+		})
+		assert.equal(largeDriveRest.status, 200, 'REST /api/:provider/* streams responses larger than MAX_FILE_SIZE_MB without 413')
+		assert.equal(largeDriveRest.headers.get('accept-ranges'), 'bytes')
+		const streamedBuf = Buffer.from(await largeDriveRest.arrayBuffer())
+		assert.equal(streamedBuf.byteLength, 2560 * 1024, 'Full 2.5 MB binary payload streamed intact despite MAX_FILE_SIZE_MB=1')
+		const largeUploadPayload = Buffer.alloc(1536 * 1024, 0x42)
+		const largeUploadRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
+			method: 'POST',
+			headers: { authorization: `Bearer ${s.token}`, 'content-type': 'application/octet-stream' },
+			body: largeUploadPayload
+		})
+		assert.equal(largeUploadRest.status, 200, 'REST /api/:provider/* streams >1 MB uploads when policy does not inspect body')
+		assert.deepEqual(await largeUploadRest.json(), { receivedBytes: 1536 * 1024 })
+		const rawRestGz = await fetch(`http://127.0.0.1:${addr.port}/api/comp/gzip`, {
+			headers: { authorization: `Bearer ${s.token}` }
+		})
+		assert.equal(rawRestGz.status, 200)
+		assert.deepEqual(await rawRestGz.json(), { compressed: 'gzip-ok' })
+		const upgradeMcp = await executeTool('comp_api', { url: '/ws-upgrade' }, s.token)
+		assert.equal(upgradeMcp.isError, true, '101 Switching Protocols must reject cleanly with 502 instead of hanging forever')
+		const forbiddenConnect = await executeTool('comp_api', { url: '/gzip', method: 'CONNECT' }, s.token)
+		assert.equal(forbiddenConnect.isError, true, 'CONNECT method must be rejected upfront')
+		process.env.UPSTREAM_TIMEOUT_MS = '80'
+		const activeTrickleRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/active-trickle`, {
+			headers: { authorization: `Bearer ${s.token}` }
+		})
+		assert.equal(activeTrickleRest.status, 200, 'Active stream taking 140ms total succeeds when chunks arrive within 80ms idle timeout')
+		assert.equal(await activeTrickleRest.text(), 'part-0;part-1;part-2;part-3;')
+		const hungMcp = await executeTool('comp_api', { url: '/hung-silence' }, s.token)
+		assert.equal(hungMcp.isError, true, 'Hung silent upstream aborts once idle timeout elapses')
+		assert.match(hungMcp.content[0].text, /timed out|timeout/i)
+	} finally {
+		if (origMaxMb === undefined) delete process.env.MAX_FILE_SIZE_MB
+		else process.env.MAX_FILE_SIZE_MB = origMaxMb
+		if (origUpTimeout === undefined) delete process.env.UPSTREAM_TIMEOUT_MS
+		else process.env.UPSTREAM_TIMEOUT_MS = origUpTimeout
+		await new Promise(resolve => compUpstream.close(resolve))
+	}
 })
 
 test('rfc 7009 /oauth/revoke endpoint', async () => {
@@ -6558,7 +6726,7 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 	}
 })
 
-test('upstream SSRF filter blocks IANA special-purpose IP literals and private/special DNS answers before fetch', async () => {
+test('upstream SSRF filter performs single-lookup socket-pinned DNS resolution, blocks private/special answers, and defeats DNS rebinding', async () => {
 	for (const blockedUrl of [
 		'https://[64:ff9b::a9fe:a9fe]',
 		'https://[64:ff9b:1::1]',
@@ -6580,9 +6748,11 @@ test('upstream SSRF filter blocks IANA special-purpose IP literals and private/s
 		'https://203.0.113.1',
 		'https://224.0.0.1',
 		'https://240.0.0.1',
-		'https://255.255.255.255'
+		'https://255.255.255.255',
+		'https://localhost..',
+		'https://metadata.google.internal..'
 	]) {
-		assert.equal(validateBaseUrl(blockedUrl), null, `Special-purpose IP literal must be rejected: ${blockedUrl}`)
+		assert.equal(validateBaseUrl(blockedUrl), null, `Special-purpose IP literal or multi-dot local/metadata host must be rejected: ${blockedUrl}`)
 	}
 	for (const allowedUrl of [
 		'https://1.1.1.1',
@@ -6592,6 +6762,45 @@ test('upstream SSRF filter blocks IANA special-purpose IP literals and private/s
 	]) {
 		assert.equal(validateBaseUrl(allowedUrl), allowedUrl, `Global unicast IP literal must be allowed: ${allowedUrl}`)
 	}
+	const pem = execFileSync('openssl', [
+		'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+		'-keyout', '/dev/stdout', '-out', '/dev/stdout',
+		'-days', '1', '-nodes', '-subj', '/CN=*.example.test',
+		'-addext', 'subjectAltName=DNS:*.example.test,DNS:example.test'
+	], { encoding: 'utf8' })
+	const defaultCas = tls.getCACertificates('default')
+	tls.setDefaultCACertificates([...defaultCas, pem])
+	const tlsReceived = []
+	let loopbackTrapHits = 0
+	const tlsUpstream = https.createServer({ key: pem, cert: pem }, (req, res) => {
+		tlsReceived.push({
+			sni: req.socket.servername,
+			host: req.headers.host,
+			url: req.url
+		})
+		if (req.url === '/bounce-to-cgnat') {
+			res.statusCode = 302
+			res.setHeader('location', `https://rfc6598.example.test:${tlsPort}/internal`)
+			res.end()
+			return
+		}
+		if (req.url === '/v1/first') {
+			res.setHeader('connection', 'close')
+		}
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.end(JSON.stringify({ ok: true, sni: req.socket.servername, host: req.headers.host, te: req.headers['transfer-encoding'] || null }))
+	})
+	const loopbackTrap = https.createServer({ key: pem, cert: pem }, (req, res) => {
+		loopbackTrapHits++
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.end(JSON.stringify({ leaked: 'loopback-secret' }))
+	})
+	await new Promise(resolve => tlsUpstream.listen(0, '127.0.0.1', resolve))
+	await new Promise(resolve => loopbackTrap.listen(0, '127.0.0.1', resolve))
+	const tlsPort = tlsUpstream.address().port
+	const trapPort = loopbackTrap.address().port
 	const addr = server.address()
 	const u = db.logins.resolveUser('google', 'dns-ssrf@example.com')
 	const s = db.tokens.create({ userId: u.id, provider: 'self', admin: 1 })
@@ -6605,30 +6814,46 @@ test('upstream SSRF filter blocks IANA special-purpose IP literals and private/s
 		'mixed.example.test': [{ address: '93.184.216.34', family: 4 }, { address: '192.168.1.10', family: 4 }],
 		'public.example.test': [{ address: '93.184.216.34', family: 4 }]
 	}
+	const lookupCounts = new Map()
+	const dialedIps = []
+	let rebindAttempt = 0
 	const origLookup = dns.promises.lookup
-	const origFetch = globalThis.fetch
-	const upstreamFetches = []
+	const origTcpConnect = net.Socket.prototype.connect
 	dns.promises.lookup = async (host, opts) => {
+		lookupCounts.set(host, (lookupCounts.get(host) || 0) + 1)
+		if (host === 'rebind.example.test') {
+			rebindAttempt++
+			return rebindAttempt === 1
+				? [{ address: '93.184.216.34', family: 4 }]
+				: [{ address: '127.0.0.1', family: 4 }]
+		}
 		if (Object.hasOwn(dnsFixtures, host)) return dnsFixtures[host]
 		return origLookup(host, opts)
 	}
-	globalThis.fetch = async (input, init) => {
-		const urlStr = typeof input === 'string' ? input : input.url
-		const parsed = new URL(urlStr)
-		if (parsed.hostname.endsWith('.example.test')) {
-			upstreamFetches.push(urlStr)
-			if (parsed.hostname === 'public.example.test' && parsed.pathname === '/bounce-to-cgnat') {
-				return new Response(null, {
-					status: 302,
-					headers: { location: 'https://rfc6598.example.test/internal' }
-				})
+	net.Socket.prototype.connect = function (...args) {
+		const opts = args[0]
+		if (opts && typeof opts === 'object' && typeof opts.lookup === 'function' && (opts.port === tlsPort || opts.port === trapPort)) {
+			const realLookup = opts.lookup
+			args[0] = {
+				...opts,
+				lookup (hostname, lookupOpts, cb) {
+					realLookup(hostname, lookupOpts, (err, res, fam) => {
+						if (err) {
+							cb(err)
+							return
+						}
+						if (Array.isArray(res)) {
+							for (const r of res) dialedIps.push(r.address)
+							cb(null, res.map(r => r.address === '93.184.216.34' ? { address: '127.0.0.1', family: 4 } : r))
+							return
+						}
+						dialedIps.push(res)
+						cb(null, res === '93.184.216.34' ? '127.0.0.1' : res, fam)
+					})
+				}
 			}
-			return new Response(JSON.stringify({ ok: true }), {
-				status: 200,
-				headers: { 'content-type': 'application/json' }
-			})
 		}
-		return origFetch(input, init)
+		return origTcpConnect.apply(this, args)
 	}
 	try {
 		for (const [idx, host] of [
@@ -6645,36 +6870,71 @@ test('upstream SSRF filter blocks IANA special-purpose IP literals and private/s
 				userId: u.id,
 				provider,
 				type: 'static',
-				credentials: { headers: { authorization: 'Bearer sk_test' }, baseUrl: `https://${host}` }
+				credentials: { headers: { authorization: 'Bearer sk_test' }, baseUrl: `https://${host}:${tlsPort}` }
 			})
 			db.links.create({ sessionId: s.id, appId: app.id })
 			const mcpRes = await executeTool(`${provider}_api`, { url: '/v1/data' }, s.token)
 			assert.equal(mcpRes.isError, true, `MCP request to ${host} must fail`)
 			assert.match(mcpRes.content[0].text, /Blocked unsafe upstream host/)
-			const restRes = await origFetch(`http://127.0.0.1:${addr.port}/api/${provider}/v1/data`, {
+			const restRes = await fetch(`http://127.0.0.1:${addr.port}/api/${provider}/v1/data`, {
 				headers: { authorization: `Bearer ${s.token}` }
 			})
 			assert.equal(restRes.status, 403, `REST request to ${host} must fail with 403`)
 		}
-		assert.deepEqual(upstreamFetches, [], 'fetch() must never be called when DNS resolves to a non-public IP')
+		assert.deepEqual(dialedIps, [], 'No TCP socket may dial when DNS resolves to any non-public IP')
+		assert.deepEqual(tlsReceived, [], 'Upstream server must receive zero requests for blocked DNS answers')
 		const pubApp = db.tokens.create({
 			userId: u.id,
 			provider: 'ssrf_pub',
 			type: 'static',
-			credentials: { headers: { authorization: 'Bearer sk_pub' }, baseUrl: 'https://public.example.test' }
+			credentials: { headers: { authorization: 'Bearer sk_pub' }, baseUrl: `https://public.example.test:${tlsPort}` }
 		})
 		db.links.create({ sessionId: s.id, appId: pubApp.id })
-		const okPub = await executeTool('ssrf_pub_api', { url: '/v1/ok' }, s.token)
-		assert.equal(okPub.isError, undefined, 'Public DNS answer succeeds normally')
-		assert.deepEqual(upstreamFetches, ['https://public.example.test/v1/ok'])
-		upstreamFetches.length = 0
+		lookupCounts.clear()
+		const okPub = await executeTool('ssrf_pub_api', {
+			url: '/v1/ok',
+			headers: {
+				host: 'evil-spoofed.example.com',
+				'transfer-encoding': 'chunked',
+				'proxy-authorization': 'Basic leak'
+			}
+		}, s.token)
+		assert.equal(okPub.isError, undefined, 'Public DNS answer succeeds over real TLS with SNI')
+		assert.deepEqual(JSON.parse(okPub.content[0].text), {
+			ok: true,
+			sni: 'public.example.test',
+			host: `public.example.test:${tlsPort}`,
+			te: null
+		}, 'Caller Host and Transfer-Encoding headers are stripped so TLS SNI and Host header always match parsed target origin')
+		assert.equal(lookupCounts.get('public.example.test'), 1, 'Single DNS lookup per socket connection (no double-lookup TOCTOU)')
+		assert.deepEqual(dialedIps, ['93.184.216.34'], 'Socket dials the exact public IP validated by lookup')
 		const redirectToPrivate = await executeTool('ssrf_pub_api', { url: '/bounce-to-cgnat' }, s.token)
 		assert.equal(redirectToPrivate.isError, true, 'Redirect hop resolving to RFC 6598 IP must be blocked')
 		assert.match(redirectToPrivate.content[0].text, /Blocked unsafe upstream host/)
-		assert.deepEqual(upstreamFetches, ['https://public.example.test/bounce-to-cgnat'], 'fetch() must not follow redirect hop once DNS resolves to private IP')
+		const rebindApp = db.tokens.create({
+			userId: u.id,
+			provider: 'ssrf_rebind',
+			type: 'static',
+			credentials: { headers: { authorization: 'Bearer sk_rebind' }, baseUrl: `https://rebind.example.test:${tlsPort}` }
+		})
+		db.links.create({ sessionId: s.id, appId: rebindApp.id })
+		dialedIps.length = 0
+		const rebindFirst = await executeTool('ssrf_rebind_api', { url: '/v1/first' }, s.token)
+		assert.equal(rebindFirst.isError, undefined, 'First request when DNS returns 93.184.216.34 dials 93.184.216.34')
+		assert.equal(lookupCounts.get('rebind.example.test'), 1, 'First request performs exactly 1 DNS lookup, so a 2nd-lookup rebind to 127.0.0.1 cannot fire')
+		assert.deepEqual(dialedIps, ['93.184.216.34'])
+		const rebindSecond = await executeTool('ssrf_rebind_api', { url: '/v1/second' }, s.token)
+		assert.equal(rebindSecond.isError, true, 'Subsequent reconnect on the SAME app when DNS rebinds to 127.0.0.1 is blocked at lookup')
+		assert.match(rebindSecond.content[0].text, /Blocked unsafe upstream host/)
+		assert.equal(lookupCounts.get('rebind.example.test'), 2)
+		assert.equal(loopbackTrapHits, 0, 'Loopback trap server is never reached when DNS flips to 127.0.0.1')
 	} finally {
 		dns.promises.lookup = origLookup
-		globalThis.fetch = origFetch
+		net.Socket.prototype.connect = origTcpConnect
+		tls.setDefaultCACertificates(defaultCas)
+		https.globalAgent.destroy()
+		await new Promise(resolve => tlsUpstream.close(resolve))
+		await new Promise(resolve => loopbackTrap.close(resolve))
 	}
 })
 
@@ -7255,8 +7515,59 @@ test('encryption at rest, key sources & rotation, transparent decryption, and VA
 
 test('proxy strips query-param API keys on upstream redirects', async () => {
 	const addr = server.address()
-	const origFetch = globalThis.fetch
 	const qSecret = 'SUPER_SECRET_QUERY_KEY_998877'
+	const seenUrls = []
+	const cdnUpstream = http.createServer((req, res) => {
+		seenUrls.push(`http://127.0.0.1:${cdnPort}${req.url}`)
+		res.statusCode = 200
+		res.setHeader('content-type', 'application/json')
+		res.end(JSON.stringify({ cdn: true }))
+	})
+	await new Promise(resolve => cdnUpstream.listen(0, '127.0.0.1', resolve))
+	const cdnPort = cdnUpstream.address().port
+	const mainUpstream = http.createServer((req, res) => {
+		seenUrls.push(`http://127.0.0.1:${mainPort}${req.url}`)
+		if (req.url.startsWith('/v1/items')) {
+			res.statusCode = 302
+			res.setHeader('location', `http://127.0.0.1:${mainPort}/v2/items?ApiKey=${qSecret}&page=2`)
+			res.end()
+			return
+		}
+		if (req.url.startsWith('/v2/items')) {
+			res.statusCode = 200
+			res.setHeader('content-type', 'application/json')
+			res.end(JSON.stringify({ ok: true }))
+			return
+		}
+		if (req.url.startsWith('/cross-hop')) {
+			res.statusCode = 302
+			res.setHeader('location', `http://127.0.0.1:${cdnPort}/cdn?apikey=${qSecret}&asset=1`)
+			res.end()
+			return
+		}
+		if (req.url.startsWith('/raw-rel')) {
+			res.statusCode = 302
+			res.setHeader('location', `/v2/next?apikey=${qSecret}&ok=1#sec`)
+			res.end()
+			return
+		}
+		if (req.url.startsWith('/raw-abs')) {
+			res.statusCode = 302
+			res.setHeader('location', `https://cdn.example.com/dl?ApiKey=${qSecret}&file=1`)
+			res.end()
+			return
+		}
+		if (req.url.startsWith('/raw-bad-loc')) {
+			res.statusCode = 302
+			res.setHeader('location', `http://[::1:bad/?ApiKey=${qSecret}`)
+			res.end()
+			return
+		}
+		res.statusCode = 404
+		res.end()
+	})
+	await new Promise(resolve => mainUpstream.listen(0, '127.0.0.1', resolve))
+	const mainPort = mainUpstream.address().port
 	const qOwner = db.logins.resolveUser('google', 'query-scrub@example.com')
 	const qSession = db.tokens.create({ userId: qOwner.id, provider: 'self', admin: 1 })
 	const qApp = db.tokens.create({
@@ -7264,75 +7575,27 @@ test('proxy strips query-param API keys on upstream redirects', async () => {
 		provider: 'customq',
 		type: 'static',
 		name: 'Query Key App',
-		credentials: { query: { ApiKey: qSecret }, baseUrl: 'http://127.0.0.1:19999' }
+		credentials: { query: { ApiKey: qSecret }, baseUrl: `http://127.0.0.1:${mainPort}` }
 	})
 	db.links.create({
 		sessionId: qSession.id,
 		appId: qApp.id,
 		policy: [{ action: 'allow', query: { ApiKey: null } }]
 	})
-	const seenUrls = []
-	globalThis.fetch = async (input) => {
-		const u = String(input)
-		seenUrls.push(u)
-		if (u.startsWith('http://127.0.0.1:19999/v1/items')) {
-			return new Response(null, {
-				status: 302,
-				headers: { location: `http://127.0.0.1:19999/v2/items?ApiKey=${qSecret}&page=2` }
-			})
-		}
-		if (u.startsWith('http://127.0.0.1:19999/v2/items')) {
-			return new Response(JSON.stringify({ ok: true }), {
-				status: 200,
-				headers: { 'content-type': 'application/json' }
-			})
-		}
-		if (u.startsWith('http://127.0.0.1:19999/cross-hop')) {
-			return new Response(null, {
-				status: 302,
-				headers: { location: `http://127.0.0.1:20000/cdn?apikey=${qSecret}&asset=1` }
-			})
-		}
-		if (u.startsWith('http://127.0.0.1:20000/cdn')) {
-			return new Response(JSON.stringify({ cdn: true }), {
-				status: 200,
-				headers: { 'content-type': 'application/json' }
-			})
-		}
-		if (u.startsWith('http://127.0.0.1:19999/raw-rel')) {
-			return new Response(null, {
-				status: 302,
-				headers: { location: `/v2/next?apikey=${qSecret}&ok=1#sec` }
-			})
-		}
-		if (u.startsWith('http://127.0.0.1:19999/raw-abs')) {
-			return new Response(null, {
-				status: 302,
-				headers: { location: `https://cdn.example.com/dl?ApiKey=${qSecret}&file=1` }
-			})
-		}
-		if (u.startsWith('http://127.0.0.1:19999/raw-bad-loc')) {
-			return new Response(null, {
-				status: 302,
-				headers: { location: `http://[::1:bad/?ApiKey=${qSecret}` }
-			})
-		}
-		return origFetch(input)
-	}
 	try {
 		const sameOriginRes = await executeTool('customq_api', { url: '/v1/items' }, qSession.token)
 		assert.equal(sameOriginRes.isError, undefined, 'Same-origin redirect strips echoed query secret before policy check and re-attaches on hop 2')
-		assert.equal(seenUrls[1], `http://127.0.0.1:19999/v2/items?page=2&ApiKey=${qSecret}`)
+		assert.equal(seenUrls[1], `http://127.0.0.1:${mainPort}/v2/items?page=2&ApiKey=${qSecret}`)
 		const crossOriginRes = await executeTool('customq_api', { url: '/cross-hop' }, qSession.token)
 		assert.equal(crossOriginRes.isError, undefined)
-		assert.equal(seenUrls[3], 'http://127.0.0.1:20000/cdn?asset=1', 'Cross-origin redirect strips query-param API key before hop')
-		const rawRelRes = await origFetch(`http://127.0.0.1:${addr.port}/api/customq/raw-rel`, {
+		assert.equal(seenUrls[3], `http://127.0.0.1:${cdnPort}/cdn?asset=1`, 'Cross-origin redirect strips query-param API key before hop')
+		const rawRelRes = await fetch(`http://127.0.0.1:${addr.port}/api/customq/raw-rel`, {
 			headers: { authorization: `Bearer ${qSession.token}` },
 			redirect: 'manual'
 		})
 		assert.equal(rawRelRes.status, 302)
 		assert.equal(rawRelRes.headers.get('location'), '/v2/next?ok=1#sec', 'Raw REST proxy strips echoed query secret from relative Location header')
-		const rawAbsRes = await origFetch(`http://127.0.0.1:${addr.port}/api/customq/raw-abs`, {
+		const rawAbsRes = await fetch(`http://127.0.0.1:${addr.port}/api/customq/raw-abs`, {
 			headers: { authorization: `Bearer ${qSession.token}` },
 			redirect: 'manual'
 		})
@@ -7345,7 +7608,7 @@ test('proxy strips query-param API keys on upstream redirects', async () => {
 		}
 		let rawBadLocRes
 		try {
-			rawBadLocRes = await origFetch(`http://127.0.0.1:${addr.port}/api/customq/raw-bad-loc`, {
+			rawBadLocRes = await fetch(`http://127.0.0.1:${addr.port}/api/customq/raw-bad-loc`, {
 				headers: { authorization: `Bearer ${qSession.token}` },
 				redirect: 'manual'
 			})
@@ -7358,11 +7621,12 @@ test('proxy strips query-param API keys on upstream redirects', async () => {
 		assert.equal(rawBadLocBody.includes(qSecret), false)
 		const qLogs = db.logs.listByUserId(qOwner.id)
 		const itemLog = qLogs.find(l => l.url.includes('/v2/items'))
-		assert.equal(itemLog.url, 'http://127.0.0.1:19999/v2/items?page=2', 'Redirected logs.url never records query-param API key')
+		assert.equal(itemLog.url, `http://127.0.0.1:${mainPort}/v2/items?page=2`, 'Redirected logs.url never records query-param API key')
 		db.sqlite.exec('PRAGMA wal_checkpoint(FULL);')
 		assert.equal(fs.readFileSync(testDbPath).includes(qSecret), false, 'Query-param API key never appears in plaintext anywhere in SQLite')
 	} finally {
-		globalThis.fetch = origFetch
+		await new Promise(resolve => mainUpstream.close(resolve))
+		await new Promise(resolve => cdnUpstream.close(resolve))
 	}
 })
 

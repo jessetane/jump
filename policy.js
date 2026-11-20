@@ -2,6 +2,7 @@ import { resolveTargetUrl, hasPathTraversal, serializeFormBody, isPlainObject } 
 
 export {
 	evaluatePolicy,
+	hasBodyPolicy,
 	matchPattern,
 	parsePolicy,
 	validatePolicy
@@ -363,6 +364,11 @@ function validatePolicy (policy) {
 function parsePolicy (policy) {
 	const res = validatePolicy(policy)
 	return res.valid ? res.policy : null
+}
+
+function hasBodyPolicy (policy) {
+	const parsed = parsePolicy(policy)
+	return Boolean(parsed && parsed.some(r => r.body !== undefined))
 }
 
 function matchPattern (pattern, str) {

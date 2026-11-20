@@ -15,7 +15,8 @@ export {
 	sendHtml,
 	redirect,
 	isLoopbackHost,
-	assertUpstreamHost,
+	isAllowedUpstreamHost,
+	lookupUpstreamHost,
 	validateBaseUrl,
 	resolveTargetUrl,
 	hasPathTraversal,
@@ -277,7 +278,7 @@ function isPublicIp (ip) {
 }
 
 function stripTrailingDot (hostname) {
-	return hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+	return hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
 }
 
 function isLoopbackHost (hostname) {
@@ -289,37 +290,86 @@ function isLoopbackHost (hostname) {
 
 function isAllowedUpstreamHost (hostname) {
 	if (!hostname || typeof hostname !== 'string') return false
+	const raw = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+	const ipFamily = net.isIP(raw)
+	if (ipFamily) {
+		if (isLoopbackHost(hostname)) return process.env.NODE_ENV === 'test'
+		return isPublicIp(raw)
+	}
+	if (raw.startsWith('.') || raw.includes('..')) return false
 	if (isLoopbackHost(hostname)) {
 		return process.env.NODE_ENV === 'test'
 	}
 	const host = stripTrailingDot(hostname)
 	if (!host || host === 'metadata.google.internal') return false
-	if (net.isIP(host)) return isPublicIp(host)
 	return true
 }
 
-async function assertUpstreamHost (hostname) {
-	if (!isAllowedUpstreamHost(hostname)) {
-		const err = new Error(`Blocked unsafe upstream host: ${hostname}`)
-		err.status = 403
+function blockedHostError (hostname) {
+	const err = new Error(`Blocked unsafe upstream host: ${hostname}`)
+	err.status = 403
+	return err
+}
+
+function deliverLookup (records, all, cb) {
+	if (all) {
+		cb(null, records)
+		return
+	}
+	cb(null, records[0].address, records[0].family)
+}
+
+async function resolveDnsRecords (hostname, host, options) {
+	let records
+	try {
+		records = await dns.promises.lookup(host, {
+			family: options.family,
+			hints: options.hints,
+			all: true
+		})
+	} catch (err) {
+		err.status ||= 502
 		throw err
 	}
-	if (isLoopbackHost(hostname)) return
-	const host = stripTrailingDot(hostname)
-	if (net.isIP(host)) return
-	const records = await dns.promises.lookup(host, { all: true })
 	if (!Array.isArray(records) || records.length === 0) {
 		const err = new Error(`Unable to resolve upstream host: ${hostname}`)
 		err.status = 502
 		throw err
 	}
-	for (const { address } of records) {
-		if (!isPublicIp(address)) {
-			const err = new Error(`Blocked unsafe upstream host: ${hostname}`)
-			err.status = 403
-			throw err
+	if (!isLoopbackHost(hostname)) {
+		for (const { address } of records) {
+			if (!isPublicIp(address)) {
+				throw blockedHostError(hostname)
+			}
 		}
 	}
+	return records
+}
+
+function lookupUpstreamHost (hostname, opts, cb) {
+	const callback = typeof opts === 'function' ? opts : cb
+	const options = typeof opts === 'object' && opts !== null ? opts : {}
+	const wantAll = Boolean(options.all)
+	if (!isAllowedUpstreamHost(hostname)) {
+		queueMicrotask(() => callback(blockedHostError(hostname)))
+		return
+	}
+	const host = stripTrailingDot(hostname)
+	const ipFamily = net.isIP(host)
+	if (ipFamily) {
+		queueMicrotask(() => deliverLookup([{ address: host, family: ipFamily }], wantAll, callback))
+		return
+	}
+	;(async () => {
+		let records
+		try {
+			records = await resolveDnsRecords(hostname, host, options)
+		} catch (err) {
+			callback(err)
+			return
+		}
+		deliverLookup(records, wantAll, callback)
+	})()
 }
 
 function validateBaseUrl (baseUrl) {

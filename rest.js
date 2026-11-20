@@ -1,28 +1,9 @@
 import * as api from './api/index.js'
-import { HOP_BY_HOP_HEADERS, assertKeys, getRawBody, getBody, getBaseUrl, isPlainObject, sendJson, sendText } from './util.js'
+import { assertKeys, getBody, getBaseUrl, isPlainObject, sendJson, sendText } from './util.js'
 
 export {
 	handleRest
 }
-
-const STRIPPED_REQUEST_HEADERS = new Set([
-	...HOP_BY_HOP_HEADERS,
-	'host',
-	'authorization',
-	'x-api-key',
-	'cookie'
-])
-
-const STRIPPED_RESPONSE_HEADERS = new Set([
-	...HOP_BY_HOP_HEADERS,
-	'content-encoding',
-	'set-cookie',
-	'access-control-allow-origin',
-	'access-control-allow-methods',
-	'access-control-allow-headers',
-	'access-control-expose-headers',
-	'access-control-allow-credentials'
-])
 
 async function parseJsonBody (req) {
 	const rawBody = await getBody(req)
@@ -60,35 +41,11 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 	forwardParams.delete('app')
 	const qs = forwardParams.toString()
 	const search = qs ? `?${qs}` : ''
-	const targetUrl = `${targetPath}${search}`
-	const headers = {}
-	for (const [k, v] of Object.entries(req.headers)) {
-		const lower = k.toLowerCase()
-		if (STRIPPED_REQUEST_HEADERS.has(lower) || v === undefined) continue
-		headers[lower] = Array.isArray(v) ? v.join(', ') : v
-	}
-	let body = undefined
-	if (!['GET', 'HEAD'].includes(req.method)) {
-		const rawBody = await getRawBody(req)
-		if (rawBody.byteLength > 0) {
-			body = rawBody
-		}
-	}
-	const upstream = await api.proxy.request({
+	await api.proxy.stream({
 		provider,
-		url: targetUrl,
-		method: req.method,
-		body,
-		headers,
+		url: `${targetPath}${search}`,
 		app
-	}, token, { raw: true })
-	res.statusCode = upstream.status
-	for (const [k, v] of upstream.headers.entries()) {
-		if (!STRIPPED_RESPONSE_HEADERS.has(k.toLowerCase())) {
-			res.setHeader(k, v)
-		}
-	}
-	res.end(upstream.body)
+	}, token, req, res)
 }
 
 async function parseQueryOrBody (req, query) {
