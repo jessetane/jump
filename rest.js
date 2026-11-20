@@ -1,5 +1,5 @@
 import * as api from './api/index.js'
-import { HOP_BY_HOP_HEADERS, getRawBody, getBody, getBaseUrl, sendJson, sendText } from './util.js'
+import { HOP_BY_HOP_HEADERS, getRawBody, getBody, getBaseUrl, isPlainObject, sendJson, sendText } from './util.js'
 
 export {
 	handleRest
@@ -27,13 +27,20 @@ const STRIPPED_RESPONSE_HEADERS = new Set([
 async function parseJsonBody (req) {
 	const rawBody = await getBody(req)
 	if (!rawBody || !rawBody.trim()) return {}
+	let parsed
 	try {
-		return JSON.parse(rawBody)
+		parsed = JSON.parse(rawBody)
 	} catch {
 		const err = new Error('Invalid JSON body')
 		err.status = 400
 		throw err
 	}
+	if (!isPlainObject(parsed)) {
+		const err = new Error('JSON body must be an object')
+		err.status = 400
+		throw err
+	}
+	return parsed
 }
 
 async function handleProviderProxy (req, res, provider, targetPath, url, token) {
@@ -70,9 +77,8 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 		body,
 		headers,
 		appId,
-		account,
-		raw: true
-	}, token)
+		account
+	}, token, { raw: true })
 	res.statusCode = upstream.status
 	for (const [k, v] of upstream.headers.entries()) {
 		if (!STRIPPED_RESPONSE_HEADERS.has(k.toLowerCase())) {

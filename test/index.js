@@ -7858,6 +7858,83 @@ test('structured credentials model: zero-magic shapes, OAuth static override, pr
 	}
 })
 
+test('strict unknown parameter and empty update rejection across MCP and REST', async () => {
+	const addr = server.address()
+	const user = db.logins.resolveUser('google', 'strict-params@example.com')
+	const adminSession = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		name: 'Strict Admin',
+		admin: 1
+	})
+	const app = db.tokens.create({
+		userId: user.id,
+		provider: 'stripe',
+		type: 'api_key',
+		name: 'Original Stripe',
+		credentials: {
+			baseUrl: 'https://api.stripe.com',
+			headers: { authorization: 'Bearer sk_test_orig' }
+		}
+	})
+	db.links.create({ sessionId: adminSession.id, appId: app.id })
+	const mixedLegacyUpdate = await executeTool('admin', {
+		action: 'update_app',
+		appId: app.id,
+		name: 'Stripe',
+		apiKey: 'sk_test_ignored'
+	}, adminSession.token)
+	assert.equal(mixedLegacyUpdate.isError, true)
+	assert.match(mixedLegacyUpdate.content[0].text, /Unknown parameter "apiKey"/)
+	assert.equal(db.tokens.get(app.id).name, 'Original Stripe', 'rejected update must not partially apply name')
+	const appUrlSpoof = await executeTool('admin', {
+		action: 'connect_app',
+		provider: 'google',
+		appUrl: 'https://evil.com'
+	}, adminSession.token, 'http://127.0.0.1:8080')
+	assert.equal(appUrlSpoof.isError, true)
+	assert.match(appUrlSpoof.content[0].text, /Unknown parameter "appUrl"/)
+	const listAppsExtra = await executeTool('admin', {
+		action: 'list_apps',
+		provider: 'stripe'
+	}, adminSession.token)
+	assert.equal(listAppsExtra.isError, true)
+	assert.match(listAppsExtra.content[0].text, /Unknown parameter "provider"/)
+	const proxyRawSpoof = await executeTool('stripe_api', {
+		url: '/v1/customers',
+		raw: true
+	}, adminSession.token)
+	assert.equal(proxyRawSpoof.isError, true)
+	assert.match(proxyRawSpoof.content[0].text, /Unknown parameter "raw"/)
+	const proxyProviderSpoof = await executeTool('stripe_api', {
+		url: '/v1/customers',
+		provider: 'google'
+	}, adminSession.token)
+	assert.equal(proxyProviderSpoof.isError, true)
+	assert.match(proxyProviderSpoof.content[0].text, /Unknown parameter "provider"/)
+	const emptyUpdateApp = await executeTool('admin', {
+		action: 'update_app',
+		appId: app.id
+	}, adminSession.token)
+	assert.equal(emptyUpdateApp.isError, true)
+	assert.match(emptyUpdateApp.content[0].text, /At least one of name, account, baseUrl, or credentials is required/)
+	const emptyUpdateSession = await executeTool('admin', {
+		action: 'update_session'
+	}, adminSession.token)
+	assert.equal(emptyUpdateSession.isError, true)
+	assert.match(emptyUpdateSession.content[0].text, /At least one of name, admin, or rotateToken is required/)
+	const arrayBodyRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps`, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: '["not","an","object"]'
+	})
+	assert.equal(arrayBodyRes.status, 400)
+	assert.match((await arrayBodyRes.json()).error, /JSON body must be an object/)
+})
+
 test('teardown server', (t, done) => {
 	server.close(() => {
 		fs.rmSync(testDbPath, { force: true })

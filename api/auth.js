@@ -2,7 +2,7 @@ import * as db from '../db/index.js'
 import { getProvider, listAuthProviders, requireAuthProvider } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, getBaseUrl, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
+import { HOP_BY_HOP_HEADERS, assertKeys, getBaseUrl, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
 
 export {
 	whoami,
@@ -80,6 +80,7 @@ function resolveOrigin (appUrl) {
 }
 
 async function whoami (token, opts = {}, appUrl) {
+	assertKeys(opts, [])
 	const session = db.tokens.resolveSession(token)
 	if (!session) {
 		return {
@@ -148,9 +149,10 @@ function requireTargetSession (userId, sessionId) {
 	return targetSession
 }
 
-function requireShareTarget (token, opts = {}) {
-	const { appId, account, provider = null } = opts
+function requireShareTarget (token, opts = {}, allowedKeys = ['appId', 'account', 'provider']) {
 	const session = requireAdmin(token)
+	assertKeys(opts, allowedKeys)
+	const { appId, account, provider = null } = opts
 	if (!appId) {
 		const error = new Error('appId is required')
 		error.status = 400
@@ -168,13 +170,15 @@ function requireShareTarget (token, opts = {}) {
 
 async function listSessions (token, opts = {}) {
 	const session = requireAdmin(token, 'Access denied: session administration requires admin privileges')
+	assertKeys(opts, [])
 	const rawSessions = db.tokens.listByUserId(session.userId, { provider: 'self' })
 	return { sessions: rawSessions.map(s => formatSession(s, session.id)) }
 }
 
 async function getSession (token, opts = {}) {
-	const { sessionId } = opts
 	const session = requireSession(token)
+	assertKeys(opts, ['sessionId'])
+	const { sessionId } = opts
 	if (!session.admin && sessionId !== session.id) {
 		const error = new Error('Access denied: session administration requires admin privileges')
 		error.status = 403
@@ -185,8 +189,9 @@ async function getSession (token, opts = {}) {
 }
 
 async function createSession (token, opts = {}) {
-	const { name = 'New Session', admin, linkAppIds = [], policy = null } = opts
 	const session = requireAdmin(token, 'Access denied: session administration requires admin privileges')
+	assertKeys(opts, ['name', 'admin', 'linkAppIds', 'policy'])
+	const { name = 'New Session', admin, linkAppIds = [], policy = null } = opts
 	const isAdmin = requireBoolean(admin, 'admin', false)
 	const policyCheck = validatePolicy(policy)
 	if (!policyCheck.valid) {
@@ -225,7 +230,9 @@ async function createSession (token, opts = {}) {
 	}
 }
 
-async function revokeSession (token, { sessionId, allOthers } = {}) {
+async function revokeSession (token, opts = {}) {
+	assertKeys(opts, ['sessionId', 'allOthers'])
+	const { sessionId, allOthers } = opts || {}
 	const session = db.tokens.resolveSession(token)
 	if (!session) {
 		return {
@@ -283,6 +290,7 @@ async function revokeSession (token, { sessionId, allOthers } = {}) {
 
 async function listApps (token, opts = {}) {
 	const session = requireAdmin(token)
+	assertKeys(opts, [])
 	const allTokens = db.tokens.listByUserId(session.userId)
 	const ownedShares = db.tokens.listSharesByOwnerId(session.userId)
 	const sharesByAppId = new Map()
@@ -471,8 +479,9 @@ function normalizeCredentials (raw) {
 }
 
 async function connectApp (token, opts = {}, appUrl) {
-	let { provider, name, credentials, account, baseUrl, appId } = opts
 	const session = requireAdmin(token)
+	assertKeys(opts, ['provider', 'name', 'credentials', 'account', 'baseUrl', 'appId'])
+	let { provider, name, credentials, account, baseUrl, appId } = opts || {}
 	if (provider === undefined || provider === null) {
 		provider = null
 	} else {
@@ -549,8 +558,9 @@ async function connectApp (token, opts = {}, appUrl) {
 }
 
 async function disconnectApp (token, opts = {}) {
-	const { appId, revoke } = opts
 	const session = requireAdmin(token)
+	assertKeys(opts, ['appId', 'revoke'])
+	const { appId, revoke } = opts || {}
 	const targetApp = requireApp(session.userId, appId)
 	const shouldRevoke = requireBoolean(revoke, 'revoke', true)
 	if (shouldRevoke) {
@@ -567,8 +577,9 @@ async function disconnectApp (token, opts = {}) {
 }
 
 async function linkApp (token, opts = {}) {
-	const { sessionId, appId, policy = null } = opts
 	const session = requireAdmin(token, 'Access denied: link administration requires admin privileges')
+	assertKeys(opts, ['sessionId', 'appId', 'policy'])
+	const { sessionId, appId, policy = null } = opts || {}
 	const policyCheck = validatePolicy(policy)
 	if (!policyCheck.valid) {
 		const error = new Error(policyCheck.error)
@@ -591,8 +602,9 @@ async function linkApp (token, opts = {}) {
 }
 
 async function unlinkApp (token, opts = {}) {
-	const { sessionId, appId } = opts
 	const session = requireAdmin(token, 'Access denied: link administration requires admin privileges')
+	assertKeys(opts, ['sessionId', 'appId'])
+	const { sessionId, appId } = opts || {}
 	const targetSession = requireTargetSession(session.userId, sessionId)
 	const targetApp = requireApp(session.userId, appId)
 	const removed = db.links.remove(targetSession.id, targetApp.id)
@@ -605,7 +617,8 @@ async function unlinkApp (token, opts = {}) {
 
 async function linkLogin (token, opts = {}, appUrl) {
 	const session = requireAdmin(token, 'Access denied: login administration requires admin privileges')
-	const { provider, merge } = opts
+	assertKeys(opts, ['provider', 'merge'])
+	const { provider, merge } = opts || {}
 	const cleanProvider = optionalString(provider, 'provider')
 	const shouldMerge = requireBoolean(merge, 'merge', false)
 	const existingLogins = db.logins.listByUserId(session.userId)
@@ -634,7 +647,8 @@ async function linkLogin (token, opts = {}, appUrl) {
 
 async function unlinkLogin (token, opts = {}) {
 	const session = requireAdmin(token, 'Access denied: login administration requires admin privileges')
-	const { loginId = null, provider = null, account = null } = opts
+	assertKeys(opts, ['loginId', 'provider', 'account'])
+	const { loginId = null, provider = null, account = null } = opts || {}
 	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
 	if (!loginId && !cleanProvider && !cleanAccount) {
 		const error = new Error('loginId, provider, or account is required to unlink a login key')
@@ -655,9 +669,13 @@ async function unlinkLogin (token, opts = {}) {
 }
 
 async function updateApp (token, opts = {}) {
-	const { appId, name, account, baseUrl, credentials } = opts
 	const session = requireAdmin(token)
+	assertKeys(opts, ['appId', 'name', 'account', 'baseUrl', 'credentials'])
+	const { appId, name, account, baseUrl, credentials } = opts || {}
 	const targetApp = requireApp(session.userId, appId, { allowShare: false, requireId: true })
+	if (name === undefined && account === undefined && baseUrl === undefined && credentials === undefined) {
+		throw badRequest('At least one of name, account, baseUrl, or credentials is required')
+	}
 	if ((account !== undefined || baseUrl !== undefined || credentials !== undefined) && targetApp.type !== 'api_key') {
 		const error = new Error('account, baseUrl, and credentials can only be updated on api_key apps')
 		error.status = 400
@@ -667,27 +685,24 @@ async function updateApp (token, opts = {}) {
 	const cleanAccount = account !== undefined ? optionalString(account, 'account') : undefined
 	const normalizedAuth = credentials !== undefined ? normalizeCredentials(credentials) : undefined
 	const normalizedBaseUrl = baseUrl !== undefined ? requireValidBaseUrl(baseUrl) : undefined
-	let updated = targetApp
-	if (cleanName !== undefined || cleanAccount !== undefined || normalizedBaseUrl !== undefined || normalizedAuth !== undefined) {
-		const hasCredChanges = cleanAccount !== undefined || normalizedBaseUrl !== undefined || normalizedAuth !== undefined
-		let updatedCreds = undefined
-		if (hasCredChanges) {
-			const existingCreds = targetApp.credentials || {}
-			const { headers: _h, query: _q, ...metaCreds } = existingCreds
-			updatedCreds = {
-				...(normalizedAuth !== undefined ? { ...metaCreds, ...normalizedAuth } : existingCreds),
-				...(normalizedBaseUrl !== undefined && { baseUrl: normalizedBaseUrl })
-			}
-			if (cleanAccount !== undefined) {
-				if (cleanAccount) updatedCreds.account = cleanAccount
-				else delete updatedCreds.account
-			}
+	const hasCredChanges = cleanAccount !== undefined || normalizedBaseUrl !== undefined || normalizedAuth !== undefined
+	let updatedCreds = undefined
+	if (hasCredChanges) {
+		const existingCreds = targetApp.credentials || {}
+		const { headers: _h, query: _q, ...metaCreds } = existingCreds
+		updatedCreds = {
+			...(normalizedAuth !== undefined ? { ...metaCreds, ...normalizedAuth } : existingCreds),
+			...(normalizedBaseUrl !== undefined && { baseUrl: normalizedBaseUrl })
 		}
-		updated = db.tokens.updateCredentials(targetApp.id, {
-			...(cleanName !== undefined ? { name: cleanName } : {}),
-			...(updatedCreds !== undefined ? { credentials: updatedCreds } : {})
-		})
+		if (cleanAccount !== undefined) {
+			if (cleanAccount) updatedCreds.account = cleanAccount
+			else delete updatedCreds.account
+		}
 	}
+	const updated = db.tokens.updateCredentials(targetApp.id, {
+		...(cleanName !== undefined ? { name: cleanName } : {}),
+		...(updatedCreds !== undefined ? { credentials: updatedCreds } : {})
+	})
 	return {
 		updated: true,
 		app: formatApp(updated)
@@ -695,8 +710,8 @@ async function updateApp (token, opts = {}) {
 }
 
 async function shareApp (token, opts = {}) {
-	const { policy = null } = opts
-	const { session, targetApp, cleanAccount, cleanProvider } = requireShareTarget(token, opts)
+	const { session, targetApp, cleanAccount, cleanProvider } = requireShareTarget(token, opts, ['appId', 'account', 'provider', 'policy'])
+	const { policy = null } = opts || {}
 	const selfLogins = db.logins.listByUserId(session.userId)
 	const isSelf = selfLogins.some(l => {
 		const acc = (l.account || '').toLowerCase()
@@ -764,8 +779,9 @@ async function unshareApp (token, opts = {}) {
 }
 
 async function updateSession (token, opts = {}) {
-	const { sessionId, name, admin, rotateToken } = opts
 	const session = requireSession(token)
+	assertKeys(opts, ['sessionId', 'name', 'admin', 'rotateToken'])
+	const { sessionId, name, admin, rotateToken } = opts || {}
 	const targetId = sessionId || session.id
 	if (!session.admin && targetId !== session.id) {
 		const error = new Error('Access denied: session administration requires admin privileges')
@@ -776,6 +792,9 @@ async function updateSession (token, opts = {}) {
 		const error = new Error('Access denied: changing admin privileges requires admin privileges')
 		error.status = 403
 		throw error
+	}
+	if (name === undefined && admin === undefined && rotateToken === undefined) {
+		throw badRequest('At least one of name, admin, or rotateToken is required')
 	}
 	const parsedAdmin = requireBoolean(admin, 'admin')
 	const shouldRotate = requireBoolean(rotateToken, 'rotateToken', false)
@@ -795,8 +814,9 @@ async function updateSession (token, opts = {}) {
 }
 
 async function listLogs (token, opts = {}) {
-	const { sessionId, appId, provider, allowed, limit } = opts
 	const session = requireSession(token)
+	assertKeys(opts, ['sessionId', 'appId', 'provider', 'allowed', 'limit'])
+	const { sessionId, appId, provider, allowed, limit } = opts || {}
 	if (!session.admin && sessionId && sessionId !== session.id) {
 		const error = new Error('Access denied: log administration requires admin privileges')
 		error.status = 403

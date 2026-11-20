@@ -3,7 +3,7 @@ import RpcEngine from 'rpc-engine'
 import * as api from './api/index.js'
 import * as db from './db/index.js'
 import { getProvider } from './providers/index.js'
-import { getBody, getBaseUrl, sendJson } from './util.js'
+import { assertKeys, getBody, getBaseUrl, sendJson } from './util.js'
 
 export {
 	executeTool,
@@ -264,7 +264,12 @@ async function executeTool (name, args = {}, token, appUrl) {
 	}
 	try {
 		if (name === 'admin') {
-			const { action: rawAction, ...actionArgs } = args
+			if (args !== undefined && args !== null && (typeof args !== 'object' || Array.isArray(args))) {
+				const err = new Error('Options must be a JSON object')
+				err.status = 400
+				throw err
+			}
+			const { action: rawAction, ...actionArgs } = args || {}
 			const action = rawAction || 'whoami'
 			const handle = adminActions[action]
 			if (!handle) {
@@ -279,6 +284,7 @@ async function executeTool (name, args = {}, token, appUrl) {
 		const apiMatch = name.match(/^([a-z0-9_-]+)_api$/i)
 		if (apiMatch) {
 			const provider = apiMatch[1].toLowerCase()
+			assertKeys(args, ['url', 'method', 'body', 'headers', 'appId', 'account'])
 			const result = await api.proxy.request({ ...args, provider }, token)
 			return { content: formatContent(result) }
 		}

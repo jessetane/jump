@@ -1,7 +1,7 @@
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy } from '../policy.js'
-import { assertUpstreamHost, serializeFormBody, validateBaseUrl } from '../util.js'
+import { assertKeys, assertUpstreamHost, serializeFormBody, validateBaseUrl } from '../util.js'
 
 export {
 	request,
@@ -248,16 +248,20 @@ async function executeUpstream ({ credentials, url, method = 'GET', body, header
 	return result
 }
 
-async function request ({ provider: providerName = 'google', url, method = 'GET', body, headers, appId, account, raw = false } = {}, auth) {
-	if (!url) {
-		const err = new Error('URL is required')
-		err.status = 400
-		throw err
-	}
+const PROXY_REQUEST_KEYS = ['provider', 'url', 'method', 'body', 'headers', 'appId', 'account']
+
+async function request (opts = {}, auth, { raw = false } = {}) {
 	const session = db.tokens.resolveSession(auth)
 	if (!session) {
 		const err = new Error('Authentication required')
 		err.status = 401
+		throw err
+	}
+	assertKeys(opts, PROXY_REQUEST_KEYS)
+	const { provider: providerName = 'google', url, method = 'GET', body, headers, appId, account } = opts
+	if (!url) {
+		const err = new Error('URL is required')
+		err.status = 400
 		throw err
 	}
 	const start = Date.now()

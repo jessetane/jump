@@ -20,6 +20,7 @@ export {
 	hasPathTraversal,
 	parseAccountSpec,
 	isPlainObject,
+	assertKeys,
 	tightenFileMode,
 	requireBoolean
 }
@@ -55,6 +56,22 @@ function isPlainObject (val) {
 	if (!val || typeof val !== 'object' || Array.isArray(val) || ArrayBuffer.isView(val)) return false
 	const proto = Object.getPrototypeOf(val)
 	return proto === Object.prototype || proto === null
+}
+
+function assertKeys (opts, allowed) {
+	if (opts === undefined || opts === null) return
+	if (!isPlainObject(opts)) {
+		const err = new Error('Options must be a JSON object')
+		err.status = 400
+		throw err
+	}
+	for (const key of Object.keys(opts)) {
+		if (opts[key] !== undefined && !allowed.includes(key)) {
+			const err = new Error(`Unknown parameter "${key}"`)
+			err.status = 400
+			throw err
+		}
+	}
 }
 
 function tightenFileMode (filePath) {
