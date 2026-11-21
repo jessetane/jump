@@ -6966,6 +6966,15 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 	assert.equal(regRes.status, 201)
 	const { client_id: registeredClientId } = await regRes.json()
 	assert.equal(deriveClientName(registeredClientId), 'Claude Code', 'Stateless DCR client_id preserves client_name')
+	for (const badBody of ['null', '[]', '"string"']) {
+		const badRegRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/register`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: badBody
+		})
+		assert.equal(badRegRes.status, 400, `POST /oauth/register must reject ${badBody} with 400`)
+		assert.equal((await badRegRes.json()).error, 'invalid_client_metadata')
+	}
 	const authPage = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize?client_id=${encodeURIComponent(registeredClientId)}&redirect_uri=${encodeURIComponent('http://127.0.0.1:9999/cb')}&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256`)
 	assert.equal(authPage.status, 200)
 	assert.match(await authPage.text(), /"clientName":"Claude Code"/)

@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import * as db from './db/index.js'
 import { getProvider, listAuthProviders, requireAuthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
-import { getBody, getBaseUrl, getClientIp, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
+import { getBody, getBaseUrl, getClientIp, isPlainObject, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
 
 export {
 	handleOauth,
@@ -221,6 +221,10 @@ async function handleRegister (req, res) {
 		body = rawBody ? JSON.parse(rawBody) : {}
 	} catch {
 		sendJson(res, { error: 'invalid_client_metadata', error_description: 'Invalid JSON body' }, 400)
+		return
+	}
+	if (!isPlainObject(body)) {
+		sendJson(res, { error: 'invalid_client_metadata', error_description: 'JSON body must be an object' }, 400)
 		return
 	}
 	const rawRedirects = body.redirect_uris
@@ -981,7 +985,7 @@ function parseTokenParams (rawBody, req) {
 			err.status = 400
 			throw err
 		}
-		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+		if (!isPlainObject(parsed)) {
 			const err = new Error('Invalid JSON body')
 			err.status = 400
 			throw err
