@@ -1401,6 +1401,28 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 			setTimeout(() => res.socket?.destroy(), 10)
 			return
 		}
+		if (req.url === '/slow-drain-disconnect') {
+			res.statusCode = 200
+			res.setHeader('content-type', 'application/octet-stream')
+			const chunk = Buffer.alloc(256 * 1024, 0x43)
+			let closed = false
+			res.on('close', () => { closed = true })
+			for (let i = 0; i < 128 && !closed && !res.destroyed; i++) {
+				if (!res.write(chunk)) {
+					await new Promise(resolve => {
+						const done = () => {
+							res.off('drain', done)
+							res.off('close', done)
+							resolve()
+						}
+						res.once('drain', done)
+						res.once('close', done)
+					})
+				}
+			}
+			if (!closed && !res.destroyed) res.end()
+			return
+		}
 		if (req.url === '/head-303') {
 			res.writeHead(303, { location: '/head-303-dest' })
 			res.end()
@@ -1608,6 +1630,27 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 		assert.equal(upgradeMcp.isError, true, '101 Switching Protocols must reject cleanly with 502 instead of hanging forever')
 		const forbiddenConnect = await executeTool('comp_api', { url: '/gzip', method: 'CONNECT' }, s.token)
 		assert.equal(forbiddenConnect.isError, true, 'CONNECT method must be rejected upfront')
+		await new Promise((resolve, reject) => {
+			const sock = net.createConnection({ host: '127.0.0.1', port: addr.port }, () => {
+				sock.write(`GET /api/comp/slow-drain-disconnect HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${s.token}\r\nConnection: close\r\n\r\n`)
+			})
+			sock.once('data', () => {
+				sock.pause()
+				setTimeout(() => {
+					sock.destroy()
+					resolve()
+				}, 80)
+			})
+			sock.on('error', reject)
+		})
+		let disconnectLog = null
+		for (let i = 0; i < 50; i++) {
+			disconnectLog = db.logs.listByUserId(u.id, { limit: 10 }).find(l => l.url.endsWith('/slow-drain-disconnect'))
+			if (disconnectLog) break
+			await new Promise(resolve => setTimeout(resolve, 10))
+		}
+		assert.ok(disconnectLog, 'Backpressured stream disconnect must exit drain wait and record log cleanly')
+		assert.match(disconnectLog.error || '', /Downstream client disconnected/i)
 		process.env.UPSTREAM_TIMEOUT_MS = '180'
 		const activeTrickleRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/active-trickle`, {
 			headers: { authorization: `Bearer ${s.token}` }

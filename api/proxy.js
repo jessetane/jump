@@ -725,13 +725,16 @@ async function stream (opts = {}, auth, req, res) {
 		}
 		const errorChunks = []
 		let errorBytes = 0
+		const drainAbort = new AbortController()
 		const onResClose = () => {
 			if (!upstreamRes.readableEnded) upstreamRes.destroy()
+			drainAbort.abort()
 		}
 		res.once('close', onResClose)
 		try {
 			for await (const chunk of upstreamRes) {
 				if (chunk.byteLength === 0) continue
+				if (drainAbort.signal.aborted) break
 				commitHeaders()
 				if (status >= 400 && errorBytes < 512) {
 					const slice = chunk.subarray(0, 512 - errorBytes)
@@ -739,12 +742,20 @@ async function stream (opts = {}, auth, req, res) {
 					errorBytes += slice.byteLength
 				}
 				if (!res.write(chunk)) {
-					await once(res, 'drain')
+					await once(res, 'drain', { signal: drainAbort.signal })
 				}
+			}
+			if (drainAbort.signal.aborted) {
+				throw new Error('Downstream client disconnected')
 			}
 			commitHeaders()
 			res.end()
 		} catch (err) {
+			if (drainAbort.signal.aborted) {
+				res.destroy()
+				recordLog(status, 'Downstream client disconnected')
+				return
+			}
 			normalizeUpstreamError(err)
 			if (!res.headersSent) throw err
 			res.destroy(err)
