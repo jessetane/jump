@@ -113,15 +113,18 @@ function createDecompressTransform (encoding) {
 
 async function readResponseBody (source, maxBytes) {
 	if (!source) return Buffer.alloc(0)
-	const encoding = typeof source.headers?.['content-encoding'] === 'string'
-		? source.headers['content-encoding'].split(',')[0].trim().toLowerCase()
-		: ''
-	const needsDecode = Boolean(encoding && encoding !== 'identity')
-	if (needsDecode && !createDecompressor(encoding)) {
-		const err = new Error(`Unsupported upstream Content-Encoding: ${encoding}`)
-		err.status = 502
-		source.destroy()
-		throw err
+	const rawEncoding = source.headers?.['content-encoding']
+	const codings = (Array.isArray(rawEncoding) ? rawEncoding.join(',') : typeof rawEncoding === 'string' ? rawEncoding : '')
+		.split(',')
+		.map(s => s.trim().toLowerCase())
+		.filter(s => s && s !== 'identity')
+	for (const coding of codings) {
+		if (!createDecompressor(coding)) {
+			const err = new Error(`Unsupported upstream Content-Encoding: ${coding}`)
+			err.status = 502
+			source.destroy()
+			throw err
+		}
 	}
 	const chunks = []
 	let totalBytes = 0
@@ -138,11 +141,7 @@ async function readResponseBody (source, maxBytes) {
 		}
 	})
 	try {
-		if (needsDecode) {
-			await pipeline(source, createDecompressTransform(encoding), collector)
-		} else {
-			await pipeline(source, collector)
-		}
+		await pipeline(source, ...codings.reverse().map(c => createDecompressTransform(c)), collector)
 	} catch (err) {
 		throw normalizeUpstreamError(err)
 	}

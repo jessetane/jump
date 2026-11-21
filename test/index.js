@@ -1326,6 +1326,17 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 	const withinLimit = Readable.from([Buffer.from('hello '), Buffer.from('world')])
 	const buf = await readResponseBody(withinLimit, 1000)
 	assert.equal(buf.toString('utf8'), 'hello world')
+	const stackedGz = zlib.gzipSync(Buffer.from('stacked-ok'))
+	const stackedGzBr = zlib.brotliCompressSync(stackedGz)
+	const idGzStream = Object.assign(Readable.from([stackedGz]), { headers: { 'content-encoding': 'identity, gzip' } })
+	assert.equal((await readResponseBody(idGzStream, 1000)).toString('utf8'), 'stacked-ok')
+	const gzBrStream = Object.assign(Readable.from([stackedGzBr]), { headers: { 'content-encoding': 'gzip, br' } })
+	assert.equal((await readResponseBody(gzBrStream, 1000)).toString('utf8'), 'stacked-ok')
+	const unknownStacked = Object.assign(Readable.from([stackedGz]), { headers: { 'content-encoding': 'gzip, bogus' } })
+	await assert.rejects(
+		() => readResponseBody(unknownStacked, 1000),
+		err => err.status === 502 && /Unsupported upstream Content-Encoding: bogus/.test(err.message)
+	)
 	const addr = server.address()
 	const gzJson = zlib.gzipSync(Buffer.from(JSON.stringify({ compressed: 'gzip-ok' })))
 	const brJson = zlib.brotliCompressSync(Buffer.from(JSON.stringify({ compressed: 'br-ok' })))
