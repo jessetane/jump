@@ -8,7 +8,7 @@ import { handleMcp } from './mcp.js'
 import { handleRest } from './rest.js'
 import { listAuthProviders } from './providers/index.js'
 import * as db from './db/index.js'
-import { getBaseUrl, sendJson, sendHtml } from './util.js'
+import { getBaseUrl, getClientIp, sendJson, sendHtml } from './util.js'
 
 export { server, bootstrapLocalAdmin }
 
@@ -19,6 +19,33 @@ const port = process.env.PORT || '8080'
 const corsOrigin = process.env.CORS_ORIGIN || '*'
 
 const CORS_OAUTH_PATHS = new Set(['/oauth/token', '/oauth/register', '/oauth/revoke'])
+const RATE_WINDOW_MS = 60000
+const MAX_RATE_BUCKETS = 10000
+const oauthRateBuckets = new Map()
+
+function checkOauthRateLimit (req, res) {
+	const limit = Number(process.env.OAUTH_RATE_LIMIT) || 60
+	const ip = getClientIp(req) || 'unknown'
+	const now = Date.now()
+	let entry = oauthRateBuckets.get(ip)
+	if (!entry || entry.resetAt <= now) {
+		if (!entry && oauthRateBuckets.size >= MAX_RATE_BUCKETS) {
+			for (const [k, v] of oauthRateBuckets) {
+				if (v.resetAt <= now) oauthRateBuckets.delete(k)
+			}
+			if (oauthRateBuckets.size >= MAX_RATE_BUCKETS) {
+				oauthRateBuckets.delete(oauthRateBuckets.keys().next().value)
+			}
+		}
+		entry = { count: 0, resetAt: now + RATE_WINDOW_MS }
+		oauthRateBuckets.set(ip, entry)
+	}
+	entry.count++
+	if (entry.count <= limit) return true
+	const retryAfter = Math.max(1, Math.ceil((entry.resetAt - now) / 1000))
+	sendJson(res, { error: 'Too many requests' }, 429, { 'retry-after': String(retryAfter) })
+	return false
+}
 
 function isCorsRoute (pathname, method) {
 	if (pathname === '/') return method === 'POST' || method === 'OPTIONS'
@@ -84,7 +111,12 @@ const server = http.createServer(async (req, res) => {
 			await handleMcp(req, res, token)
 			return
 		}
-		if (pathname.startsWith('/oauth/') || pathname.startsWith('/providers/') || pathname.startsWith('/.well-known/')) {
+		if (pathname.startsWith('/oauth/') || pathname.startsWith('/providers/')) {
+			if (!checkOauthRateLimit(req, res)) return
+			await handleOauth(req, res, { pathname, url, query })
+			return
+		}
+		if (pathname.startsWith('/.well-known/')) {
 			await handleOauth(req, res, { pathname, url, query })
 			return
 		}

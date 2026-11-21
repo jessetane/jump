@@ -22,6 +22,7 @@ process.env.APP_URL = ''
 process.env.GOOGLE_CLIENT_ID = 'test-client-id'
 process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret'
 process.env.ALLOWED_REDIRECT_DOMAINS = 'chatgpt.com,*.antigravity.google,antigravity,cursor,vscode'
+process.env.OAUTH_RATE_LIMIT = '10000'
 
 fs.rmSync(testDbPath, { force: true })
 fs.rmSync(`${testDbPath}-wal`, { force: true })
@@ -6580,6 +6581,32 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 	abortedStream.push(Buffer.from('partial'))
 	abortedStream.destroy()
 	await assert.rejects(rawPromise, /Request stream closed prematurely/)
+	const origRateLimit = process.env.OAUTH_RATE_LIMIT
+	process.env.OAUTH_RATE_LIMIT = '3'
+	try {
+		for (let i = 0; i < 3; i++) {
+			const okRateRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize`, {
+				headers: { 'x-forwarded-for': '198.51.100.77' }
+			})
+			assert.equal(okRateRes.status, 200)
+		}
+		const limitedRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize`, {
+			headers: { 'x-forwarded-for': '198.51.100.77' }
+		})
+		assert.equal(limitedRes.status, 429, '4th request within window from same IP is rate-limited with 429')
+		assert.ok(Number(limitedRes.headers.get('retry-after')) >= 1)
+		assert.deepEqual(await limitedRes.json(), { error: 'Too many requests' })
+		const otherIpRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect`, {
+			headers: { 'x-forwarded-for': '198.51.100.78' }
+		})
+		assert.equal(otherIpRes.status, 200, 'Different IP has an independent rate-limit bucket')
+		const healthOtherRes = await fetch(`http://127.0.0.1:${addr.port}/api/health`, {
+			headers: { 'x-forwarded-for': '198.51.100.77' }
+		})
+		assert.equal(healthOtherRes.status, 200, 'Non-OAuth routes are unaffected by OAuth rate limit')
+	} finally {
+		process.env.OAUTH_RATE_LIMIT = origRateLimit
+	}
 	const regRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/register`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
