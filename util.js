@@ -16,6 +16,8 @@ export {
 	redirect,
 	isLoopbackHost,
 	isAllowedUpstreamHost,
+	blockedHostError,
+	stripTrailingDot,
 	lookupUpstreamHost,
 	validateBaseUrl,
 	resolveTargetUrl,

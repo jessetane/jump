@@ -8,7 +8,7 @@ import zlib from 'node:zlib'
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy, hasBodyPolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, assertKeys, getRawBody, isAllowedUpstreamHost, lookupUpstreamHost, serializeFormBody, validateBaseUrl } from '../util.js'
+import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, isAllowedUpstreamHost, lookupUpstreamHost, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
 
 export {
 	formatLinkedApps,
@@ -223,16 +223,18 @@ function attachAuth (hopUrl, baseHeaders, authHeaders, queryEntries) {
 	return { url: hopUrl.toString(), headers: hopHeaders }
 }
 
+function isFormContentType (contentType) {
+	return String(contentType || '').split(';')[0].trim().toLowerCase() === 'application/x-www-form-urlencoded'
+}
+
 function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeoutMs }) {
 	const parsed = new URL(targetUrl)
 	if (!isAllowedUpstreamHost(parsed.hostname)) {
-		const err = new Error(`Blocked unsafe upstream host: ${parsed.hostname}`)
-		err.status = 403
-		return Promise.reject(err)
+		return Promise.reject(blockedHostError(parsed.hostname))
 	}
 	const isHttps = parsed.protocol === 'https:'
 	const transport = isHttps ? https : http
-	const cleanHost = parsed.hostname.replace(/^\[|\]$/g, '').replace(/\.+$/, '')
+	const cleanHost = stripTrailingDot(parsed.hostname)
 	const servername = isHttps && cleanHost && !net.isIP(cleanHost) ? cleanHost : undefined
 	return new Promise((resolve, reject) => {
 		let settled = false
@@ -312,8 +314,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, header
 				reqBody = Buffer.from(body.buffer, body.byteOffset, body.byteLength)
 			}
 		} else if (typeof body === 'object') {
-			const ct = (baseHeaders['content-type'] || '').split(';')[0].trim().toLowerCase()
-			if (ct === 'application/x-www-form-urlencoded') {
+			if (isFormContentType(baseHeaders['content-type'])) {
 				reqBody = Buffer.from(serializeFormBody(body), 'utf8')
 			} else {
 				baseHeaders['content-type'] ||= 'application/json'
@@ -541,7 +542,7 @@ function resolveUpstreamContext (session, provider, rawApp, url, headers) {
 			}
 		}
 	}
-	const objectFormat = contentType.split(';')[0].trim().toLowerCase() === 'application/x-www-form-urlencoded' ? 'form' : 'json'
+	const objectFormat = isFormContentType(contentType) ? 'form' : 'json'
 	const sharePolicy = targetLink.app?.type === 'share' ? targetLink.app.credentials?.policy : null
 	const inspectsBody = hasBodyPolicy(sharePolicy) || hasBodyPolicy(targetLink.policy)
 	const policies = [
