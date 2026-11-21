@@ -1656,6 +1656,14 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 		assert.equal(bodyPolicyTooLarge.status, 413, 'REST stream() caps upload at 1 MB when body policy inspection is active')
 		const badHdrMcp = await executeTool('comp_api', { url: '/gzip', headers: { 'x-bad': 'val\r\ninjected' } }, s.token)
 		assert.equal(badHdrMcp.isError, true)
+		await assert.rejects(
+			() => api.proxy.request({ provider: 'comp', url: '/gzip', headers: { 'x-bad': 'val\r\ninjected' } }, s.token),
+			err => err.status === 400
+		)
+		await assert.rejects(
+			() => api.proxy.request({ provider: 'comp', url: '/gzip', headers: { 'bad name': 'val' } }, s.token),
+			err => err.status === 400
+		)
 		const badHdrRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/gzip`, {
 			headers: { authorization: `Bearer ${s.token}`, 'x-bad': 'val' }
 		})

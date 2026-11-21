@@ -155,7 +155,15 @@ function sanitizeCallerHeaders (headers, extraStrip = null) {
 		if (v === undefined || v === null) continue
 		const lower = k.toLowerCase()
 		if (STRIPPED_REQUEST_HEADERS.has(lower) || extraStrip?.has(lower)) continue
-		clean[lower] = Array.isArray(v) ? v.join(', ') : String(v)
+		const val = Array.isArray(v) ? v.join(', ') : String(v)
+		try {
+			http.validateHeaderName(lower)
+			http.validateHeaderValue(lower, val)
+		} catch (err) {
+			err.status = 400
+			throw err
+		}
+		clean[lower] = val
 	}
 	return clean
 }
@@ -247,9 +255,6 @@ function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeou
 				resolve(res)
 			})
 		} catch (err) {
-			if (err?.code === 'ERR_INVALID_CHAR' || err?.code === 'ERR_HTTP_INVALID_HEADER_VALUE') {
-				err.status = 400
-			}
 			fail(err)
 			return
 		}
