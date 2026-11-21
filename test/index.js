@@ -6675,7 +6675,7 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 	assert.equal(rootHtmlRes.headers.get('content-security-policy'), "frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
 	assert.equal(server.headersTimeout, 15000)
 	assert.equal(server.requestTimeout, 0)
-	assert.equal(server.timeout, 60000)
+	assert.equal(server.timeout, 75000)
 	const badUrlRaw = await new Promise((resolve, reject) => {
 		const sock = net.createConnection({ host: '127.0.0.1', port: addr.port }, () => {
 			sock.end('GET http://[bad]/foo HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n')
