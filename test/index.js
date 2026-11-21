@@ -2628,11 +2628,47 @@ test('rest api /api/whoami, /api/sessions, and /api/sessions/:id', async () => {
 	const delData = await delSpecificRes.json()
 	assert.equal(delData.revoked, true)
 	assert.equal(db.tokens.get(session2.id), null)
-	const delAllRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
+	const delMissingAllOthersRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
 		method: 'DELETE',
 		headers: { authorization: `Bearer ${session1.token}` }
 	})
-	assert.equal(delAllRes.status, 200)
+	assert.equal(delMissingAllOthersRes.status, 400, 'Bare DELETE /api/sessions without allOthers=true must fail 400')
+	assert.ok(db.tokens.get(session1.id), 'Bare DELETE /api/sessions must not revoke current session')
+	const delBodySessionRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${session1.token}`, 'content-type': 'application/json' },
+		body: JSON.stringify({ allOthers: true })
+	})
+	assert.equal(delBodySessionRes.status, 400, 'DELETE /api/sessions must reject request body')
+	const delQuerySessionIdRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions?sessionId=${session1.id}`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${session1.token}` }
+	})
+	assert.equal(delQuerySessionIdRes.status, 400, 'DELETE /api/sessions?sessionId=... must be rejected in favor of /api/sessions/:id')
+	for (const badSlash of ['/api/sessions/', '/api/apps/', '/api/logins/']) {
+		const slashRes = await fetch(`http://127.0.0.1:${addr.port}${badSlash}`, {
+			method: 'DELETE',
+			headers: { authorization: `Bearer ${session1.token}` }
+		})
+		assert.equal(slashRes.status, 404, `Trailing slash ${badSlash} must return 404`)
+	}
+	const putSessionRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${session1.id}`, {
+		method: 'PUT',
+		headers: { authorization: `Bearer ${session1.token}`, 'content-type': 'application/json' },
+		body: JSON.stringify({ name: 'Nope' })
+	})
+	assert.equal(putSessionRes.status, 405, 'PUT alias must be rejected with 405; use PATCH')
+	const emptyRevokeMcp = await executeTool('admin', { action: 'revoke_session', sessionId: '' }, session1.token)
+	assert.equal(emptyRevokeMcp.isError, true, 'revoke_session with empty sessionId must fail 400')
+	assert.match(emptyRevokeMcp.content[0].text, /sessionId must be a non-empty string/)
+	assert.ok(db.tokens.get(session1.id), 'Empty sessionId must never fall back to revoking current session')
+	const emptyUpdateMcp = await executeTool('admin', { action: 'update_session', sessionId: '', rotateToken: true }, session1.token)
+	assert.equal(emptyUpdateMcp.isError, true, 'update_session with empty sessionId must fail 400')
+	const delSelfByIdRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${session1.id}`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${session1.token}` }
+	})
+	assert.equal(delSelfByIdRes.status, 200)
 	assert.equal(db.tokens.get(session1.id), null)
 })
 
@@ -3470,11 +3506,17 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 	}, adminSession.token)
 	assert.equal(lockoutUnlinkRes.isError, true)
 	assert.match(lockoutUnlinkRes.content[0].text, /Cannot unlink your only login key/)
-	const lockoutRestRes = await fetch(`http://127.0.0.1:${addr.port}/api/logins?provider=google`, {
+	const soleLogin = db.logins.listByUserId(user.id)[0]
+	const lockoutCollectionRes = await fetch(`http://127.0.0.1:${addr.port}/api/logins`, {
 		method: 'DELETE',
 		headers: { authorization: `Bearer ${adminSession.token}` }
 	})
-	assert.equal(lockoutRestRes.status, 400, 'DELETE /api/logins must reject removing the sole login key with 400')
+	assert.equal(lockoutCollectionRes.status, 405, 'DELETE /api/logins collection endpoint must be retired (405)')
+	const lockoutRestRes = await fetch(`http://127.0.0.1:${addr.port}/api/logins/${encodeURIComponent(soleLogin.id)}`, {
+		method: 'DELETE',
+		headers: { authorization: `Bearer ${adminSession.token}` }
+	})
+	assert.equal(lockoutRestRes.status, 400, 'DELETE /api/logins/:id must reject removing the sole login key with 400')
 	const whoamiRes = await executeTool('admin', { action: 'whoami' }, adminSession.token)
 	const whoamiData = JSON.parse(whoamiRes.content[0].text)
 	assert.equal(whoamiData.user.name, undefined, 'users.name is retired from whoami')
@@ -4012,7 +4054,8 @@ test('login-key lifecycle (link_login / unlink_login), REST /api/logins, configu
 		assert.match(await conflictCbRes.text(), /already registered to another user/)
 		assert.equal(db.tokens.get(conflictPendingShare.id).userId, null, '409 link_login conflict must have zero side effects and never claim pending shares for another user')
 		db.tokens.remove(conflictSideEffectApp.id)
-		const unlinkGoogleRes = await fetch(`http://127.0.0.1:${addr.port}/api/logins?provider=google`, {
+		const googleLoginToUnlink = db.logins.listByUserId(user.id).find(l => l.provider === 'google')
+		const unlinkGoogleRes = await fetch(`http://127.0.0.1:${addr.port}/api/logins/${encodeURIComponent(googleLoginToUnlink.id)}`, {
 			method: 'DELETE',
 			headers: { authorization: `Bearer ${adminSession.token}` }
 		})
@@ -5981,13 +6024,20 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 		assert.equal(restShareData.shared, true)
 		assert.equal(restShareData.userId, null)
 		assert.equal(restShareData.account, 'chloe@acme.com')
-		const restUnshareRes = await fetch(`http://127.0.0.1:${addr.port}/api/shares?appId=${encodeURIComponent(sarahApp.id)}&account=${encodeURIComponent('chloe@acme.com')}`, {
+		const restUnshareWithBodyRes = await fetch(`http://127.0.0.1:${addr.port}/api/shares?appId=${encodeURIComponent(sarahApp.id)}&account=${encodeURIComponent('chloe@acme.com')}`, {
 			method: 'DELETE',
 			headers: {
 				authorization: `Bearer ${sarahAdmin.token}`,
 				'content-type': 'text/plain'
 			},
-			body: 'non-json-payload-ignored-by-delete'
+			body: 'non-json-payload-rejected-by-delete'
+		})
+		assert.equal(restUnshareWithBodyRes.status, 400, 'DELETE with a request body must fail 400 rather than ignoring it')
+		const restUnshareRes = await fetch(`http://127.0.0.1:${addr.port}/api/shares?appId=${encodeURIComponent(sarahApp.id)}&account=${encodeURIComponent('chloe@acme.com')}`, {
+			method: 'DELETE',
+			headers: {
+				authorization: `Bearer ${sarahAdmin.token}`
+			}
 		})
 		assert.equal(restUnshareRes.status, 200)
 		const restUnshareData = await restUnshareRes.json()
@@ -6016,8 +6066,13 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 				account: 'body-unshare@acme.com'
 			})
 		})
-		assert.equal(restUnshareBodyRes.status, 200, 'DELETE /api/shares supports JSON body fallback')
-		assert.equal((await restUnshareBodyRes.json()).unshared, true)
+		assert.equal(restUnshareBodyRes.status, 400, 'DELETE /api/shares rejects JSON body; use query params')
+		const restUnshareCleanRes = await fetch(`http://127.0.0.1:${addr.port}/api/shares?appId=${encodeURIComponent(sarahApp.id)}&account=${encodeURIComponent('body-unshare@acme.com')}`, {
+			method: 'DELETE',
+			headers: { authorization: `Bearer ${sarahAdmin.token}` }
+		})
+		assert.equal(restUnshareCleanRes.status, 200)
+		assert.equal((await restUnshareCleanRes.json()).unshared, true)
 		await fetch(`http://127.0.0.1:${addr.port}/api/links`, {
 			method: 'POST',
 			headers: {
@@ -6040,8 +6095,13 @@ test('shared apps: share_app, unshare_app, ceiling policy enforcement, audit log
 				appId: sarahApp.id
 			})
 		})
-		assert.equal(restUnlinkBodyRes.status, 200, 'DELETE /api/links supports JSON body fallback')
-		assert.equal((await restUnlinkBodyRes.json()).unlinked, true)
+		assert.equal(restUnlinkBodyRes.status, 400, 'DELETE /api/links rejects JSON body; use query params')
+		const restUnlinkCleanRes = await fetch(`http://127.0.0.1:${addr.port}/api/links?sessionId=${encodeURIComponent(sarahWorker.id)}&appId=${encodeURIComponent(sarahApp.id)}`, {
+			method: 'DELETE',
+			headers: { authorization: `Bearer ${sarahAdmin.token}` }
+		})
+		assert.equal(restUnlinkCleanRes.status, 200)
+		assert.equal((await restUnlinkCleanRes.json()).unlinked, true)
 		const unshareDanRes = await executeTool('admin', {
 			action: 'unshare_app',
 			appId: sarahApp.id,
@@ -8492,7 +8552,17 @@ test('strict unknown parameter and empty update rejection across MCP and REST', 
 		body: JSON.stringify({ appId: 'different-id', name: 'Renamed' })
 	})
 	assert.equal(conflictingIdRes.status, 400)
-	assert.match((await conflictingIdRes.json()).error, /Conflicting appId/)
+	assert.match((await conflictingIdRes.json()).error, /appId must be passed in the URL path/)
+	const duplicateIdRes = await fetch(`http://127.0.0.1:${addr.port}/api/apps/${encodeURIComponent(app.id)}`, {
+		method: 'PATCH',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ appId: app.id, name: 'Renamed' })
+	})
+	assert.equal(duplicateIdRes.status, 400)
+	assert.match((await duplicateIdRes.json()).error, /appId must be passed in the URL path/)
 })
 
 test('teardown server', (t, done) => {

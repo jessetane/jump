@@ -144,11 +144,10 @@ GET    /.well-known/oauth-authorization-server  # rfc 8414 discovery
 GET    /api/health                              # health check
 GET    /api/whoami                              # session & linked apps info
 POST   /api/logins                              # link sign-in provider (admin)
-DELETE /api/logins                              # unlink sign-in provider (admin)
-DELETE /api/logins/:id                          # unlink sign-in provider by id (admin)
+DELETE /api/logins/:id                          # unlink sign-in provider (admin)
 GET    /api/sessions                            # list sessions (admin)
 POST   /api/sessions                            # create session (admin)
-DELETE /api/sessions                            # revoke session
+DELETE /api/sessions?allOthers=true             # revoke all other sessions (admin)
 GET    /api/sessions/:id                        # get session
 PATCH  /api/sessions/:id                        # update session
 DELETE /api/sessions/:id                        # revoke session
@@ -157,9 +156,9 @@ POST   /api/apps                                # connect app (admin)
 PATCH  /api/apps/:id                            # update app (admin)
 DELETE /api/apps/:id                            # disconnect app (admin)
 POST   /api/shares                              # share app with user (admin)
-DELETE /api/shares                              # unshare app from user (admin)
+DELETE /api/shares?appId=...&account=...        # unshare app from user (admin)
 POST   /api/links                               # link app to session (admin)
-DELETE /api/links                               # unlink app from session (admin)
+DELETE /api/links?sessionId=...&appId=...       # unlink app from session (admin)
 GET    /api/logs                                # list usage logs
 ALL    /api/:provider/*                         # transparent rest proxy
 ```

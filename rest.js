@@ -1,8 +1,17 @@
 import * as api from './api/index.js'
-import { assertKeys, getBody, getBaseUrl, isPlainObject, sendJson, sendText } from './util.js'
+import { assertKeys, getBody, getBaseUrl, isPlainObject, requireBoolean, sendJson, sendText } from './util.js'
 
 export {
 	handleRest
+}
+
+function assertNoBody (req) {
+	const len = Number(req.headers['content-length'])
+	if (len > 0 || req.headers['transfer-encoding'] !== undefined) {
+		const err = new Error(`${req.method} requests do not accept a request body`)
+		err.status = 400
+		throw err
+	}
 }
 
 async function parseJsonBody (req) {
@@ -22,6 +31,16 @@ async function parseJsonBody (req) {
 		throw err
 	}
 	return parsed
+}
+
+function decodePathParam (raw) {
+	try {
+		return decodeURIComponent(raw)
+	} catch {
+		const err = new Error('Malformed URI path parameter')
+		err.status = 400
+		throw err
+	}
 }
 
 async function handleProviderProxy (req, res, provider, targetPath, url, token) {
@@ -48,12 +67,8 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 	}, token, req, res)
 }
 
-async function parseQueryOrBody (req, query) {
-	return Object.keys(query).length > 0 ? query : parseJsonBody(req)
-}
-
-const routes = {
-	'/api/health': {
+const resources = {
+	health: {
 		GET (req, res, { query }) {
 			assertKeys(query, [])
 			sendText(res, 'ok\n')
@@ -63,178 +78,149 @@ const routes = {
 			sendText(res, '')
 		}
 	},
-	'/api/whoami': {
+	whoami: {
 		async GET (req, res, { token, query }) {
-			const result = await api.auth.whoami(token, query, getBaseUrl(req))
-			sendJson(res, result)
+			sendJson(res, await api.auth.whoami(token, query, getBaseUrl(req)))
 		}
 	},
-	'/api/logins': {
-		async POST (req, res, { token, query }) {
-			assertKeys(query, [])
-			const body = await parseJsonBody(req)
-			const result = await api.auth.linkLogin(token, body, getBaseUrl(req))
-			sendJson(res, result)
+	logins: {
+		async POST (req, res, { token, body }) {
+			sendJson(res, await api.auth.linkLogin(token, body, getBaseUrl(req)))
+		},
+		item: {
+			idKey: 'loginId',
+			async DELETE (req, res, { token, query, id }) {
+				assertKeys(query, [])
+				sendJson(res, await api.auth.unlinkLogin(token, { loginId: id }))
+			}
+		}
+	},
+	sessions: {
+		async GET (req, res, { token, query }) {
+			sendJson(res, await api.auth.listSessions(token, query))
+		},
+		async POST (req, res, { token, body }) {
+			sendJson(res, await api.auth.createSession(token, body), 201)
 		},
 		async DELETE (req, res, { token, query }) {
-			const opts = await parseQueryOrBody(req, query)
-			const result = await api.auth.unlinkLogin(token, opts)
-			sendJson(res, result)
+			assertKeys(query, ['allOthers'])
+			if (requireBoolean(query.allOthers, 'allOthers') !== true) {
+				const err = new Error('allOthers=true is required on DELETE /api/sessions; use DELETE /api/sessions/:id to revoke a specific session')
+				err.status = 400
+				throw err
+			}
+			sendJson(res, await api.auth.revokeSession(token, { allOthers: true }))
+		},
+		item: {
+			idKey: 'sessionId',
+			async GET (req, res, { token, query, id }) {
+				assertKeys(query, [])
+				sendJson(res, await api.auth.getSession(token, { sessionId: id }))
+			},
+			async PATCH (req, res, { token, body, id }) {
+				sendJson(res, await api.auth.updateSession(token, { ...body, sessionId: id }))
+			},
+			async DELETE (req, res, { token, query, id }) {
+				assertKeys(query, [])
+				sendJson(res, await api.auth.revokeSession(token, { sessionId: id }))
+			}
 		}
 	},
-	'/api/sessions': {
+	apps: {
 		async GET (req, res, { token, query }) {
-			const result = await api.auth.listSessions(token, query)
-			sendJson(res, result)
+			sendJson(res, await api.auth.listApps(token, query))
 		},
-		async POST (req, res, { token, query }) {
-			assertKeys(query, [])
-			const body = await parseJsonBody(req)
-			const result = await api.auth.createSession(token, body)
-			sendJson(res, result, 201)
+		async POST (req, res, { token, body }) {
+			sendJson(res, await api.auth.connectApp(token, body, getBaseUrl(req)), 201)
+		},
+		item: {
+			idKey: 'appId',
+			async PATCH (req, res, { token, body, id }) {
+				sendJson(res, await api.auth.updateApp(token, { ...body, appId: id }))
+			},
+			async DELETE (req, res, { token, query, id }) {
+				assertKeys(query, ['revoke'])
+				sendJson(res, await api.auth.disconnectApp(token, { appId: id, revoke: query.revoke }))
+			}
+		}
+	},
+	links: {
+		async POST (req, res, { token, body }) {
+			sendJson(res, await api.auth.linkApp(token, body), 201)
 		},
 		async DELETE (req, res, { token, query }) {
-			const result = await api.auth.revokeSession(token, query)
-			sendJson(res, result)
+			assertKeys(query, ['sessionId', 'appId'])
+			sendJson(res, await api.auth.unlinkApp(token, query))
 		}
 	},
-	'/api/apps': {
-		async GET (req, res, { token, query }) {
-			const result = await api.auth.listApps(token, query)
-			sendJson(res, result)
-		},
-		async POST (req, res, { token, query }) {
-			assertKeys(query, [])
-			const body = await parseJsonBody(req)
-			const result = await api.auth.connectApp(token, body, getBaseUrl(req))
-			sendJson(res, result, 201)
-		}
-	},
-	'/api/links': {
-		async POST (req, res, { token, query }) {
-			assertKeys(query, [])
-			const body = await parseJsonBody(req)
-			const result = await api.auth.linkApp(token, body)
-			sendJson(res, result, 201)
+	shares: {
+		async POST (req, res, { token, body }) {
+			sendJson(res, await api.auth.shareApp(token, body), 201)
 		},
 		async DELETE (req, res, { token, query }) {
-			const opts = await parseQueryOrBody(req, query)
-			const result = await api.auth.unlinkApp(token, opts)
-			sendJson(res, result)
+			assertKeys(query, ['appId', 'account', 'provider'])
+			sendJson(res, await api.auth.unshareApp(token, query))
 		}
 	},
-	'/api/shares': {
-		async POST (req, res, { token, query }) {
-			assertKeys(query, [])
-			const body = await parseJsonBody(req)
-			const result = await api.auth.shareApp(token, body)
-			sendJson(res, result, 201)
-		},
-		async DELETE (req, res, { token, query }) {
-			const opts = await parseQueryOrBody(req, query)
-			const result = await api.auth.unshareApp(token, opts)
-			sendJson(res, result)
-		}
-	},
-	'/api/logs': {
+	logs: {
 		async GET (req, res, { token, query }) {
-			const result = await api.auth.listLogs(token, query)
-			sendJson(res, result)
+			sendJson(res, await api.auth.listLogs(token, query))
 		}
 	}
 }
 
-const RESERVED_API_PROVIDERS = new Set(Object.keys(routes).map(r => r.slice('/api/'.length)))
+const RESERVED_API_PROVIDERS = new Set(Object.keys(resources))
 
-function decodePathParam (raw) {
-	try {
-		return decodeURIComponent(raw)
-	} catch {
-		const err = new Error('Malformed URI path parameter')
-		err.status = 400
+async function dispatchRest (req, res, handlerTable, { token, query, id, idKey }) {
+	const handler = Object.hasOwn(handlerTable, req.method) && typeof handlerTable[req.method] === 'function'
+		? handlerTable[req.method]
+		: null
+	if (!handler) {
+		const err = new Error('Method Not Allowed')
+		err.status = 405
 		throw err
 	}
-}
-
-function assertMatchingPathId (bodyId, pathId, name) {
-	if (bodyId !== undefined && bodyId !== pathId) {
-		const err = new Error(`Conflicting ${name} in URL path and request body`)
-		err.status = 400
-		throw err
+	if (req.method === 'POST' || req.method === 'PATCH') {
+		assertKeys(query, [])
+		const body = await parseJsonBody(req)
+		if (idKey && Object.hasOwn(body, idKey)) {
+			const err = new Error(`${idKey} must be passed in the URL path, not the request body`)
+			err.status = 400
+			throw err
+		}
+		await handler(req, res, { token, query, body, id })
+		return
 	}
+	assertNoBody(req)
+	await handler(req, res, { token, query, id })
 }
 
 async function handleRest (req, res, { pathname, url, query, token }) {
-	if (pathname.startsWith('/api/logins/')) {
-		const loginId = decodePathParam(pathname.slice('/api/logins/'.length))
-		if (req.method === 'DELETE') {
-			assertKeys(query, [])
-			const result = await api.auth.unlinkLogin(token, { loginId })
-			sendJson(res, result)
+	const rawPathname = url?.pathname || pathname
+	const match = rawPathname.match(/^\/api\/([^/]+)(?:\/([^/]+))?$/)
+	if (match) {
+		const [, resourceName, encodedId] = match
+		const resource = resources[resourceName]
+		if (resource) {
+			if (encodedId !== undefined) {
+				if (!resource.item) {
+					const err = new Error('not found')
+					err.status = 404
+					throw err
+				}
+				const id = decodePathParam(encodedId)
+				await dispatchRest(req, res, resource.item, { token, query, id, idKey: resource.item.idKey })
+				return
+			}
+			await dispatchRest(req, res, resource, { token, query })
 			return
 		}
-		const err = new Error('Method Not Allowed')
-		err.status = 405
-		throw err
-	}
-	if (pathname.startsWith('/api/sessions/')) {
-		const sessionId = decodePathParam(pathname.slice('/api/sessions/'.length))
-		if (req.method === 'GET') {
-			assertKeys(query, [])
-			const result = await api.auth.getSession(token, { sessionId })
-			sendJson(res, result)
-			return
-		}
-		if (req.method === 'DELETE') {
-			assertKeys(query, [])
-			const result = await api.auth.revokeSession(token, { sessionId })
-			sendJson(res, result)
-			return
-		}
-		if (req.method === 'PATCH' || req.method === 'PUT') {
-			assertKeys(query, [])
-			const body = await parseJsonBody(req)
-			assertMatchingPathId(body.sessionId, sessionId, 'sessionId')
-			const result = await api.auth.updateSession(token, { ...body, sessionId })
-			sendJson(res, result)
-			return
-		}
-		const err = new Error('Method Not Allowed')
-		err.status = 405
-		throw err
-	}
-	if (pathname.startsWith('/api/apps/')) {
-		const appId = decodePathParam(pathname.slice('/api/apps/'.length))
-		if (req.method === 'PATCH' || req.method === 'PUT') {
-			assertKeys(query, [])
-			const body = await parseJsonBody(req)
-			assertMatchingPathId(body.appId, appId, 'appId')
-			const result = await api.auth.updateApp(token, { ...body, appId })
-			sendJson(res, result)
-			return
-		}
-		if (req.method === 'DELETE') {
-			assertKeys(query, ['revoke'])
-			const result = await api.auth.disconnectApp(token, { appId, revoke: query?.revoke })
-			sendJson(res, result)
-			return
-		}
-		const err = new Error('Method Not Allowed')
-		err.status = 405
-		throw err
-	}
-	const route = routes[pathname]
-	if (route) {
-		const handler = route[req.method]
-		if (!handler) {
-			const err = new Error('Method Not Allowed')
-			err.status = 405
+		if (RESERVED_API_PROVIDERS.has(resourceName.toLowerCase())) {
+			const err = new Error('not found')
+			err.status = 404
 			throw err
 		}
-		await handler(req, res, { token, query })
-		return
 	}
-	const rawPathname = url?.pathname || pathname
 	const restMatch = rawPathname.match(/^\/api\/([a-z0-9_-]+)\/(.+)$/i)
 	if (restMatch) {
 		const provider = restMatch[1].toLowerCase()

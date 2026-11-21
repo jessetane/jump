@@ -240,6 +240,7 @@ async function revokeSession (token, opts = {}) {
 			message: 'No active session found for the provided token.'
 		}
 	}
+	if (sessionId !== undefined) requireNonEmptyString(sessionId, 'sessionId')
 	const shouldRevokeAllOthers = requireBoolean(allOthers, 'allOthers', false)
 	if (shouldRevokeAllOthers) {
 		if (!session.admin) {
@@ -783,6 +784,7 @@ async function updateSession (token, opts = {}) {
 	const session = requireSession(token)
 	assertKeys(opts, ['sessionId', 'name', 'admin', 'rotateToken'])
 	const { sessionId, name, admin, rotateToken } = opts || {}
+	if (sessionId !== undefined) requireNonEmptyString(sessionId, 'sessionId')
 	const targetId = sessionId || session.id
 	if (!session.admin && targetId !== session.id) {
 		const error = new Error('Access denied: session administration requires admin privileges')
