@@ -1537,13 +1537,43 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 					'content-length': String(largeUploadPayload.byteLength)
 				}
 			}, res => {
+				gotResponse = true
 				res.resume()
-				res.on('end', () => resolve({ status: res.statusCode }))
+				res.on('end', () => finish(resolve, { status: res.statusCode }))
+				res.on('close', () => {
+					if (!res.complete) finish(reject, new Error('Response closed before completing'))
+				})
 			})
 			req.on('error', err => {
-				if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') reject(err)
+				if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') finish(reject, err)
 			})
-			req.end(largeUploadPayload)
+			req.on('close', () => {
+				if (!gotResponse) finish(reject, new Error('Request closed before receiving 413 response'))
+			})
+			const writeBody = async () => {
+				try {
+					const chunkSize = 64 * 1024
+					for (let offset = 0; offset < largeUploadPayload.byteLength && !gotResponse && !settled && !req.destroyed; offset += chunkSize) {
+						const slice = largeUploadPayload.subarray(offset, offset + chunkSize)
+						if (!req.write(slice)) {
+							await new Promise(r => {
+								const done = () => {
+									req.off('drain', done)
+									req.off('close', done)
+									r()
+								}
+								req.once('drain', done)
+								req.once('close', done)
+							})
+						}
+						await new Promise(r => setImmediate(r))
+					}
+					if (!gotResponse && !settled && !req.destroyed) req.end()
+				} catch (err) {
+					finish(reject, err)
+				}
+			}
+			writeBody()
 		})
 		assert.equal(bodyPolicyTooLarge.status, 413, 'REST stream() caps upload at 1 MB when body policy inspection is active')
 		const badHdrMcp = await executeTool('comp_api', { url: '/gzip', headers: { 'x-bad': 'val\r\ninjected' } }, s.token)
@@ -6583,6 +6613,21 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 	assert.equal(server.headersTimeout, 15000)
 	assert.equal(server.requestTimeout, 0)
 	assert.equal(server.timeout, 60000)
+	const badUrlRaw = await new Promise((resolve, reject) => {
+		const sock = net.createConnection({ host: '127.0.0.1', port: addr.port }, () => {
+			sock.end('GET http://[bad]/foo HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n')
+		})
+		sock.setTimeout(2000, () => {
+			sock.destroy()
+			reject(new Error('Timed out waiting for 400 on malformed request URL'))
+		})
+		const chunks = []
+		sock.on('data', chunk => chunks.push(chunk))
+		sock.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+		sock.on('error', reject)
+	})
+	assert.match(badUrlRaw, /^HTTP\/1\.1 400 Bad Request/)
+	assert.match(badUrlRaw, /"error": "Invalid request URL"/)
 	const abortedStream = new Readable({ read () {} })
 	const rawPromise = getRawBody(abortedStream)
 	abortedStream.push(Buffer.from('partial'))

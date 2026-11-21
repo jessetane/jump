@@ -61,29 +61,37 @@ function resolveToken (req) {
 
 const server = http.createServer(async (req, res) => {
 	const start = Date.now()
+	let pathname = '(invalid)'
 	res.setHeader('x-content-type-options', 'nosniff')
-	const url = new URL(req.url, 'http://localhost')
-	const pathname = url.pathname.replace(/\/+$/, '') || '/'
 	res.on('finish', () => {
 		if (process.env.NODE_ENV !== 'test') {
 			const duration = Date.now() - start
 			console.log(`[${res.statusCode}] ${req.method} ${pathname} (${duration}ms)`)
 		}
 	})
-	if (isCorsRoute(pathname, req.method)) {
-		res.setHeader('access-control-allow-origin', corsOrigin)
-		res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-		res.setHeader('access-control-allow-headers', 'authorization, content-type, mcp-session-id, mcp-protocol-version, last-event-id, x-api-key, accept')
-		res.setHeader('access-control-expose-headers', 'WWW-Authenticate, Mcp-Session-Id, MCP-Protocol-Version')
-		if (req.method === 'OPTIONS') {
-			res.statusCode = 204
-			res.end()
-			return
-		}
-	}
-	const query = Object.fromEntries(url.searchParams)
-	const token = resolveToken(req)
 	try {
+		let url
+		try {
+			url = new URL(req.url, 'http://localhost')
+		} catch {
+			const err = new Error('Invalid request URL')
+			err.status = 400
+			throw err
+		}
+		pathname = url.pathname.replace(/\/+$/, '') || '/'
+		if (isCorsRoute(pathname, req.method)) {
+			res.setHeader('access-control-allow-origin', corsOrigin)
+			res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+			res.setHeader('access-control-allow-headers', 'authorization, content-type, mcp-session-id, mcp-protocol-version, last-event-id, x-api-key, accept')
+			res.setHeader('access-control-expose-headers', 'WWW-Authenticate, Mcp-Session-Id, MCP-Protocol-Version')
+			if (req.method === 'OPTIONS') {
+				res.statusCode = 204
+				res.end()
+				return
+			}
+		}
+		const query = Object.fromEntries(url.searchParams)
+		const token = resolveToken(req)
 		if (pathname === '/') {
 			if (req.method === 'POST') {
 				await handleMcp(req, res, token)
