@@ -1522,6 +1522,13 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 		})
 		assert.equal(bodyPolicyDenied.status, 403, 'REST stream() buffers and enforces body policy when hasBodyPolicy is true')
 		const bodyPolicyTooLarge = await new Promise((resolve, reject) => {
+			let settled = false
+			let gotResponse = false
+			const finish = (fn, val) => {
+				if (settled) return
+				settled = true
+				fn(val)
+			}
 			const req = http.request(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
 				method: 'POST',
 				headers: {
