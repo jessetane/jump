@@ -1344,6 +1344,7 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 	const gzBomb = zlib.gzipSync(Buffer.alloc(2 * 1024 * 1024, 0x41))
 	let lastAcceptEncoding = null
 	let upstreamUploadAborted = false
+	let earlyRejectReceivedBytes = 0
 	const compUpstream = http.createServer(async (req, res) => {
 		lastAcceptEncoding = req.headers['accept-encoding'] || null
 		if (req.url === '/gzip') {
@@ -1465,6 +1466,18 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 				if (!res.writableEnded) {
 					res.statusCode = 200
 					res.end('ok')
+				}
+			})
+			return
+		}
+		if (req.url === '/upload-early-reject') {
+			req.on('error', () => {})
+			req.on('data', chunk => {
+				earlyRejectReceivedBytes += chunk.byteLength
+				if (!res.headersSent) {
+					res.writeHead(413, { 'content-type': 'application/json' })
+					res.write('{"error":')
+					setTimeout(() => res.end('"too big"}'), 20)
 				}
 			})
 			return
@@ -1695,6 +1708,58 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 			await new Promise(resolve => setTimeout(resolve, 10))
 		}
 		assert.equal(upstreamUploadAborted, true, 'Aborted client upload must destroy upstream upload request immediately')
+		const earlyRejectAgent = new http.Agent({ keepAlive: true })
+		const earlyRejectRes = await new Promise((resolve, reject) => {
+			let settled = false
+			let gotResponse = false
+			const finish = (fn, val) => {
+				if (settled) return
+				settled = true
+				earlyRejectAgent.destroy()
+				fn(val)
+			}
+			const req = http.request(`http://127.0.0.1:${addr.port}/api/comp/upload-early-reject`, {
+				method: 'POST',
+				agent: earlyRejectAgent,
+				headers: {
+					authorization: `Bearer ${s.token}`,
+					'content-type': 'application/octet-stream',
+					'content-length': String(4 * 1024 * 1024)
+				}
+			}, res => {
+				gotResponse = true
+				const chunks = []
+				res.on('data', c => chunks.push(c))
+				res.on('end', () => finish(resolve, {
+					status: res.statusCode,
+					headers: res.headers,
+					body: Buffer.concat(chunks).toString('utf8')
+				}))
+				res.on('close', () => {
+					if (!res.complete) finish(reject, new Error('Early reject response closed before completing'))
+				})
+			})
+			req.on('error', err => {
+				if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') finish(reject, err)
+			})
+			const writeLoop = async () => {
+				try {
+					const chunk = Buffer.alloc(64 * 1024, 0x44)
+					for (let i = 0; i < 64 && !gotResponse && !settled && !req.destroyed; i++) {
+						req.write(chunk)
+						await new Promise(r => setTimeout(r, 15))
+					}
+					if (!gotResponse && !settled && !req.destroyed) req.end()
+				} catch (err) {
+					finish(reject, err)
+				}
+			}
+			writeLoop()
+		})
+		assert.equal(earlyRejectRes.status, 413)
+		assert.equal(earlyRejectRes.headers.connection, 'close', 'Early upstream error mid-upload must set Connection: close')
+		assert.equal(JSON.parse(earlyRejectRes.body).error, 'too big', 'Early upstream error body must arrive intact')
+		assert.ok(earlyRejectReceivedBytes < 1024 * 1024, 'Jump must stop pumping upload body once upstream rejects early')
 		process.env.UPSTREAM_TIMEOUT_MS = '180'
 		const activeTrickleRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/active-trickle`, {
 			headers: { authorization: `Bearer ${s.token}` }

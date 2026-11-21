@@ -283,7 +283,8 @@ function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeou
 			req.on('close', () => {
 				bodyStream.off('error', onStreamErr)
 				bodyStream.off('close', onStreamClose)
-				if (!bodyStream.readableEnded) bodyStream.destroy()
+				bodyStream.unpipe(req)
+				if (!bodyStream.readableEnded) bodyStream.pause()
 			})
 			bodyStream.pipe(req)
 			return
@@ -710,6 +711,11 @@ async function stream (opts = {}, auth, req, res) {
 				throw err
 			}
 		}
+		const incompleteUpload = Boolean(status >= 400 && bodyStream && !bodyStream.readableEnded)
+		if (incompleteUpload) {
+			bodyStream.unpipe(upstreamRes.req)
+			bodyStream.pause()
+		}
 		let headersCommitted = false
 		const commitHeaders = () => {
 			if (headersCommitted) return
@@ -725,14 +731,10 @@ async function stream (opts = {}, auth, req, res) {
 			if (cleanedLocation !== null) {
 				res.setHeader('location', cleanedLocation)
 			}
+			if (incompleteUpload) {
+				res.setHeader('connection', 'close')
+			}
 			res.setHeader('content-security-policy', 'sandbox')
-		}
-		if (normalizedMethod === 'HEAD' || BODILESS_STATUSES.has(status)) {
-			commitHeaders()
-			upstreamRes.resume()
-			res.end()
-			recordLog(status, status >= 400 ? `HTTP ${status}` : null)
-			return
 		}
 		const errorChunks = []
 		let errorBytes = 0
@@ -743,6 +745,13 @@ async function stream (opts = {}, auth, req, res) {
 		}
 		res.once('close', onResClose)
 		try {
+			if (normalizedMethod === 'HEAD' || BODILESS_STATUSES.has(status)) {
+				commitHeaders()
+				upstreamRes.resume()
+				res.end()
+				recordLog(status, status >= 400 ? `HTTP ${status}` : null)
+				return
+			}
 			for await (const chunk of upstreamRes) {
 				if (chunk.byteLength === 0) continue
 				if (drainAbort.signal.aborted) break
@@ -774,6 +783,9 @@ async function stream (opts = {}, auth, req, res) {
 			return
 		} finally {
 			res.off('close', onResClose)
+			if (incompleteUpload && upstreamRes.req && !upstreamRes.req.writableFinished) {
+				upstreamRes.req.destroy()
+			}
 		}
 		const errText = status >= 400
 			? (errorBytes > 0 ? Buffer.concat(errorChunks).toString('utf8') : `HTTP ${status}`)
