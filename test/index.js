@@ -40,7 +40,7 @@ const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
 const { parseSsoDomains, shouldClaimUnscoped } = await import('../sso.js')
-const { parseAppUrl, getBaseUrl, getClientIp, validateBaseUrl, resolveTargetUrl, hasPathTraversal, isPlainObject } = await import('../util.js')
+const { parseAppUrl, getBaseUrl, getClientIp, getRawBody, validateBaseUrl, resolveTargetUrl, hasPathTraversal, isPlainObject } = await import('../util.js')
 
 function createTestSession (opts = {}) {
 	const {
@@ -6574,6 +6574,12 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 	assert.equal(rootHtmlRes.headers.get('content-security-policy'), "frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
 	assert.equal(server.headersTimeout, 15000)
 	assert.equal(server.requestTimeout, 0)
+	assert.equal(server.timeout, 60000)
+	const abortedStream = new Readable({ read () {} })
+	const rawPromise = getRawBody(abortedStream)
+	abortedStream.push(Buffer.from('partial'))
+	abortedStream.destroy()
+	await assert.rejects(rawPromise, /Request stream closed prematurely/)
 	const regRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/register`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },

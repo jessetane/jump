@@ -111,6 +111,7 @@ const server = http.createServer(async (req, res) => {
 })
 server.headersTimeout = 15000
 server.requestTimeout = 0
+server.timeout = 60000
 
 function bootstrapLocalAdmin () {
 	if (listAuthProviders().length > 0) return null

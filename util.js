@@ -417,25 +417,36 @@ function hasPathTraversal (urlOrPath) {
 function getRawBody (req, maxBytes = 1024 * 1024) {
 	return new Promise((resolve, reject) => {
 		let size = 0
-		let exceeded = false
+		let settled = false
 		const buffers = []
+		const fail = err => {
+			if (settled) return
+			settled = true
+			reject(err)
+		}
 		req.on('data', chunk => {
-			if (exceeded) return
+			if (settled) return
 			size += chunk.length
 			if (size > maxBytes) {
-				exceeded = true
 				req.pause()
 				const err = new Error('Payload Too Large')
 				err.status = 413
-				reject(err)
+				fail(err)
 				return
 			}
 			buffers.push(chunk)
 		})
-		req.on('error', reject)
+		req.on('error', fail)
 		req.on('end', () => {
-			if (!exceeded) {
-				resolve(Buffer.concat(buffers))
+			if (settled) return
+			settled = true
+			resolve(Buffer.concat(buffers))
+		})
+		req.on('close', () => {
+			if (!settled && !req.readableEnded) {
+				const err = new Error('Request stream closed prematurely')
+				err.status = 400
+				fail(err)
 			}
 		})
 	})
