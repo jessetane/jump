@@ -1604,6 +1604,42 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 			body: JSON.stringify({ ok: false })
 		})
 		assert.equal(bodyPolicyDenied.status, 403, 'REST stream() buffers and enforces body policy when hasBodyPolicy is true')
+		const zlib = await import('node:zlib')
+		const rawBodyDenySess = db.tokens.create({ userId: u.id, provider: 'self', admin: 0 })
+		db.links.create({
+			sessionId: rawBodyDenySess.id,
+			appId: app.id,
+			policy: [
+				{ action: 'deny', methods: ['POST'], body: '*secret*' },
+				{ action: 'allow', methods: ['POST'], path: '/upload-large-stream' }
+			]
+		})
+		const gzipBypassRes = await fetch(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${rawBodyDenySess.token}`,
+				'content-type': 'application/json',
+				'content-encoding': 'gzip'
+			},
+			body: zlib.gzipSync(Buffer.from(JSON.stringify({ msg: 'secret' })))
+		})
+		assert.equal(gzipBypassRes.status, 415, 'REST stream() must reject Content-Encoding when a policy inspects the request body')
+		const unencodedGzipSession = db.tokens.create({ userId: u.id, provider: 'self', admin: 0 })
+		db.links.create({
+			sessionId: unencodedGzipSession.id,
+			appId: app.id,
+			policy: [{ action: 'allow', methods: ['POST'], path: '/upload-large-stream' }]
+		})
+		const passthroughGzipRes = await fetch(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${unencodedGzipSession.token}`,
+				'content-type': 'application/json',
+				'content-encoding': 'gzip'
+			},
+			body: zlib.gzipSync(Buffer.from(JSON.stringify({ msg: 'secret' })))
+		})
+		assert.equal(passthroughGzipRes.status, 200, 'Compressed uploads still pass through when no policy inspects the body')
 		const bodyPolicyTooLarge = await new Promise((resolve, reject) => {
 			let settled = false
 			let gotResponse = false

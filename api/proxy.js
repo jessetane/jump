@@ -686,6 +686,11 @@ async function stream (opts = {}, auth, req, res) {
 		let bodyStream = null
 		if (allowsBody) {
 			if (ctx.inspectsBody) {
+				if (String(req.headers['content-encoding'] || '').trim()) {
+					const err = new Error('Content-Encoding is not supported when a policy inspects the request body')
+					err.status = 415
+					throw err
+				}
 				const rawBuf = await getRawBody(req)
 				if (rawBuf.byteLength > 0) bufferedBody = rawBuf
 			} else {
