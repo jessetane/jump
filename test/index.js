@@ -1608,7 +1608,11 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 								req.once('close', done)
 							})
 						}
-						await new Promise(r => setImmediate(r))
+						if (offset + chunkSize > 1024 * 1024) {
+							await new Promise(r => setTimeout(r, 10))
+						} else {
+							await new Promise(r => setImmediate(r))
+						}
 					}
 					if (!gotResponse && !settled && !req.destroyed) req.end()
 				} catch (err) {
