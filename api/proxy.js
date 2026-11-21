@@ -359,7 +359,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, header
 			err.status = 502
 			throw err
 		}
-		if (!validateBaseUrl(nextParsed.origin)) {
+		if (nextParsed.username || nextParsed.password || !validateBaseUrl(nextParsed.origin)) {
 			const err = new Error(`Blocked unsafe upstream redirect target: ${nextParsed.origin}`)
 			err.status = 403
 			throw err

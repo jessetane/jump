@@ -294,8 +294,10 @@ test('google.isAllowedUrl domain restrictions', () => {
 	assert.equal(isGoogleAllowedUrl('https://evil.com').allowed, false)
 	assert.equal(isGoogleAllowedUrl('https://evilgoogleapis.com').allowed, false)
 	assert.equal(isGoogleAllowedUrl('https://localhost:8080').allowed, false)
+	assert.equal(isGoogleAllowedUrl('https://user:pass@www.googleapis.com/drive/v3/files').allowed, false)
 	assert.equal(isGoogleAllowedUrl('not-a-url').allowed, false)
 	assert.equal(validateBaseUrl('https://fcc.gov/api/v1'), 'https://fcc.gov/api/v1')
+	assert.equal(validateBaseUrl('https://user:pass@fcc.gov/api/v1'), null)
 	assert.equal(validateBaseUrl('https://fda.gov/v1/drugs/'), 'https://fda.gov/v1/drugs')
 	assert.equal(validateBaseUrl('https://fcm.googleapis.com'), 'https://fcm.googleapis.com')
 	assert.equal(validateBaseUrl('https://[fc00::1]'), null)
@@ -312,9 +314,11 @@ test('google.isAllowedUrl domain restrictions', () => {
 	assert.equal(scopedProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a/commits/v1..v2').allowed, true)
 	assert.equal(scopedProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a/%2e%2e/tenant-b').allowed, false)
 	assert.equal(scopedProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a/../tenant-b').allowed, false)
+	assert.equal(scopedProv.isAllowedUrl('https://user:pass@api.custom.dev/v2/tenant-a/items').allowed, false)
 	const appScopedProv = createProvider('app_scoped_test')
 	const appTokenScoped = { credentials: { baseUrl: 'https://api.custom.dev/v2/tenant-a' } }
 	assert.equal(appScopedProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a/%2e%2e/tenant-b', appTokenScoped).allowed, false)
+	assert.equal(appScopedProv.isAllowedUrl('https://user:pass@api.custom.dev/v2/tenant-a/items', appTokenScoped).allowed, false)
 })
 
 test('summarizeScopes formats provider service scope combinations concisely', () => {
@@ -7013,6 +7017,12 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 			res.end()
 			return
 		}
+		if (req.url === '/userinfo-redirect') {
+			res.statusCode = 302
+			res.setHeader('location', `http://user:secret@127.0.0.1:${cdnPort}/after-post`)
+			res.end()
+			return
+		}
 		res.statusCode = 404
 		res.end()
 	})
@@ -7093,6 +7103,14 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 		}, s.token)
 		assert.equal(loopRedirect.isError, true)
 		assert.match(loopRedirect.content[0].text, /Too many upstream redirects/)
+		cdnReceived.length = 0
+		const userinfoRedirect = await executeTool('github_api', {
+			url: '/userinfo-redirect'
+		}, s.token)
+		assert.equal(userinfoRedirect.isError, true)
+		assert.match(userinfoRedirect.content[0].text, /Blocked unsafe upstream redirect target/)
+		assert.equal(userinfoRedirect.content[0].text.includes('secret'), false)
+		assert.equal(cdnReceived.length, 0)
 	} finally {
 		await new Promise(resolve => apiServer.close(resolve))
 		await new Promise(resolve => cdnServer.close(resolve))

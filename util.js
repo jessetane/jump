@@ -387,7 +387,7 @@ function validateBaseUrl (baseUrl) {
 	} catch {
 		return null
 	}
-	if (!isAllowedUpstreamHost(parsed.hostname)) return null
+	if (parsed.username || parsed.password || !isAllowedUpstreamHost(parsed.hostname)) return null
 	if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname) && process.env.NODE_ENV === 'test')) {
 		return null
 	}

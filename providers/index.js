@@ -361,6 +361,9 @@ function createProvider (config) {
 			} catch {
 				return { allowed: false, reason: `Invalid target URL: ${urlString}` }
 			}
+			if (parsed.username || parsed.password) {
+				return { allowed: false, reason: 'Invalid target URL: embedded credentials are not permitted' }
+			}
 			if (hasPathTraversal(urlString) || hasPathTraversal(parsed.pathname)) {
 				return { allowed: false, reason: 'Invalid target URL: path traversal is not permitted' }
 			}
