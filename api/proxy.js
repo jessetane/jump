@@ -699,19 +699,25 @@ async function stream (opts = {}, auth, req, res) {
 				throw err
 			}
 		}
-		res.statusCode = status
-		const rawHeaders = upstreamRes.rawHeaders || []
-		for (let i = 0; i < rawHeaders.length; i += 2) {
-			const name = rawHeaders[i]
-			const lower = name.toLowerCase()
-			if (STRIPPED_RESPONSE_HEADERS.has(lower) || lower === 'location') continue
-			res.appendHeader(name, rawHeaders[i + 1])
+		let headersCommitted = false
+		const commitHeaders = () => {
+			if (headersCommitted) return
+			headersCommitted = true
+			res.statusCode = status
+			const rawHeaders = upstreamRes.rawHeaders || []
+			for (let i = 0; i < rawHeaders.length; i += 2) {
+				const name = rawHeaders[i]
+				const lower = name.toLowerCase()
+				if (STRIPPED_RESPONSE_HEADERS.has(lower) || lower === 'location') continue
+				res.appendHeader(name, rawHeaders[i + 1])
+			}
+			if (cleanedLocation !== null) {
+				res.setHeader('location', cleanedLocation)
+			}
+			res.setHeader('content-security-policy', 'sandbox')
 		}
-		if (cleanedLocation !== null) {
-			res.setHeader('location', cleanedLocation)
-		}
-		res.setHeader('content-security-policy', 'sandbox')
 		if (normalizedMethod === 'HEAD' || BODILESS_STATUSES.has(status)) {
+			commitHeaders()
 			upstreamRes.resume()
 			res.end()
 			recordLog(status, status >= 400 ? `HTTP ${status}` : null)
@@ -725,6 +731,8 @@ async function stream (opts = {}, auth, req, res) {
 		res.once('close', onResClose)
 		try {
 			for await (const chunk of upstreamRes) {
+				if (chunk.byteLength === 0) continue
+				commitHeaders()
 				if (status >= 400 && errorBytes < 512) {
 					const slice = chunk.subarray(0, 512 - errorBytes)
 					errorChunks.push(Buffer.from(slice))
@@ -734,6 +742,7 @@ async function stream (opts = {}, auth, req, res) {
 					await once(res, 'drain')
 				}
 			}
+			commitHeaders()
 			res.end()
 		} catch (err) {
 			normalizeUpstreamError(err)

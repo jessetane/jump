@@ -1391,7 +1391,12 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 			return
 		}
 		if (req.url === '/pre-byte-reset') {
-			res.writeHead(200, { 'content-type': 'application/json' })
+			res.writeHead(200, {
+				'content-type': 'application/json',
+				'content-length': '5000000',
+				'content-encoding': 'gzip',
+				location: '/should-not-leak'
+			})
 			res.flushHeaders()
 			setTimeout(() => res.socket?.destroy(), 10)
 			return
@@ -1495,6 +1500,10 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 			headers: { authorization: `Bearer ${s.token}` }
 		})
 		assert.equal(preByteResetRest.status, 502, 'Pre-first-byte upstream reset in stream() returns clean 502 JSON instead of socket reset')
+		assert.equal(preByteResetRest.headers.get('content-encoding'), null, 'Pre-first-byte 502 must not leak upstream Content-Encoding')
+		assert.equal(preByteResetRest.headers.get('location'), null, 'Pre-first-byte 502 must not leak upstream Location')
+		assert.notEqual(preByteResetRest.headers.get('content-length'), '5000000', 'Pre-first-byte 502 must not leak upstream Content-Length')
+		assert.ok((await preByteResetRest.json()).error)
 		const largeUploadPayload = Buffer.alloc(1536 * 1024, 0x42)
 		const largeUploadRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/upload-large-stream`, {
 			method: 'POST',
