@@ -16,6 +16,7 @@ export {
 	redirect,
 	isLoopbackHost,
 	isAllowedUpstreamHost,
+	isAllowedUpstreamProtocol,
 	blockedHostError,
 	stripTrailingDot,
 	lookupUpstreamHost,
@@ -381,6 +382,11 @@ function lookupUpstreamHost (hostname, opts, cb) {
 	resolveAndDeliver(hostname, host, options, wantAll, callback)
 }
 
+function isAllowedUpstreamProtocol (parsed) {
+	if (parsed?.protocol === 'https:') return true
+	return parsed?.protocol === 'http:' && isLoopbackHost(parsed.hostname) && process.env.NODE_ENV === 'test'
+}
+
 function validateBaseUrl (baseUrl) {
 	if (!baseUrl || typeof baseUrl !== 'string') return null
 	let parsed
@@ -389,8 +395,7 @@ function validateBaseUrl (baseUrl) {
 	} catch {
 		return null
 	}
-	if (parsed.username || parsed.password || !isAllowedUpstreamHost(parsed.hostname)) return null
-	if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname) && process.env.NODE_ENV === 'test')) {
+	if (parsed.username || parsed.password || !isAllowedUpstreamHost(parsed.hostname) || !isAllowedUpstreamProtocol(parsed)) {
 		return null
 	}
 	const pathname = parsed.pathname.replace(/\/+$/, '')

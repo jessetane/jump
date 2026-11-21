@@ -35,7 +35,7 @@ const db = await import('../db/index.js')
 const { google, github, createProvider, getProvider, listAuthProviders, requireAuthProvider, summarizeScopes } = await import('../providers/index.js')
 const { isAllowedUrl: isGoogleAllowedUrl, services: googleServices } = google
 const { isAllowedUrl: isGithubAllowedUrl, services: githubServices } = github
-const { readResponseBody } = await import('../api/proxy.js')
+const { readResponseBody, sendUpstreamHop } = await import('../api/proxy.js')
 const { executeTool } = await import('../mcp.js')
 const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
@@ -283,7 +283,7 @@ test('mcp rejects unknown tool call', async () => {
 	assert.equal(data.result.content[0].text, 'Unknown tool: non_existent_tool')
 })
 
-test('google.isAllowedUrl domain restrictions', () => {
+test('google.isAllowedUrl domain restrictions', async () => {
 	assert.equal(isGoogleAllowedUrl('https://www.googleapis.com/drive/v3/files').allowed, true)
 	assert.equal(isGoogleAllowedUrl('https://fcm.googleapis.com/v1/projects/myproj/messages:send').allowed, true)
 	assert.equal(isGoogleAllowedUrl('https://sheets.googleapis.com/v4/spreadsheets').allowed, true)
@@ -298,6 +298,14 @@ test('google.isAllowedUrl domain restrictions', () => {
 	assert.equal(isGoogleAllowedUrl('not-a-url').allowed, false)
 	assert.equal(validateBaseUrl('https://fcc.gov/api/v1'), 'https://fcc.gov/api/v1')
 	assert.equal(validateBaseUrl('https://user:pass@fcc.gov/api/v1'), null)
+	await assert.rejects(
+		() => sendUpstreamHop('ftp://8.8.8.8/file', { method: 'GET', headers: {}, timeoutMs: 1000 }),
+		err => err.status === 400 && /Unsupported upstream protocol: ftp:/.test(err.message)
+	)
+	await assert.rejects(
+		() => sendUpstreamHop('http://8.8.8.8/file', { method: 'GET', headers: {}, timeoutMs: 1000 }),
+		err => err.status === 400 && /Unsupported upstream protocol: http:/.test(err.message)
+	)
 	assert.equal(validateBaseUrl('https://fda.gov/v1/drugs/'), 'https://fda.gov/v1/drugs')
 	assert.equal(validateBaseUrl('https://fcm.googleapis.com'), 'https://fcm.googleapis.com')
 	assert.equal(validateBaseUrl('https://[fc00::1]'), null)

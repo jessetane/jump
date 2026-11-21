@@ -8,13 +8,14 @@ import zlib from 'node:zlib'
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy, hasBodyPolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, isAllowedUpstreamHost, lookupUpstreamHost, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
+import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
 
 export {
 	formatLinkedApps,
 	request,
 	stream,
-	readResponseBody
+	readResponseBody,
+	sendUpstreamHop
 }
 
 const DEFAULT_TIMEOUT_MS = 60000
@@ -229,6 +230,11 @@ function isFormContentType (contentType) {
 
 function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeoutMs }) {
 	const parsed = new URL(targetUrl)
+	if (!isAllowedUpstreamProtocol(parsed)) {
+		const err = new Error(`Unsupported upstream protocol: ${parsed.protocol}`)
+		err.status = 400
+		return Promise.reject(err)
+	}
 	if (!isAllowedUpstreamHost(parsed.hostname)) {
 		return Promise.reject(blockedHostError(parsed.hostname))
 	}
