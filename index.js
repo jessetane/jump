@@ -153,6 +153,7 @@ const upstreamTimeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS) || 60000
 server.headersTimeout = 15000
 server.requestTimeout = 0
 server.timeout = Math.max(60000, upstreamTimeoutMs + 15000)
+server.keepAliveTimeout = 125000
 
 function bootstrapLocalAdmin () {
 	if (listAuthProviders().length > 0) return null
