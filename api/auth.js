@@ -191,8 +191,12 @@ async function getSession (token, opts = {}) {
 async function createSession (token, opts = {}) {
 	const session = requireAdmin(token, 'Access denied: session administration requires admin privileges')
 	assertKeys(opts, ['name', 'admin', 'linkAppIds', 'policy'])
-	const { name = 'New Session', admin, linkAppIds = [], policy = null } = opts
+	const { name, admin, linkAppIds = [], policy = null } = opts
+	const cleanName = optionalString(name, 'name')
 	const isAdmin = requireBoolean(admin, 'admin', false)
+	if (!Array.isArray(linkAppIds)) {
+		throw badRequest('linkAppIds must be an array')
+	}
 	const policyCheck = validatePolicy(policy)
 	if (!policyCheck.valid) {
 		const error = new Error(policyCheck.error)
@@ -200,14 +204,14 @@ async function createSession (token, opts = {}) {
 		throw error
 	}
 	const appsToLink = []
-	for (const appId of (Array.isArray(linkAppIds) ? linkAppIds : [])) {
+	for (const appId of linkAppIds) {
 		appsToLink.push(requireApp(session.userId, appId))
 	}
 	const newSession = db.tokens.create({
 		userId: session.userId,
 		provider: 'self',
 		type: 'bearer',
-		name,
+		name: cleanName,
 		admin: isAdmin ? 1 : 0
 	})
 	for (const app of appsToLink) {
@@ -799,11 +803,12 @@ async function updateSession (token, opts = {}) {
 	if (name === undefined && admin === undefined && rotateToken === undefined) {
 		throw badRequest('At least one of name, admin, or rotateToken is required')
 	}
+	const cleanName = name !== undefined ? optionalString(name, 'name') : undefined
 	const parsedAdmin = requireBoolean(admin, 'admin')
 	const shouldRotate = requireBoolean(rotateToken, 'rotateToken', false)
 	requireTargetSession(session.userId, targetId)
 	const updated = db.tokens.updateSession(targetId, {
-		name,
+		name: cleanName,
 		admin: parsedAdmin,
 		rotateToken: shouldRotate
 	})

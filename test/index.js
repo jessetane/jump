@@ -3063,6 +3063,30 @@ test('admin tool administrative actions: create_session, list_apps, connect_app,
 	assert.equal(badLinkCreateRes.isError, true, 'create_session with invalid linkAppIds must fail loud')
 	assert.match(badLinkCreateRes.content[0].text, /App not found/)
 	assert.equal(db.tokens.listByUserId(user.id, { provider: 'self' }).length, sessionsBeforeBadCreate, 'Failed create_session must not leave orphan session')
+	const addr = server.address()
+	for (const badPayload of [{ name: { bad: 1 } }, { name: 123 }, { linkAppIds: googleApp.id }]) {
+		const badCreateRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${adminSession.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify(badPayload)
+		})
+		assert.equal(badCreateRes.status, 400, `POST /api/sessions must reject ${JSON.stringify(badPayload)} with 400`)
+	}
+	const namelessCreateRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions`, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${adminSession.token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({})
+	})
+	assert.equal(namelessCreateRes.status, 201)
+	const namelessCreateData = await namelessCreateRes.json()
+	assert.equal(namelessCreateData.session.name, null, 'create_session without name stores null rather than synthetic placeholder')
+	db.tokens.remove(namelessCreateData.session.id)
 	const newSessRes = await executeTool('admin', {
 		action: 'create_session',
 		name: 'Chef Agent',
@@ -4621,6 +4645,18 @@ test('admin update_session action', async () => {
 	assert.equal(selfRenameRes.isError, undefined)
 	const selfRenameData = JSON.parse(selfRenameRes.content[0].text)
 	assert.equal(selfRenameData.session.name, 'Worker Renamed')
+	const addr = server.address()
+	for (const badName of [{ evil: 1 }, 123, true]) {
+		const badUpdateRes = await fetch(`http://127.0.0.1:${addr.port}/api/sessions/${workerSession.id}`, {
+			method: 'PATCH',
+			headers: {
+				authorization: `Bearer ${workerSession.token}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({ name: badName })
+		})
+		assert.equal(badUpdateRes.status, 400, `PATCH /api/sessions/:id must reject non-string name ${JSON.stringify(badName)}`)
+	}
 	const nonAdminEscalateRes = await executeTool('admin', {
 		action: 'update_session',
 		admin: true
