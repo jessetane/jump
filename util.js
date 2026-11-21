@@ -230,8 +230,12 @@ function getBaseUrl (req) {
 
 function getClientIp (req) {
 	if (isTrustedProxy(req) && req?.headers?.['x-forwarded-for']) {
-		const forwarded = String(req.headers['x-forwarded-for']).split(',')[0].trim()
-		if (forwarded) return forwarded
+		const raw = req.headers['x-forwarded-for']
+		const parts = (Array.isArray(raw) ? raw.join(',') : String(raw)).split(',')
+		for (let i = parts.length - 1; i >= 0; i--) {
+			const ip = parts[i].trim()
+			if (net.isIP(ip)) return ip
+		}
 	}
 	return req?.socket?.remoteAddress || null
 }

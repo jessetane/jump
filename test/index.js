@@ -6104,8 +6104,16 @@ test('hasPathTraversal backslash handling and getBaseUrl host/port edge cases', 
 	}), 'http://127.0.0.1:8080', 'remote socket ignores X-Forwarded-Host and X-Forwarded-Proto')
 	assert.equal(getClientIp({
 		socket: { remoteAddress: '127.0.0.1' },
-		headers: { 'x-forwarded-for': '198.51.100.7, 10.0.0.1' }
-	}), '198.51.100.7')
+		headers: { 'x-forwarded-for': '203.0.113.9, 198.51.100.7' }
+	}), '198.51.100.7', 'loopback proxy selects rightmost valid IP in X-Forwarded-For')
+	assert.equal(getClientIp({
+		socket: { remoteAddress: '127.0.0.1' },
+		headers: { 'x-forwarded-for': 'not-an-ip, 198.51.100.7, bogus' }
+	}), '198.51.100.7', 'skips non-IP tokens in X-Forwarded-For')
+	assert.equal(getClientIp({
+		socket: { remoteAddress: '127.0.0.1' },
+		headers: { 'x-forwarded-for': 'not-an-ip' }
+	}), '127.0.0.1', 'falls back to socket remoteAddress when X-Forwarded-For has no valid IP')
 	assert.equal(getClientIp({
 		socket: { remoteAddress: '203.0.113.5' },
 		headers: { 'x-forwarded-for': '198.51.100.7' }
@@ -6712,6 +6720,10 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 		assert.equal(limitedRes.status, 429, '4th request within window from same IP is rate-limited with 429')
 		assert.ok(Number(limitedRes.headers.get('retry-after')) >= 1)
 		assert.deepEqual(await limitedRes.json(), { error: 'Too many requests' })
+		const spoofedPrefixRes = await fetch(`http://127.0.0.1:${addr.port}/oauth/authorize`, {
+			headers: { 'x-forwarded-for': '198.51.100.1, 198.51.100.77' }
+		})
+		assert.equal(spoofedPrefixRes.status, 429, 'Spoofed leftmost X-Forwarded-For prefix cannot bypass rate limit')
 		const otherIpRes = await fetch(`http://127.0.0.1:${addr.port}/providers/google/connect`, {
 			headers: { 'x-forwarded-for': '198.51.100.78' }
 		})
