@@ -334,14 +334,13 @@ async function executeBufferedUpstream ({ credentials, url, method, body, header
 		}
 	}
 	const { authHeaders, queryEntries } = toAuthEntries(credentials)
-	const initialOrigin = new URL(url).origin
+	let authOrigin = new URL(url).origin
 	let curUrl = url
 	let curBody = reqBody
 	let res
 	for (let hop = 0; ; hop++) {
 		const hopUrl = new URL(curUrl)
-		const isInitialOrigin = hopUrl.origin === initialOrigin
-		const hopReq = isInitialOrigin
+		const hopReq = hopUrl.origin === authOrigin
 			? attachAuth(hopUrl, baseHeaders, authHeaders, queryEntries)
 			: { url: curUrl, headers: { ...baseHeaders } }
 		if (curBody !== undefined) {
@@ -385,7 +384,9 @@ async function executeBufferedUpstream ({ credentials, url, method, body, header
 			stripQueryAuth(nextParsed, queryEntries)
 		}
 		curUrl = nextParsed.toString()
-		if (nextParsed.origin === initialOrigin && onSameOriginRedirect) {
+		if (nextParsed.origin !== authOrigin) {
+			authOrigin = null
+		} else if (onSameOriginRedirect) {
 			onSameOriginRedirect({ url: curUrl, method: curMethod, hasBody: curBody !== undefined })
 		}
 	}

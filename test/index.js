@@ -6965,8 +6965,21 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 	}).allowed, true, 'Single-segment * matches GCS object key with %2F without splitting into two segments')
 	const http = await import('node:http')
 	const cdnReceived = []
+	let apiPort
 	const cdnServer = http.createServer((req, res) => {
 		cdnReceived.push({ method: req.method, url: req.url, headers: req.headers })
+		if (req.url === '/bounce-to-api') {
+			res.statusCode = 302
+			res.setHeader('location', `http://127.0.0.1:${apiPort}/echo-auth`)
+			res.end()
+			return
+		}
+		if (req.url === '/bounce-to-qauth') {
+			res.statusCode = 302
+			res.setHeader('location', `http://127.0.0.1:${apiPort}/qauth/dest?page=9`)
+			res.end()
+			return
+		}
 		res.statusCode = 200
 		res.setHeader('content-type', 'application/octet-stream')
 		res.end(Buffer.from('archive-bytes'))
@@ -6974,6 +6987,24 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 	await new Promise(resolve => cdnServer.listen(0, '127.0.0.1', resolve))
 	const cdnPort = cdnServer.address().port
 	const apiServer = http.createServer((req, res) => {
+		if (req.url === '/bounce-back-auth') {
+			res.statusCode = 302
+			res.setHeader('location', `http://127.0.0.1:${cdnPort}/bounce-to-api`)
+			res.end()
+			return
+		}
+		if (req.url === '/echo-auth') {
+			res.statusCode = 200
+			res.setHeader('content-type', 'application/json')
+			res.end(JSON.stringify({ auth: req.headers.authorization || null }))
+			return
+		}
+		if (req.url.startsWith('/qauth/bounce')) {
+			res.statusCode = 302
+			res.setHeader('location', `http://127.0.0.1:${cdnPort}/bounce-to-qauth`)
+			res.end()
+			return
+		}
 		if (req.url === '/repos/acme/app/tarball') {
 			res.statusCode = 302
 			res.setHeader('location', `http://127.0.0.1:${cdnPort}/download/tarball.tar.gz?sig=signed123`)
@@ -7044,7 +7075,7 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 		res.end()
 	})
 	await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve))
-	const apiPort = apiServer.address().port
+	apiPort = apiServer.address().port
 	try {
 		const addr = server.address()
 		const u = db.logins.resolveUser('google', 'redirects@example.com')
@@ -7128,6 +7159,15 @@ test('validated upstream redirects, double-slash/encoded path normalization, and
 		assert.match(userinfoRedirect.content[0].text, /Blocked unsafe upstream redirect target/)
 		assert.equal(userinfoRedirect.content[0].text.includes('secret'), false)
 		assert.equal(cdnReceived.length, 0)
+		cdnReceived.length = 0
+		const bounceAuth = await executeTool('github_api', {
+			url: '/bounce-back-auth'
+		}, s.token)
+		assert.equal(bounceAuth.isError, undefined)
+		assert.equal(JSON.parse(bounceAuth.content[0].text).auth, null, 'Redirect bouncing off-origin then back must not re-attach auth headers')
+		const qBounce = await executeTool('namecheap_api', { url: '/qauth/bounce' }, s.token)
+		assert.equal(qBounce.isError, undefined)
+		assert.equal(JSON.parse(qBounce.content[0].text).url, '/qauth/dest?page=9', 'Redirect bouncing off-origin then back must not re-attach query auth')
 	} finally {
 		await new Promise(resolve => apiServer.close(resolve))
 		await new Promise(resolve => cdnServer.close(resolve))
