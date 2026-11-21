@@ -267,10 +267,22 @@ function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeou
 			if (!settled) fail(new Error('Upstream connection closed before response'))
 		})
 		if (bodyStream) {
-			const onStreamErr = err => req.destroy(err)
+			const onStreamErr = err => {
+				if (err && typeof err === 'object' && !err.status) err.status = 400
+				req.destroy(err)
+			}
+			const onStreamClose = () => {
+				if (!bodyStream.readableEnded) {
+					const err = new Error('Client upload aborted')
+					err.status = 400
+					req.destroy(err)
+				}
+			}
 			bodyStream.on('error', onStreamErr)
+			bodyStream.on('close', onStreamClose)
 			req.on('close', () => {
 				bodyStream.off('error', onStreamErr)
+				bodyStream.off('close', onStreamClose)
 				if (!bodyStream.readableEnded) bodyStream.destroy()
 			})
 			bodyStream.pipe(req)

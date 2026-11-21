@@ -1343,6 +1343,7 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 	const zstdJson = zlib.zstdCompressSync(Buffer.from(JSON.stringify({ compressed: 'zstd-ok' })))
 	const gzBomb = zlib.gzipSync(Buffer.alloc(2 * 1024 * 1024, 0x41))
 	let lastAcceptEncoding = null
+	let upstreamUploadAborted = false
 	const compUpstream = http.createServer(async (req, res) => {
 		lastAcceptEncoding = req.headers['accept-encoding'] || null
 		if (req.url === '/gzip') {
@@ -1452,6 +1453,20 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 			res.statusCode = 200
 			res.setHeader('content-type', 'application/json')
 			res.end(JSON.stringify({ receivedBytes }))
+			return
+		}
+		if (req.url === '/upload-abort-check') {
+			req.on('error', () => {})
+			req.on('close', () => {
+				if (!req.complete) upstreamUploadAborted = true
+			})
+			req.resume()
+			req.on('end', () => {
+				if (!res.writableEnded) {
+					res.statusCode = 200
+					res.end('ok')
+				}
+			})
 			return
 		}
 		if (req.url === '/active-trickle') {
@@ -1666,6 +1681,20 @@ test('readResponseBody enforces MCP size limits, handles 0-byte 204 gzip/br, whi
 		}
 		assert.ok(disconnectLog, 'Backpressured stream disconnect must exit drain wait and record log cleanly')
 		assert.match(disconnectLog.error || '', /Downstream client disconnected/i)
+		await new Promise((resolve, reject) => {
+			const sock = net.createConnection({ host: '127.0.0.1', port: addr.port }, () => {
+				sock.write(`POST /api/comp/upload-abort-check HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${s.token}\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\npartial-upload`)
+				setTimeout(() => {
+					sock.end()
+					resolve()
+				}, 20)
+			})
+			sock.on('error', reject)
+		})
+		for (let i = 0; i < 40 && !upstreamUploadAborted; i++) {
+			await new Promise(resolve => setTimeout(resolve, 10))
+		}
+		assert.equal(upstreamUploadAborted, true, 'Aborted client upload must destroy upstream upload request immediately')
 		process.env.UPSTREAM_TIMEOUT_MS = '180'
 		const activeTrickleRest = await fetch(`http://127.0.0.1:${addr.port}/api/comp/active-trickle`, {
 			headers: { authorization: `Bearer ${s.token}` }
