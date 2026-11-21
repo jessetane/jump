@@ -24,7 +24,10 @@ const MAX_RATE_BUCKETS = 10000
 const oauthRateBuckets = new Map()
 
 function checkOauthRateLimit (req, res) {
-	const limit = Number(process.env.OAUTH_RATE_LIMIT) || 60
+	const rawLimit = process.env.OAUTH_RATE_LIMIT
+	const parsedLimit = rawLimit === undefined || rawLimit.trim() === '' ? 60 : Number(rawLimit)
+	if (parsedLimit <= 0) return true
+	const limit = Number.isFinite(parsedLimit) ? parsedLimit : 60
 	const ip = getClientIp(req) || 'unknown'
 	const now = Date.now()
 	let entry = oauthRateBuckets.get(ip)

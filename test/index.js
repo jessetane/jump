@@ -6736,6 +6736,11 @@ test('linear-time glob matching, strict form body validation, SSRF host checks, 
 			headers: { 'x-forwarded-for': '198.51.100.77' }
 		})
 		assert.equal(healthOtherRes.status, 200, 'Non-OAuth routes are unaffected by OAuth rate limit')
+		process.env.OAUTH_RATE_LIMIT = '0'
+		const disabledBurst = await Promise.all(Array.from({ length: 65 }, () => fetch(`http://127.0.0.1:${addr.port}/oauth/authorize`, {
+			headers: { 'x-forwarded-for': '198.51.100.77' }
+		})))
+		assert.ok(disabledBurst.every(r => r.status === 200), 'OAUTH_RATE_LIMIT=0 disables rate limiting')
 	} finally {
 		process.env.OAUTH_RATE_LIMIT = origRateLimit
 	}
