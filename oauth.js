@@ -394,6 +394,7 @@ function completeLogin (req, res, { user, clientId, clientRedirectUri, clientSta
 		ua
 	})
 	linkSessionApps(session.id, user.id, appIds)
+	res.setHeader('cache-control', 'no-store')
 	sendText(res, `user: ${db.logins.getAccountByUserId(user.id)}\ntoken: ${session.token}\n\nheader:\nAuthorization: Bearer ${session.token}\n`)
 }
 

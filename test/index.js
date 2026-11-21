@@ -1130,6 +1130,7 @@ test('direct browser authorize without redirect_uri', async () => {
 	try {
 		const cbRes = await origFetch(`http://127.0.0.1:${addr.port}/oauth/callback?code=browser-code&state=${loginStateToken}`, { redirect: 'manual' })
 		assert.equal(cbRes.status, 200, 'Direct browser login with 0 apps returns token directly without /oauth/verify hop')
+		assert.equal(cbRes.headers.get('cache-control'), 'no-store')
 		verifyText = await cbRes.text()
 	} finally {
 		globalThis.fetch = origFetch
