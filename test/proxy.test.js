@@ -27,32 +27,33 @@ test('provider URL allowlists, target resolution, path traversal, and SSRF IP/ho
 	assert.equal(utilMod.resolveTargetUrl('/v1/items', 'https://api.example.com/base/'), 'https://api.example.com/base/v1/items')
 	await assert.rejects(() => proxy.sendUpstreamHop('ftp://8.8.8.8/file', { method: 'GET', headers: {}, timeoutMs: 1000 }), err => err.status === 400)
 	await assert.rejects(() => proxy.sendUpstreamHop('http://8.8.8.8/file', { method: 'GET', headers: {}, timeoutMs: 1000 }), err => err.status === 400)
-	await withEnv({ NODE_ENV: 'production' }, () => {
-		for (const blocked of [
-			'https://user:pass@fcc.gov/api',
-			'https://localhost.',
-			'https://localhost..',
-			'https://metadata.google.internal',
-			'https://169.254.169.254',
-			'https://10.0.0.1',
-			'https://192.168.1.1',
-			'https://172.16.0.5',
-			'https://100.64.0.1',
-			'https://192.0.2.1',
-			'https://[::ffff:127.0.0.1]',
-			'https://[::ffff:1.1.1.1]',
-			'https://[fc0::1]',
-			'https://[fd1::1]',
-			'https://[fe80::1]',
-			'https://[64:ff9b::a9fe:a9fe]',
-			'https://[2002:a9fe:a9fe::]'
-		]) {
-			assert.equal(utilMod.validateBaseUrl(blocked), null, `Must block unsafe baseUrl: ${blocked}`)
-		}
-		for (const allowed of ['https://fcc.gov/api/v1/', 'https://1.1.1.1', 'https://100.128.0.1', 'https://[2606:4700:4700::1111]']) {
-			assert.ok(utilMod.validateBaseUrl(allowed), `Must allow public baseUrl: ${allowed}`)
-		}
-	})
+	for (const blocked of [
+		'https://user:pass@fcc.gov/api',
+		'http://fcc.gov/api',
+		'https://localhost',
+		'https://localhost.',
+		'https://localhost..',
+		'https://metadata.google.internal',
+		'https://127.0.0.1',
+		'https://169.254.169.254',
+		'https://10.0.0.1',
+		'https://192.168.1.1',
+		'https://172.16.0.5',
+		'https://100.64.0.1',
+		'https://192.0.2.1',
+		'https://[::ffff:127.0.0.1]',
+		'https://[::ffff:1.1.1.1]',
+		'https://[fc0::1]',
+		'https://[fd1::1]',
+		'https://[fe80::1]',
+		'https://[64:ff9b::a9fe:a9fe]',
+		'https://[2002:a9fe:a9fe::]'
+	]) {
+		assert.equal(utilMod.validateBaseUrl(blocked), null, `Must block unsafe baseUrl: ${blocked}`)
+	}
+	for (const allowed of ['https://fcc.gov/api/v1/', 'https://1.1.1.1', 'https://100.128.0.1', 'https://[2606:4700:4700::1111]']) {
+		assert.ok(utilMod.validateBaseUrl(allowed), `Must allow public baseUrl: ${allowed}`)
+	}
 })
 
 test('socket-pinned single-lookup DNS resolution blocks private answers and defeats DNS rebinding', async () => {

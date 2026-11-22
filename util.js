@@ -300,14 +300,8 @@ function isAllowedUpstreamHost (hostname) {
 	if (!hostname || typeof hostname !== 'string') return false
 	const raw = hostname.toLowerCase().replace(/^\[|\]$/g, '')
 	const ipFamily = net.isIP(raw)
-	if (ipFamily) {
-		if (isLoopbackHost(hostname)) return process.env.NODE_ENV === 'test'
-		return isPublicIp(raw)
-	}
-	if (raw.startsWith('.') || raw.includes('..')) return false
-	if (isLoopbackHost(hostname)) {
-		return process.env.NODE_ENV === 'test'
-	}
+	if (ipFamily) return isPublicIp(raw)
+	if (raw.startsWith('.') || raw.includes('..') || isLoopbackHost(hostname)) return false
 	const host = stripTrailingDot(hostname)
 	if (!host || host === 'metadata.google.internal') return false
 	return true
@@ -344,11 +338,9 @@ async function resolveDnsRecords (hostname, host, options) {
 		err.status = 502
 		throw err
 	}
-	if (!isLoopbackHost(hostname)) {
-		for (const { address } of records) {
-			if (!isPublicIp(address)) {
-				throw blockedHostError(hostname)
-			}
+	for (const { address } of records) {
+		if (!isPublicIp(address)) {
+			throw blockedHostError(hostname)
 		}
 	}
 	return records
@@ -383,8 +375,7 @@ function lookupUpstreamHost (hostname, opts, cb) {
 }
 
 function isAllowedUpstreamProtocol (parsed) {
-	if (parsed?.protocol === 'https:') return true
-	return parsed?.protocol === 'http:' && isLoopbackHost(parsed.hostname) && process.env.NODE_ENV === 'test'
+	return parsed?.protocol === 'https:'
 }
 
 function validateBaseUrl (baseUrl) {
