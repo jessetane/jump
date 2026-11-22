@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import RpcEngine from 'rpc-engine'
 import * as api from './api/index.js'
 import * as db from './db/index.js'
-import { getProvider } from './providers/index.js'
+import { getProvider, parseProviderTool } from './providers/index.js'
 import { assertKeys, getBody, getBaseUrl, sendJson } from './util.js'
 
 export {
@@ -218,8 +218,8 @@ function formatError (err, toolName = 'tool') {
 		console.warn(`[mcp] ${err.message}`)
 	} else {
 		console.warn(`[mcp] ${toolName} error (${err.status}): ${err.message}`)
-		const providerMatch = 'data' in err ? toolName.match(/^([a-z0-9_-]+)_api$/i) : null
-		const prefix = providerMatch ? `${getProvider(providerMatch[1]).name} API Error (${err.status}): ` : ''
+		const providerId = 'data' in err ? parseProviderTool(toolName) : null
+		const prefix = providerId ? `${getProvider(providerId).name} API Error (${err.status}): ` : ''
 		return {
 			isError: true,
 			content: [{ type: 'text', text: `${prefix}${err.message}` }]
@@ -250,9 +250,8 @@ async function executeTool (name, args = {}, token, appUrl) {
 			const result = await handle(token, actionArgs, appUrl)
 			return { content: formatContent(result) }
 		}
-		const apiMatch = name.match(/^([a-z0-9_-]+)_api$/i)
-		if (apiMatch) {
-			const provider = apiMatch[1].toLowerCase()
+		const provider = parseProviderTool(name)
+		if (provider) {
 			assertKeys(args, ['url', 'method', 'body', 'headers', 'app'])
 			const result = await api.proxy.request({ ...args, provider }, token)
 			return { content: formatContent(result) }

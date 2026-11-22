@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { getProvider, listAuthProviders, requireAuthProvider } from '../providers/index.js'
+import { RESERVED_PROVIDERS, isValidProviderId, getProvider, listAuthProviders, requireAuthProvider } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
 import { HOP_BY_HOP_HEADERS, assertKeys, getBaseUrl, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
@@ -511,8 +511,11 @@ async function connectApp (token, opts = {}, appUrl) {
 	}
 	const normalizedAuth = credentials !== undefined ? normalizeCredentials(credentials) : null
 	provider = provider || 'google'
-	if (provider === 'self') {
-		const error = new Error('provider cannot be "self"')
+	if (!isValidProviderId(provider)) {
+		const msg = RESERVED_PROVIDERS.has(provider)
+			? `provider cannot be "${provider}"`
+			: 'provider must contain only letters, digits, underscores, or hyphens'
+		const error = new Error(msg)
 		error.status = 400
 		throw error
 	}

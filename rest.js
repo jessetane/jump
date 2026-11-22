@@ -1,4 +1,5 @@
 import * as api from './api/index.js'
+import { isValidProviderId, RESERVED_PROVIDERS } from './providers/index.js'
 import { assertKeys, getBody, getBaseUrl, isPlainObject, requireBoolean, sendJson, sendText } from './util.js'
 
 export {
@@ -169,8 +170,6 @@ const resources = {
 	}
 }
 
-const RESERVED_API_PROVIDERS = new Set(Object.keys(resources))
-
 async function dispatchRest (req, res, handlerTable, { token, query, id, idKey }) {
 	const handler = Object.hasOwn(handlerTable, req.method) && typeof handlerTable[req.method] === 'function'
 		? handlerTable[req.method]
@@ -215,16 +214,16 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 			await dispatchRest(req, res, resource, { token, query })
 			return
 		}
-		if (RESERVED_API_PROVIDERS.has(resourceName.toLowerCase())) {
+		if (RESERVED_PROVIDERS.has(resourceName.toLowerCase())) {
 			const err = new Error('not found')
 			err.status = 404
 			throw err
 		}
 	}
-	const restMatch = rawPathname.match(/^\/api\/([a-z0-9_-]+)\/(.+)$/i)
+	const restMatch = rawPathname.match(/^\/api\/([^/]+)\/(.+)$/)
 	if (restMatch) {
 		const provider = restMatch[1].toLowerCase()
-		if (RESERVED_API_PROVIDERS.has(provider)) {
+		if (!isValidProviderId(provider)) {
 			const err = new Error('not found')
 			err.status = 404
 			throw err

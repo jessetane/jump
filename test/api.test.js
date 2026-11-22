@@ -128,7 +128,9 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	]) {
 		assert.equal((await mcp(session.token, 'admin', bad)).isError, true)
 	}
-	assert.equal((await mcp(session.token, 'admin', { action: 'connect_app', provider: 'self', credentials: 'sk', baseUrl: 'https://api.stripe.com' })).isError, true)
+	for (const badProv of ['self', 'sessions', 'my.api']) {
+		assert.equal((await mcp(session.token, 'admin', { action: 'connect_app', provider: badProv, credentials: 'sk', baseUrl: 'https://api.stripe.com' })).isError, true)
+	}
 	for (const badCreds of ['', '   ', 'tok\r\ninj: 1', {}, { bearer: 'a', basic: 'u:p' }, { basic: 'nocolon' }, { headers: { cookie: 'x=1' } }, { headers: { host: 'evil.com' } }, { query: { ApiKey: '1', apikey: '2' } }]) {
 		assert.equal((await req('POST', '/api/apps', { token: session.token, body: { provider: 'stripe', credentials: badCreds, baseUrl: 'https://api.stripe.com' } })).status, 400)
 	}

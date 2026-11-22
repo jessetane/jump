@@ -4,6 +4,9 @@ import googleConfig from './google.js'
 import githubConfig from './github.js'
 
 export {
+	RESERVED_PROVIDERS,
+	isValidProviderId,
+	parseProviderTool,
 	createProvider,
 	getProvider,
 	listAuthProviders,
@@ -12,6 +15,19 @@ export {
 	summarizeScopes,
 	google,
 	github
+}
+
+const PROVIDER_ID_PATTERN = /^[a-z0-9_-]+$/
+const RESERVED_PROVIDERS = new Set(['self', 'health', 'whoami', 'logins', 'sessions', 'apps', 'links', 'shares', 'logs'])
+
+function isValidProviderId (name) {
+	return typeof name === 'string' && PROVIDER_ID_PATTERN.test(name) && !RESERVED_PROVIDERS.has(name)
+}
+
+function parseProviderTool (toolName) {
+	if (typeof toolName !== 'string' || !toolName.toLowerCase().endsWith('_api')) return null
+	const slug = toolName.slice(0, -4).toLowerCase()
+	return isValidProviderId(slug) ? slug : null
 }
 
 const google = createProvider(googleConfig)

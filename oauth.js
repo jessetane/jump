@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import * as db from './db/index.js'
-import { getProvider, listAuthProviders, requireAuthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
+import { getProvider, isValidProviderId, listAuthProviders, requireAuthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
 import { getBody, getBaseUrl, getClientIp, isPlainObject, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
 
@@ -1168,8 +1168,8 @@ async function handleOauth (req, res, { pathname, url, query }) {
 		await handler(req, res, { query })
 		return
 	}
-	const providerMatch = pathname.match(/^\/providers\/([a-z0-9_-]+)\/(connect|consent)$/i)
-	if (providerMatch) {
+	const providerMatch = pathname.match(/^\/providers\/([^/]+)\/(connect|consent)$/i)
+	if (providerMatch && isValidProviderId(providerMatch[1].toLowerCase())) {
 		const [, providerName, action] = providerMatch
 		const id = providerName.toLowerCase()
 		if (action === 'connect') {
