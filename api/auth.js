@@ -237,13 +237,7 @@ async function createSession (token, opts = {}) {
 async function revokeSession (token, opts = {}) {
 	assertKeys(opts, ['sessionId', 'allOthers'])
 	const { sessionId, allOthers } = opts || {}
-	const session = db.tokens.resolveSession(token)
-	if (!session) {
-		return {
-			revoked: false,
-			message: 'No active session found for the provided token.'
-		}
-	}
+	const session = requireSession(token)
 	if (sessionId !== undefined) requireNonEmptyString(sessionId, 'sessionId')
 	const shouldRevokeAllOthers = requireBoolean(allOthers, 'allOthers', false)
 	if (shouldRevokeAllOthers) {

@@ -84,6 +84,7 @@ test('canonical REST contract rejects method/payload smuggling, trailing slashes
 	const { session, app } = createTestSession({ account: 'rest-contract@example.com', admin: true })
 	assert.equal((await req('GET', '/api/whoami')).data.authenticated, false)
 	assert.equal((await req('GET', '/api/sessions')).status, 401)
+	assert.equal((await req('DELETE', '/api/sessions?allOthers=true')).status, 401)
 	const sess2 = db.tokens.create({ userId: session.userId, provider: 'self', admin: 0 })
 	assert.equal((await req('GET', `/api/sessions/${sess2.id}`, { token: session.token })).data.session.token, undefined)
 	assert.equal((await req('DELETE', `/api/sessions/${sess2.id}`, { token: session.token })).status, 200)
