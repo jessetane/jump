@@ -246,21 +246,22 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 })
 
 test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, revoke, and OAUTH_TIMEOUT_MS', async () => {
-	const { user, session: adminSess, app } = createTestSession({ account: 'reauth-owner@example.com', admin: true, expiresAt: Date.now() - 1000 })
+	let { session: adminSess, app } = createTestSession({ account: 'reauth-owner@example.com', admin: true, expiresAt: Date.now() - 1000 })
 	const { session: workerSess } = createTestSession({ account: 'reauth-worker@example.com', admin: false, withApp: false })
-	db.sqlite.prepare("UPDATE tokens SET credentials = ? WHERE id = ?").run(db.sqlite.prepare("SELECT credentials FROM tokens WHERE id = ?").get(app.id).credentials, app.id)
-	app.credentials = { ...app.credentials, account: 'reauth-owner@example.com' }
-	db.tokens.updateCredentials(app.id, { credentials: { accessToken: 'ya29.old', refreshToken: '1//old-r', account: 'reauth-owner@example.com' }, expiresAt: Date.now() - 1000 })
+	app = db.tokens.updateCredentials(app.id, { credentials: { accessToken: 'ya29.old', refreshToken: '1//old-r', account: 'reauth-owner@example.com' }, expiresAt: Date.now() - 1000 })
 	let returnedEmail = 'wrong@example.com'
 	let refreshCalls = 0
 	await withMockFetch(async (input, init, origFetch) => {
 		const u = typeof input === 'string' ? input : input.url
 		if (u === 'https://oauth2.googleapis.com/token') {
-			const body = String(init?.body || '')
-			if (body.includes('grant_type=refresh_token')) {
+			const form = new URLSearchParams(String(init?.body || ''))
+			if (form.get('grant_type') === 'refresh_token') {
 				refreshCalls++
 				await new Promise(r => setTimeout(r, 10))
 				return Response.json({ access_token: `ya29.fresh_${refreshCalls}`, expires_in: 3600 })
+			}
+			if (!form.get('code') || form.get('code') === 'undefined' || !form.get('redirect_uri')?.startsWith('http')) {
+				return Response.json({ error: 'invalid_request' }, { status: 400 })
 			}
 			return Response.json({ access_token: 'ya29.cb', refresh_token: '1//new-r', expires_in: 3600 })
 		}
@@ -276,7 +277,7 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		assert.equal(t1.headers.authorization, 'Bearer ya29.fresh_1')
 		assert.equal(t2.headers.authorization, 'Bearer ya29.fresh_1')
 		returnedEmail = 'UNVERIFIED'
-		await assert.rejects(() => providers.google.exchangeCode('code', 'http://localhost/cb'), /Could not retrieve account identifier/)
+		await assert.rejects(() => providers.google.exchangeCode({ code: 'code', callbackUrl: 'http://localhost/cb' }), /Could not retrieve account identifier/)
 		returnedEmail = 'wrong@example.com'
 		const mismatchState = db.tokens.createState({ sessionId: adminSess.id, reauthAppId: app.id, provider: 'google' })
 		const mismatchRes = await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${mismatchState}`)
@@ -292,10 +293,16 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${nonAdminState}`)).status, 403)
 	})
 	await withEnv({ OAUTH_TIMEOUT_MS: '25' }, async () => {
-		await withMockFetch((input, init) => new Promise((_, reject) => {
-			init?.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true })
-		}), async () => {
-			await assert.rejects(() => providers.google.exchangeCode('slow', 'http://localhost/cb'), /aborted|timeout/i)
+		await withMockFetch((input, init) => {
+			const form = new URLSearchParams(String(init?.body || ''))
+			if (form.get('code') !== 'slow' || form.get('redirect_uri') !== 'http://localhost/cb') {
+				return Response.json({ error: 'invalid_request' }, { status: 400 })
+			}
+			return new Promise((_, reject) => {
+				init?.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true })
+			})
+		}, async () => {
+			await assert.rejects(() => providers.google.exchangeCode({ code: 'slow', callbackUrl: 'http://localhost/cb' }), /aborted|timeout/i)
 			const start = Date.now()
 			await providers.google.revokeToken(db.tokens.get(app.id))
 			assert.ok(Date.now() - start < 1000)
