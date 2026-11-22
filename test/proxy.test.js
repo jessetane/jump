@@ -1,15 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import dns from 'node:dns'
+import fs from 'node:fs'
 import http from 'node:http'
-import https from 'node:https'
 import net from 'node:net'
 import { PassThrough, Readable } from 'node:stream'
-import tls from 'node:tls'
 import zlib from 'node:zlib'
-import { useServer, baseUrl, testDbPath, createTestSession, withUpstream, withEnv, mcp, req, db, providers, proxy, utilMod } from './helpers.js'
-import fs from 'node:fs'
+import { VIRTUAL_UPSTREAM_IP, useServer, baseUrl, testDbPath, createTestSession, withUpstream, withDnsTest, withEnv, mcp, req, db, providers, proxy, utilMod } from './helpers.js'
 
 useServer()
 
@@ -60,18 +56,23 @@ test('provider URL allowlists, target resolution, path traversal, and SSRF IP/ho
 })
 
 test('socket-pinned single-lookup DNS resolution blocks private answers and defeats DNS rebinding', async () => {
-	const pem = execFileSync('openssl', [
-		'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
-		'-keyout', '/dev/stdout', '-out', '/dev/stdout',
-		'-days', '1', '-nodes', '-subj', '/CN=*.example.test',
-		'-addext', 'subjectAltName=DNS:*.example.test,DNS:example.test,IP:93.184.216.34'
-	], { encoding: 'utf8' })
-	const defaultCas = tls.getCACertificates('default')
-	tls.setDefaultCACertificates([...defaultCas, pem])
 	const tlsReceived = []
 	let loopbackTrapHits = 0
 	let tlsPort = 0
-	const tlsUpstream = https.createServer({ key: pem, cert: pem }, (upReq, res) => {
+	const dnsFixtures = {
+		'loopback-v4.example.test': [{ address: '127.0.0.1', family: 4 }],
+		'loopback-v6.example.test': [{ address: '::1', family: 6 }],
+		'rfc1918.example.test': [{ address: '10.0.0.5', family: 4 }],
+		'rfc6598.example.test': [{ address: '100.64.1.20', family: 4 }],
+		'nat64.example.test': [{ address: '64:ff9b::a9fe:a9fe', family: 6 }],
+		'ula.example.test': [{ address: 'fd00:ec2::254', family: 6 }],
+		'mixed.example.test': [{ address: VIRTUAL_UPSTREAM_IP, family: 4 }, { address: '192.168.1.10', family: 4 }],
+		'public.example.test': [{ address: VIRTUAL_UPSTREAM_IP, family: 4 }]
+	}
+	const lookupCounts = new Map()
+	const dialedIps = []
+	let rebindAttempt = 0
+	await withUpstream({ host: 'public.example.test' }, (upReq, res) => {
 		tlsReceived.push({ sni: upReq.socket.servername, host: upReq.headers.host, url: upReq.url })
 		if (upReq.url === '/bounce-to-cgnat') {
 			res.writeHead(302, { location: `https://rfc6598.example.test:${tlsPort}/internal` })
@@ -81,128 +82,80 @@ test('socket-pinned single-lookup DNS resolution blocks private answers and defe
 		if (upReq.url === '/v1/first') res.setHeader('connection', 'close')
 		res.writeHead(200, { 'content-type': 'application/json' })
 		res.end(JSON.stringify({ ok: true, sni: upReq.socket.servername, host: upReq.headers.host, te: upReq.headers['transfer-encoding'] || null }))
-	})
-	const loopbackTrap = https.createServer({ key: pem, cert: pem }, (upReq, res) => {
-		loopbackTrapHits++
-		res.writeHead(200, { 'content-type': 'application/json' })
-		res.end(JSON.stringify({ leaked: true }))
-	})
-	await new Promise(resolve => tlsUpstream.listen(0, '127.0.0.1', resolve))
-	await new Promise(resolve => loopbackTrap.listen(0, '127.0.0.1', resolve))
-	tlsPort = tlsUpstream.address().port
-	const trapPort = loopbackTrap.address().port
-	const dnsFixtures = {
-		'loopback-v4.example.test': [{ address: '127.0.0.1', family: 4 }],
-		'loopback-v6.example.test': [{ address: '::1', family: 6 }],
-		'rfc1918.example.test': [{ address: '10.0.0.5', family: 4 }],
-		'rfc6598.example.test': [{ address: '100.64.1.20', family: 4 }],
-		'nat64.example.test': [{ address: '64:ff9b::a9fe:a9fe', family: 6 }],
-		'ula.example.test': [{ address: 'fd00:ec2::254', family: 6 }],
-		'mixed.example.test': [{ address: '93.184.216.34', family: 4 }, { address: '192.168.1.10', family: 4 }],
-		'public.example.test': [{ address: '93.184.216.34', family: 4 }]
-	}
-	const lookupCounts = new Map()
-	const dialedIps = []
-	let rebindAttempt = 0
-	const origLookup = dns.promises.lookup
-	const origConnect = net.Socket.prototype.connect
-	dns.promises.lookup = async (host, opts) => {
-		lookupCounts.set(host, (lookupCounts.get(host) || 0) + 1)
-		if (host === 'rebind.example.test') {
-			rebindAttempt++
-			return rebindAttempt === 1 ? [{ address: '93.184.216.34', family: 4 }] : [{ address: '127.0.0.1', family: 4 }]
-		}
-		if (Object.hasOwn(dnsFixtures, host)) return dnsFixtures[host]
-		return origLookup(host, opts)
-	}
-	net.Socket.prototype.connect = function (...args) {
-		const opts = args[0]
-		const port = Number(opts?.port)
-		if (opts && typeof opts === 'object' && (port === tlsPort || port === trapPort)) {
-			if (opts.host === '93.184.216.34') {
-				dialedIps.push(opts.host)
-				args[0] = { ...opts, host: '127.0.0.1' }
-			} else if (typeof opts.lookup === 'function') {
-				const realLookup = opts.lookup
-				args[0] = {
-					...opts,
-					lookup (hostname, lookupOpts, cb) {
-						realLookup(hostname, lookupOpts, (err, res, fam) => {
-							if (err) return cb(err)
-							if (Array.isArray(res)) {
-								for (const r of res) dialedIps.push(r.address)
-								return cb(null, res.map(r => r.address === '93.184.216.34' ? { address: '127.0.0.1', family: 4 } : r))
-							}
-							dialedIps.push(res)
-							cb(null, res === '93.184.216.34' ? '127.0.0.1' : res, fam)
-						})
+	}, async ({ port }) => {
+		tlsPort = port
+		await withUpstream({ host: 'trap.example.test' }, (upReq, res) => {
+			loopbackTrapHits++
+			res.writeHead(200, { 'content-type': 'application/json' })
+			res.end(JSON.stringify({ leaked: true }))
+		}, async () => {
+			await withDnsTest({
+				lookup: async (host, opts, orig) => {
+					lookupCounts.set(host, (lookupCounts.get(host) || 0) + 1)
+					if (host === 'rebind.example.test') {
+						rebindAttempt++
+						return rebindAttempt === 1 ? [{ address: VIRTUAL_UPSTREAM_IP, family: 4 }] : [{ address: '127.0.0.1', family: 4 }]
 					}
+					if (Object.hasOwn(dnsFixtures, host)) return dnsFixtures[host]
+					return orig(host, opts)
+				},
+				onDial: ip => dialedIps.push(ip)
+			}, async () => {
+				const { user, session } = createTestSession({ account: 'dns-ssrf@example.com', admin: true, withApp: false })
+				for (const [idx, host] of Object.keys(dnsFixtures).filter(h => h !== 'public.example.test').entries()) {
+					const provider = `ssrf_${idx}`
+					const app = db.tokens.create({ userId: user.id, provider, type: 'static', credentials: { headers: { authorization: 'Bearer sk' }, baseUrl: `https://${host}:${tlsPort}` } })
+					db.links.create({ sessionId: session.id, appId: app.id })
+					assert.equal((await mcp(session.token, `${provider}_api`, { url: '/v1/data' })).isError, true)
+					assert.equal((await req('GET', `/api/${provider}/v1/data`, { token: session.token })).status, 403)
 				}
-			}
-		}
-		return origConnect.apply(this, args)
-	}
-	try {
-		const { user, session } = createTestSession({ account: 'dns-ssrf@example.com', admin: true, withApp: false })
-		for (const [idx, host] of Object.keys(dnsFixtures).filter(h => h !== 'public.example.test').entries()) {
-			const provider = `ssrf_${idx}`
-			const app = db.tokens.create({ userId: user.id, provider, type: 'static', credentials: { headers: { authorization: 'Bearer sk' }, baseUrl: `https://${host}:${tlsPort}` } })
-			db.links.create({ sessionId: session.id, appId: app.id })
-			assert.equal((await mcp(session.token, `${provider}_api`, { url: '/v1/data' })).isError, true)
-			assert.equal((await req('GET', `/api/${provider}/v1/data`, { token: session.token })).status, 403)
-		}
-		assert.deepEqual(dialedIps, [], 'No TCP socket may dial on blocked DNS answers')
-		assert.deepEqual(tlsReceived, [])
-		const pubApp = db.tokens.create({ userId: user.id, provider: 'ssrf_pub', type: 'static', credentials: { headers: { authorization: 'Bearer sk_pub' }, baseUrl: `https://public.example.test:${tlsPort}` } })
-		db.links.create({ sessionId: session.id, appId: pubApp.id })
-		lookupCounts.clear()
-		const okPubRes = await mcp(session.token, 'ssrf_pub_api', { url: '/v1/ok', headers: { host: 'evil.com', 'transfer-encoding': 'chunked' } })
-		assert.equal(okPubRes.isError, undefined)
-		assert.deepEqual(JSON.parse(okPubRes.content[0].text), { ok: true, sni: 'public.example.test', host: `public.example.test:${tlsPort}`, te: null })
-		assert.equal(lookupCounts.get('public.example.test'), 1)
-		assert.equal((await mcp(session.token, 'ssrf_pub_api', { url: '/bounce-to-cgnat' })).isError, true)
-		const ip4App = db.tokens.create({ userId: user.id, provider: 'ssrf_ip4', type: 'static', credentials: { headers: { authorization: 'Bearer sk_ip4' }, baseUrl: `https://93.184.216.34:${tlsPort}` } })
-		db.links.create({ sessionId: session.id, appId: ip4App.id })
-		dialedIps.length = 0
-		assert.equal((await mcp(session.token, 'ssrf_ip4_api', { url: '/v1/ip4' })).isError, undefined)
-		assert.deepEqual(dialedIps, ['93.184.216.34'])
-		const rebindApp = db.tokens.create({ userId: user.id, provider: 'ssrf_rebind', type: 'static', credentials: { headers: { authorization: 'Bearer sk_rebind' }, baseUrl: `https://rebind.example.test:${tlsPort}` } })
-		db.links.create({ sessionId: session.id, appId: rebindApp.id })
-		dialedIps.length = 0
-		assert.equal((await mcp(session.token, 'ssrf_rebind_api', { url: '/v1/first' })).isError, undefined)
-		assert.equal(lookupCounts.get('rebind.example.test'), 1, 'Exact 1 lookup on first request prevents 2nd-lookup TOCTOU')
-		assert.equal((await mcp(session.token, 'ssrf_rebind_api', { url: '/v1/second' })).isError, true)
-		assert.equal(loopbackTrapHits, 0)
-	} finally {
-		dns.promises.lookup = origLookup
-		net.Socket.prototype.connect = origConnect
-		tls.setDefaultCACertificates(defaultCas)
-		https.globalAgent.destroy()
-		await new Promise(resolve => tlsUpstream.close(resolve))
-		await new Promise(resolve => loopbackTrap.close(resolve))
-	}
+				assert.deepEqual(dialedIps, [], 'No TCP socket may dial on blocked DNS answers')
+				assert.deepEqual(tlsReceived, [])
+				const pubApp = db.tokens.create({ userId: user.id, provider: 'ssrf_pub', type: 'static', credentials: { headers: { authorization: 'Bearer sk_pub' }, baseUrl: `https://public.example.test:${tlsPort}` } })
+				db.links.create({ sessionId: session.id, appId: pubApp.id })
+				lookupCounts.clear()
+				const okPubRes = await mcp(session.token, 'ssrf_pub_api', { url: '/v1/ok', headers: { host: 'evil.com', 'transfer-encoding': 'chunked' } })
+				assert.equal(okPubRes.isError, undefined)
+				assert.deepEqual(JSON.parse(okPubRes.content[0].text), { ok: true, sni: 'public.example.test', host: `public.example.test:${tlsPort}`, te: null })
+				assert.equal(lookupCounts.get('public.example.test'), 1)
+				assert.equal((await mcp(session.token, 'ssrf_pub_api', { url: '/bounce-to-cgnat' })).isError, true)
+				const ip4App = db.tokens.create({ userId: user.id, provider: 'ssrf_ip4', type: 'static', credentials: { headers: { authorization: 'Bearer sk_ip4' }, baseUrl: `https://${VIRTUAL_UPSTREAM_IP}:${tlsPort}` } })
+				db.links.create({ sessionId: session.id, appId: ip4App.id })
+				dialedIps.length = 0
+				assert.equal((await mcp(session.token, 'ssrf_ip4_api', { url: '/v1/ip4' })).isError, undefined)
+				assert.deepEqual(dialedIps, [VIRTUAL_UPSTREAM_IP])
+				const rebindApp = db.tokens.create({ userId: user.id, provider: 'ssrf_rebind', type: 'static', credentials: { headers: { authorization: 'Bearer sk_rebind' }, baseUrl: `https://rebind.example.test:${tlsPort}` } })
+				db.links.create({ sessionId: session.id, appId: rebindApp.id })
+				dialedIps.length = 0
+				assert.equal((await mcp(session.token, 'ssrf_rebind_api', { url: '/v1/first' })).isError, undefined)
+				assert.equal(lookupCounts.get('rebind.example.test'), 1, 'Exact 1 lookup on first request prevents 2nd-lookup TOCTOU')
+				assert.equal((await mcp(session.token, 'ssrf_rebind_api', { url: '/v1/second' })).isError, true)
+				assert.equal(loopbackTrapHits, 0)
+			})
+		})
+	})
 })
 
 test('upstream redirects validate targets, strip headers/query secrets cross-origin and on bounce-back, and downgrade 303', async () => {
 	const cdnReceived = []
 	let apiPort = 0
 	const qSecret = 'SUPER_SECRET_QUERY_KEY_998877'
-	await withUpstream((upReq, res) => {
+	await withUpstream({ host: 'cdn.example.test' }, (upReq, res) => {
 		cdnReceived.push({ method: upReq.method, url: upReq.url, headers: upReq.headers })
 		if (upReq.url === '/bounce-to-api') {
-			res.writeHead(302, { location: `http://127.0.0.1:${apiPort}/echo-auth` })
+			res.writeHead(302, { location: `https://api.example.test:${apiPort}/echo-auth` })
 			res.end()
 			return
 		}
 		if (upReq.url === '/bounce-to-qauth') {
-			res.writeHead(302, { location: `http://127.0.0.1:${apiPort}/qauth/dest?page=9` })
+			res.writeHead(302, { location: `https://api.example.test:${apiPort}/qauth/dest?page=9` })
 			res.end()
 			return
 		}
 		res.writeHead(200, { 'content-type': 'application/octet-stream' })
 		res.end(Buffer.from('archive-bytes'))
 	}, async ({ url: cdnUrl }) => {
-		await withUpstream((upReq, res) => {
+		await withUpstream({ host: 'api.example.test' }, (upReq, res) => {
 			if (upReq.url === '/repos/acme/tarball') {
 				res.writeHead(302, { location: `${cdnUrl}/dl/tarball.gz?sig=1` })
 				res.end()
@@ -239,7 +192,7 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 				return
 			}
 			if (upReq.url === '/userinfo-hop') {
-				res.writeHead(302, { location: `http://user:secret@${new URL(cdnUrl).host}/after` })
+				res.writeHead(302, { location: `https://user:secret@${new URL(cdnUrl).host}/after` })
 				res.end()
 				return
 			}

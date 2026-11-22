@@ -1,9 +1,13 @@
 import { before, after } from 'node:test'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import dns from 'node:dns'
 import fs from 'node:fs'
-import http from 'node:http'
+import https from 'node:https'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import tls from 'node:tls'
 
 const testDbPath = path.join(os.tmpdir(), `jump-test-${process.pid}-${randomUUID()}.db`)
 process.env.DB_PATH = testDbPath
@@ -97,15 +101,109 @@ function createTestSession (opts = {}) {
 	return { user, session, app }
 }
 
-async function withUpstream (handler, fn) {
-	const upstream = http.createServer(handler)
+const VIRTUAL_UPSTREAM_IP = '93.184.216.34'
+const localUpstreamPorts = new Set()
+let testCertPem = null
+let defaultCas = null
+let shimDepth = 0
+let origLookup = null
+let origConnect = null
+let customLookup = null
+let dialObserver = null
+
+function ensureTestCert () {
+	if (testCertPem) return testCertPem
+	testCertPem = execFileSync('openssl', [
+		'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+		'-keyout', '/dev/stdout', '-out', '/dev/stdout',
+		'-days', '1', '-nodes', '-subj', '/CN=*.example.test',
+		'-addext', `subjectAltName=DNS:*.example.test,DNS:example.test,IP:${VIRTUAL_UPSTREAM_IP}`
+	], { encoding: 'utf8' })
+	defaultCas = tls.getCACertificates('default')
+	tls.setDefaultCACertificates([...defaultCas, testCertPem])
+	return testCertPem
+}
+
+function acquireNetworkShim () {
+	ensureTestCert()
+	if (shimDepth++ > 0) return
+	origLookup = dns.promises.lookup
+	origConnect = net.Socket.prototype.connect
+	dns.promises.lookup = async (host, opts) => {
+		if (customLookup) return customLookup(host, opts, origLookup)
+		if (host.endsWith('.example.test')) return [{ address: VIRTUAL_UPSTREAM_IP, family: 4 }]
+		return origLookup(host, opts)
+	}
+	net.Socket.prototype.connect = function (...args) {
+		const opts = args[0]
+		if (opts && typeof opts === 'object' && localUpstreamPorts.has(Number(opts.port))) {
+			if (opts.host === VIRTUAL_UPSTREAM_IP) {
+				dialObserver?.(opts.host)
+				args[0] = { ...opts, host: '127.0.0.1' }
+			} else if (typeof opts.lookup === 'function') {
+				const realLookup = opts.lookup
+				args[0] = {
+					...opts,
+					lookup (hostname, lookupOpts, cb) {
+						realLookup(hostname, lookupOpts, (err, res, fam) => {
+							if (err) return cb(err)
+							if (Array.isArray(res)) {
+								for (const r of res) dialObserver?.(r.address)
+								return cb(null, res.map(r => r.address === VIRTUAL_UPSTREAM_IP ? { address: '127.0.0.1', family: 4 } : r))
+							}
+							dialObserver?.(res)
+							cb(null, res === VIRTUAL_UPSTREAM_IP ? '127.0.0.1' : res, fam)
+						})
+					}
+				}
+			}
+		}
+		return origConnect.apply(this, args)
+	}
+}
+
+function releaseNetworkShim () {
+	if (--shimDepth > 0) return
+	dns.promises.lookup = origLookup
+	net.Socket.prototype.connect = origConnect
+	https.globalAgent.destroy()
+}
+
+async function withDnsTest ({ lookup, onDial }, fn) {
+	const prevLookup = customLookup
+	const prevDial = dialObserver
+	customLookup = lookup || null
+	dialObserver = onDial || null
+	acquireNetworkShim()
+	try {
+		return await fn()
+	} finally {
+		customLookup = prevLookup
+		dialObserver = prevDial
+		releaseNetworkShim()
+	}
+}
+
+async function withUpstream (optsOrHandler, handlerOrFn, maybeFn) {
+	const hasOpts = typeof optsOrHandler === 'object' && optsOrHandler !== null
+	const host = hasOpts ? (optsOrHandler.host || 'api.example.test') : 'api.example.test'
+	const handler = hasOpts ? handlerOrFn : optsOrHandler
+	const fn = hasOpts ? maybeFn : handlerOrFn
+	const pem = ensureTestCert()
+	const upstream = https.createServer({ key: pem, cert: pem }, handler)
 	await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
 	const port = upstream.address().port
-	const url = `http://127.0.0.1:${port}`
+	const url = `https://${host}:${port}`
+	localUpstreamPorts.add(port)
+	acquireNetworkShim()
 	try {
-		return await fn({ url, port, server: upstream })
+		return await fn({ url, host, port, server: upstream })
 	} finally {
+		https.globalAgent.destroy()
+		upstream.closeAllConnections?.()
 		await new Promise(resolve => upstream.close(resolve))
+		localUpstreamPorts.delete(port)
+		releaseNetworkShim()
 	}
 }
 
@@ -167,12 +265,14 @@ async function req (method, urlPath, opts = {}) {
 }
 
 export {
+	VIRTUAL_UPSTREAM_IP,
 	testDbPath,
 	cleanupDbFiles,
 	baseUrl,
 	useServer,
 	createTestSession,
 	withUpstream,
+	withDnsTest,
 	withMockFetch,
 	withEnv,
 	mcp,
