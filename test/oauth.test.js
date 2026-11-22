@@ -291,6 +291,26 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		assert.equal(db.tokens.getByToken(adminSess.token)?.id, adminSess.id, 'Session token preserved across re-auth')
 		const nonAdminState = db.tokens.createState({ sessionId: workerSess.id, reauthAppId: app.id, provider: 'google' })
 		assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${nonAdminState}`)).status, 403)
+		const reauthConnect = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'google', appId: app.id })).content[0].text)
+		const reauthUrl = new URL(reauthConnect.connectUrl)
+		assert.ok((await (await origFetch(`${baseUrl()}${reauthUrl.pathname}${reauthUrl.search}`)).text()).includes(app.id), 'reauth connect page pre-populates reauth_app_id')
+		const connectInfo = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'google', name: 'Work Google' })).content[0].text)
+		const connectUrl = new URL(connectInfo.connectUrl)
+		const connectCode = connectUrl.searchParams.get('code')
+		assert.ok((await (await origFetch(`${baseUrl()}${connectUrl.pathname}${connectUrl.search}`)).text()).includes('Work Google'))
+		const consentRes = await origFetch(`${baseUrl()}/providers/google/consent`, {
+			method: 'POST',
+			headers: { origin: baseUrl(), 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: connectCode, services: 'gmail', app_name: 'Work Google' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(consentRes.status, 302)
+		const consentState = new URL(consentRes.headers.get('location')).searchParams.get('state')
+		returnedEmail = 'connected-ui@example.com'
+		assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${consentState}`)).status, 200)
+		const createdApp = db.tokens.listByUserId(adminSess.userId).find(t => t.type === 'oauth' && t.name === 'Work Google')
+		assert.equal(createdApp?.credentials?.account, 'connected-ui@example.com')
+		assert.ok(db.links.listBySessionId(adminSess.id).some(l => l.appId === createdApp.id), 'connect flow auto-links new OAuth app')
 	})
 	await withEnv({ OAUTH_TIMEOUT_MS: '25' }, async () => {
 		await withMockFetch((input, init) => {
