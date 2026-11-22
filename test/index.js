@@ -103,12 +103,13 @@ test('root endpoint', async () => {
 	const res = await fetch(`http://127.0.0.1:${addr.port}/`)
 	assert.equal(res.status, 200)
 	assert.equal(res.headers.get('content-type'), 'text/html; charset=utf-8')
-	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'jump.acme.com', 'x-forwarded-proto': 'https' } }), 'https://jump.acme.com')
+	const trustedSocket = { remoteAddress: '127.0.0.1' }
+	assert.equal(getBaseUrl({ socket: trustedSocket, headers: { 'x-forwarded-host': 'jump.acme.com', 'x-forwarded-proto': 'https' } }), 'https://jump.acme.com')
 	assert.equal(getBaseUrl({ headers: { host: 'localhost:8080' } }), 'http://localhost:8080')
-	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'evil.com"><script>alert(1)</script>' } }), 'http://localhost:8080')
-	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'jump.acme.com', 'x-forwarded-proto': 'javascript' } }), 'http://localhost:8080')
-	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'user:pass@jump.acme.com' } }), 'http://localhost:8080')
-	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'jump.acme.com/path' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ socket: trustedSocket, headers: { 'x-forwarded-host': 'evil.com"><script>alert(1)</script>' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ socket: trustedSocket, headers: { 'x-forwarded-host': 'jump.acme.com', 'x-forwarded-proto': 'javascript' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ socket: trustedSocket, headers: { 'x-forwarded-host': 'user:pass@jump.acme.com' } }), 'http://localhost:8080')
+	assert.equal(getBaseUrl({ socket: trustedSocket, headers: { 'x-forwarded-host': 'jump.acme.com/path' } }), 'http://localhost:8080')
 	const xssRootRes = await fetch(`http://127.0.0.1:${addr.port}/`, {
 		headers: { 'x-forwarded-host': 'evil.com"><script>alert(1)</script>' }
 	})
@@ -6357,9 +6358,9 @@ test('hasPathTraversal backslash handling and getBaseUrl host/port edge cases', 
 	}).allowed, false)
 	assert.equal(getBaseUrl({ headers: { host: 'localhost.evil.com' } }), 'https://localhost.evil.com')
 	assert.equal(getBaseUrl({ headers: { host: '127.0.0.1.evil.com' } }), 'https://127.0.0.1.evil.com')
-	assert.equal(getBaseUrl({ headers: { 'x-forwarded-host': 'jump.acme.com:443', 'x-forwarded-proto': 'https' } }), 'https://jump.acme.com')
-	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com:80', 'x-forwarded-proto': 'http' } }), 'http://jump.acme.com')
-	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com:80', 'x-forwarded-proto': 'https' } }), 'https://jump.acme.com:80')
+	assert.equal(getBaseUrl({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-host': 'jump.acme.com:443', 'x-forwarded-proto': 'https' } }), 'https://jump.acme.com')
+	assert.equal(getBaseUrl({ socket: { remoteAddress: '127.0.0.1' }, headers: { host: 'jump.acme.com:80', 'x-forwarded-proto': 'http' } }), 'http://jump.acme.com')
+	assert.equal(getBaseUrl({ socket: { remoteAddress: '127.0.0.1' }, headers: { host: 'jump.acme.com:80', 'x-forwarded-proto': 'https' } }), 'https://jump.acme.com:80')
 	assert.equal(getBaseUrl({ headers: { host: 'jump.acme.com:' } }), 'http://localhost:8080')
 	assert.equal(getBaseUrl({ headers: { host: 'a.com:0' } }), 'http://localhost:8080')
 	assert.equal(getBaseUrl({ headers: { host: 'localhost:80' } }), 'http://localhost')
@@ -6400,6 +6401,14 @@ test('hasPathTraversal backslash handling and getBaseUrl host/port edge cases', 
 		socket: { remoteAddress: '203.0.113.5' },
 		headers: { 'x-forwarded-for': '198.51.100.7' }
 	}), '203.0.113.5', 'remote socket ignores spoofed X-Forwarded-For')
+	assert.equal(getBaseUrl({
+		socket: {},
+		headers: { host: '127.0.0.1:8080', 'x-forwarded-host': 'evil.com', 'x-forwarded-proto': 'https' }
+	}), 'http://127.0.0.1:8080', 'missing remoteAddress fails closed and ignores forwarded host headers')
+	assert.equal(getClientIp({
+		socket: {},
+		headers: { 'x-forwarded-for': '198.51.100.7' }
+	}), null, 'missing remoteAddress fails closed and ignores forwarded client IP')
 	assert.equal(parseAppUrl('https://pinned.acme.com:443///'), 'https://pinned.acme.com')
 	assert.equal(parseAppUrl('   '), '')
 	assert.throws(() => parseAppUrl('https://pinned.acme.com/subpath'), /Invalid APP_URL/)

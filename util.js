@@ -190,7 +190,7 @@ if (process.env.APP_URL !== undefined) {
 
 function isTrustedProxy (req) {
 	const addr = req?.socket?.remoteAddress
-	if (!addr) return true
+	if (!addr) return false
 	const clean = addr.toLowerCase().startsWith('::ffff:') ? addr.slice(7) : addr
 	return isLoopbackHost(clean)
 }
