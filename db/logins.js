@@ -117,9 +117,7 @@ function mergeUsers (userIdA, userIdB) {
 			)
 	`).run(surviving.id, surviving.id)
 	const shares = sqlite.prepare(`
-		SELECT id,
-			json_extract(credentials, '$.appId') AS app_id,
-			json_extract(credentials, '$.policy') AS policy
+		SELECT id, json_extract(credentials, '$.appId') AS app_id, json_extract(credentials, '$.policy') AS policy
 		FROM tokens
 		WHERE user_id = ? AND type = 'share'
 		ORDER BY created ASC, rowid ASC
@@ -129,12 +127,12 @@ function mergeUsers (userIdA, userIdB) {
 		if (!s.app_id) continue
 		const kept = seenApps.get(s.app_id)
 		if (kept) {
-			if (kept.policy === s.policy) {
+			if ((kept.policy ?? null) === (s.policy ?? null)) {
 				sqlite.prepare('UPDATE links SET app_id = ? WHERE app_id = ? AND session_id NOT IN (SELECT session_id FROM links WHERE app_id = ?)').run(kept.id, s.id, kept.id)
 			}
 			sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(s.id)
 		} else {
-			seenApps.set(s.app_id, s)
+			seenApps.set(s.app_id, { id: s.id, policy: s.policy ?? null })
 		}
 	}
 	sqlite.prepare('DELETE FROM users WHERE id = ?').run(absorbed.id)
