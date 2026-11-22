@@ -101,7 +101,7 @@ const server = http.createServer(async (req, res) => {
 				return
 			}
 			if (req.method === 'GET' || req.method === 'HEAD') {
-				sendHtml(res, INDEX_HTML.replaceAll('{{APP_URL}}', getBaseUrl(req)))
+				sendHtml(res, INDEX_HTML.replaceAll('{{APP_URL}}', () => getBaseUrl(req)))
 				return
 			}
 			const err = new Error('Method Not Allowed')

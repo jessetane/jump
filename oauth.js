@@ -342,7 +342,7 @@ async function handleAuthorize (req, res, query) {
 		...(linkMode && { linkMode: true, linkAccount, ...(mergeMode && { mergeMode: true }) }),
 		...(clientName && { clientName })
 	}
-	sendHtml(res, AUTHORIZE_HTML.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c')))
+	sendHtml(res, AUTHORIZE_HTML.replace('{{INIT_DATA}}', () => JSON.stringify(initData).replace(/</g, '\\u003c')))
 }
 
 function filterValidAppIds (userId, appIds = []) {
@@ -732,7 +732,7 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 			}))
 		})
 	}
-	sendHtml(res, CONNECT_HTML.replace('{{INIT_DATA}}', JSON.stringify(initData).replace(/</g, '\\u003c')))
+	sendHtml(res, CONNECT_HTML.replace('{{INIT_DATA}}', () => JSON.stringify(initData).replace(/</g, '\\u003c')))
 }
 
 async function handleProviderConsent (req, res, providerName = 'google') {
