@@ -178,7 +178,7 @@ async function listSessions (token, opts = {}) {
 async function getSession (token, opts = {}) {
 	const session = requireSession(token)
 	assertKeys(opts, ['sessionId'])
-	const { sessionId } = opts
+	const sessionId = requireNonEmptyString(opts.sessionId, 'sessionId')
 	if (!session.admin && sessionId !== session.id) {
 		const error = new Error('Access denied: session administration requires admin privileges')
 		error.status = 403
