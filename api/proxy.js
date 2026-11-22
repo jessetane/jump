@@ -11,11 +11,17 @@ import { evaluatePolicy, hasBodyPolicy } from '../policy.js'
 import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
 
 export {
+	drainSilently,
 	formatLinkedApps,
 	request,
 	stream,
 	readResponseBody,
 	sendUpstreamHop
+}
+
+function drainSilently (stream) {
+	stream.on('error', () => {})
+	stream.resume()
 }
 
 const DEFAULT_TIMEOUT_MS = 60000
@@ -401,7 +407,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, header
 	}
 	const rawContentType = res.headers['content-type'] || ''
 	const skipBody = curMethod === 'HEAD' || BODILESS_STATUSES.has(status)
-	const buf = skipBody ? (res.resume(), Buffer.alloc(0)) : await readResponseBody(res, maxFileSizeBytes)
+	const buf = skipBody ? (drainSilently(res), Buffer.alloc(0)) : await readResponseBody(res, maxFileSizeBytes)
 	const contentType = rawContentType.split(';')[0].trim().toLowerCase()
 	const charsetMatch = rawContentType.match(/charset=([^;]+)/i)
 	const charset = charsetMatch ? charsetMatch[1].trim().replace(/^["']|["']$/g, '') : undefined
@@ -765,7 +771,7 @@ async function stream (opts = {}, auth, req, res) {
 		try {
 			if (normalizedMethod === 'HEAD' || BODILESS_STATUSES.has(status)) {
 				commitHeaders()
-				upstreamRes.resume()
+				drainSilently(upstreamRes)
 				res.end()
 				recordLog(status, status >= 400 ? `HTTP ${status}` : null)
 				return
