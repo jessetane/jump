@@ -36,7 +36,7 @@ const { google, github, createProvider, getProvider, listAuthProviders, requireA
 const { isAllowedUrl: isGoogleAllowedUrl, services: googleServices } = google
 const { isAllowedUrl: isGithubAllowedUrl, services: githubServices } = github
 const { drainSilently, readResponseBody, sendUpstreamHop } = await import('../api/proxy.js')
-const { executeTool } = await import('../mcp.js')
+const { executeTool, formatError } = await import('../mcp.js')
 const { isAllowedRedirectUri, deriveClientName } = await import('../oauth.js')
 const api = await import('../api/index.js')
 const { evaluatePolicy, matchPattern, parsePolicy, validatePolicy } = await import('../policy.js')
@@ -281,6 +281,19 @@ test('mcp rejects unknown tool call', async () => {
 	const data = await res.json()
 	assert.equal(data.result.isError, true)
 	assert.equal(data.result.content[0].text, 'Unknown tool: non_existent_tool')
+	const logged = []
+	const origConsoleError = console.error
+	console.error = (...args) => logged.push(args)
+	try {
+		const internalRes = formatError(new Error('SQLITE_ERROR: secret schema detail'), 'admin')
+		assert.equal(internalRes.isError, true)
+		assert.equal(internalRes.content[0].text, 'Internal Server Error', 'Internal MCP errors without err.status must be masked')
+		assert.equal(logged.length, 1, 'Internal MCP errors must call console.error')
+		const opRes = formatError(Object.assign(new Error('App not found: x'), { status: 404 }), 'admin')
+		assert.equal(opRes.content[0].text, 'App not found: x')
+	} finally {
+		console.error = origConsoleError
+	}
 })
 
 test('google.isAllowedUrl domain restrictions', async () => {

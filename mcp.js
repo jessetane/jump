@@ -7,6 +7,7 @@ import { assertKeys, getBody, getBaseUrl, sendJson } from './util.js'
 
 export {
 	executeTool,
+	formatError,
 	handleMcp
 }
 
@@ -200,6 +201,13 @@ function formatContent (result) {
 }
 
 function formatError (err, toolName = 'tool') {
+	if (!err?.status) {
+		console.error(err)
+		return {
+			isError: true,
+			content: [{ type: 'text', text: 'Internal Server Error' }]
+		}
+	}
 	if (err.message?.startsWith('Policy violation:')) {
 		console.warn(`[mcp] ${toolName} policy violation: ${err.message.replace(/^Policy violation:\s*/, '')}`)
 	} else if (err.message?.startsWith('Access denied:')) {
@@ -208,7 +216,7 @@ function formatError (err, toolName = 'tool') {
 		console.warn(`[mcp] ${toolName} rejected: Authentication required`)
 	} else if (err.message?.startsWith('Failed to refresh ')) {
 		console.warn(`[mcp] ${err.message}`)
-	} else if (err.status) {
+	} else {
 		console.warn(`[mcp] ${toolName} error (${err.status}): ${err.message}`)
 		const providerMatch = 'data' in err ? toolName.match(/^([a-z0-9_-]+)_api$/i) : null
 		const prefix = providerMatch ? `${getProvider(providerMatch[1]).name} API Error (${err.status}): ` : ''
