@@ -153,7 +153,7 @@ function isAllowedRedirectUri (redirectUri) {
 	} catch {
 		return false
 	}
-	if (url.hash) return false
+	if (url.hash || url.username || url.password) return false
 	const protocol = url.protocol.toLowerCase()
 	if (DISALLOWED_REDIRECT_SCHEMES.has(protocol)) return false
 	const hostname = url.hostname.toLowerCase()

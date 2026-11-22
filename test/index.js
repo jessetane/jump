@@ -931,6 +931,8 @@ test('isAllowedRedirectUri exact and wildcard matching', () => {
 	assert.equal(isAllowedRedirectUri('cursor://anyscheme/callback'), true)
 	assert.equal(isAllowedRedirectUri('vscode://callback'), true)
 	assert.equal(isAllowedRedirectUri('https://evil.com/callback'), false)
+	assert.equal(isAllowedRedirectUri('https://evil.com@chatgpt.com/callback'), false)
+	assert.equal(isAllowedRedirectUri('http://user:pass@127.0.0.1:8080/cb'), false)
 	assert.equal(isAllowedRedirectUri('malicious://callback'), false)
 	assert.equal(isAllowedRedirectUri(''), false)
 	assert.equal(isAllowedRedirectUri(null), false)
