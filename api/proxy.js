@@ -729,7 +729,7 @@ async function stream (opts = {}, auth, req, res) {
 				throw err
 			}
 		}
-		const incompleteUpload = Boolean(status >= 400 && bodyStream && !bodyStream.readableEnded)
+		const incompleteUpload = Boolean(bodyStream && !bodyStream.readableEnded)
 		if (incompleteUpload) {
 			bodyStream.unpipe(upstreamRes.req)
 			bodyStream.pause()
