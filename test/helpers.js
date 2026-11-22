@@ -1,0 +1,192 @@
+import { before, after } from 'node:test'
+import { randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
+
+const testDbPath = path.join(os.tmpdir(), `jump-test-${process.pid}-${randomUUID()}.db`)
+process.env.DB_PATH = testDbPath
+process.env.NODE_ENV = 'test'
+process.env.APP_URL = ''
+process.env.GOOGLE_CLIENT_ID = 'test-client-id'
+process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret'
+process.env.ALLOWED_REDIRECT_DOMAINS = 'chatgpt.com,*.antigravity.google,antigravity,cursor,vscode'
+process.env.OAUTH_RATE_LIMIT = '10000'
+
+const { server, bootstrapLocalAdmin } = await import('../index.js')
+const db = await import('../db/index.js')
+const providers = await import('../providers/index.js')
+const api = await import('../api/index.js')
+const proxy = await import('../api/proxy.js')
+const mcpMod = await import('../mcp.js')
+const oauthMod = await import('../oauth.js')
+const policyMod = await import('../policy.js')
+const ssoMod = await import('../sso.js')
+const utilMod = await import('../util.js')
+const cryptoMod = await import('../crypto.js')
+
+function cleanupDbFiles (dbPath) {
+	for (const suffix of ['', '-wal', '-shm', '.key', '.key.old']) {
+		fs.rmSync(`${dbPath}${suffix}`, { force: true })
+	}
+}
+
+function baseUrl () {
+	return `http://127.0.0.1:${server.address().port}`
+}
+
+function useServer () {
+	before((t, done) => {
+		server.listen(0, '127.0.0.1', done)
+	})
+	after((t, done) => {
+		server.close(() => {
+			try {
+				db.sqlite.close()
+			} catch {}
+			cleanupDbFiles(testDbPath)
+			done()
+		})
+	})
+	return baseUrl
+}
+
+function createTestSession (opts = {}) {
+	const {
+		account = `user-${randomUUID()}@example.com`,
+		provider = 'google',
+		admin = false,
+		accessToken = 'ya29.fake-token',
+		refreshToken = '1//fake-refresh',
+		expiresAt = Date.now() + 3600000,
+		scopes = null,
+		policy = null,
+		withApp = true,
+		ip = '127.0.0.1',
+		ua = 'TestClient/1.0'
+	} = opts
+	const user = db.logins.resolveUser(provider, account)
+	const session = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		type: 'bearer',
+		name: 'Test Session',
+		admin: admin ? 1 : 0,
+		ip,
+		ua
+	})
+	if (!withApp) return { user, session, app: null }
+	const app = db.tokens.create({
+		userId: user.id,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Test Google App',
+		credentials: {
+			accessToken,
+			refreshToken
+		},
+		expiresAt,
+		scopes
+	})
+	db.links.create({
+		sessionId: session.id,
+		appId: app.id,
+		policy
+	})
+	return { user, session, app }
+}
+
+async function withUpstream (handler, fn) {
+	const upstream = http.createServer(handler)
+	await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
+	const port = upstream.address().port
+	const url = `http://127.0.0.1:${port}`
+	try {
+		return await fn({ url, port, server: upstream })
+	} finally {
+		await new Promise(resolve => upstream.close(resolve))
+	}
+}
+
+async function withMockFetch (handler, fn) {
+	const origFetch = globalThis.fetch
+	globalThis.fetch = (input, init) => handler(input, init, origFetch)
+	try {
+		return await fn(origFetch)
+	} finally {
+		globalThis.fetch = origFetch
+	}
+}
+
+async function withEnv (vars, fn) {
+	const saved = new Map()
+	for (const [k, v] of Object.entries(vars)) {
+		saved.set(k, process.env[k])
+		if (v === undefined) delete process.env[k]
+		else process.env[k] = v
+	}
+	try {
+		return await fn()
+	} finally {
+		for (const [k, v] of saved) {
+			if (v === undefined) delete process.env[k]
+			else process.env[k] = v
+		}
+	}
+}
+
+function mcp (token, name, args, customBaseUrl) {
+	return mcpMod.executeTool(name, args, token, customBaseUrl)
+}
+
+async function req (method, urlPath, opts = {}) {
+	const { token, body, headers = {}, redirect } = opts
+	const reqHeaders = { ...headers }
+	if (token && !reqHeaders.authorization) reqHeaders.authorization = `Bearer ${token}`
+	let reqBody = body
+	if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
+		if (!reqHeaders['content-type']) reqHeaders['content-type'] = 'application/json'
+		reqBody = JSON.stringify(body)
+	}
+	const target = urlPath.startsWith('http://') || urlPath.startsWith('https://')
+		? urlPath
+		: `${baseUrl()}${urlPath}`
+	const fetchOpts = { method, headers: reqHeaders }
+	if (reqBody !== undefined) fetchOpts.body = reqBody
+	if (redirect) fetchOpts.redirect = redirect
+	const res = await fetch(target, fetchOpts)
+	const text = await res.text()
+	let data = null
+	if (text && (res.headers.get('content-type') || '').includes('json')) {
+		try {
+			data = JSON.parse(text)
+		} catch {}
+	}
+	return { status: res.status, headers: res.headers, text, data, res }
+}
+
+export {
+	testDbPath,
+	cleanupDbFiles,
+	baseUrl,
+	useServer,
+	createTestSession,
+	withUpstream,
+	withMockFetch,
+	withEnv,
+	mcp,
+	req,
+	server,
+	bootstrapLocalAdmin,
+	db,
+	providers,
+	api,
+	proxy,
+	mcpMod,
+	oauthMod,
+	policyMod,
+	ssoMod,
+	utilMod,
+	cryptoMod
+}

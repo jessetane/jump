@@ -15,7 +15,7 @@
 	},
 	"scripts": {
 		"start": "node index.js",
-		"test": "node --test test/*.js"
+		"test": "node --test test/*.test.js"
 	},
 	"dependencies": {
 		"rpc-engine": "^12.1.5"
