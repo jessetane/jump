@@ -287,7 +287,9 @@ function createProvider (config) {
 					...(creds.query && { query: creds.query })
 				}
 			}
-			if (oauth && creds.refreshToken && (!appToken.expiresAt || Date.now() > appToken.expiresAt - 60000)) {
+			const isExpiring = Boolean(appToken.expiresAt && Date.now() > appToken.expiresAt - 60000)
+			const needsRefresh = !creds.accessToken || isExpiring
+			if (oauth && creds.refreshToken && needsRefresh) {
 				if (inflightRefreshes.has(appToken.id)) {
 					return inflightRefreshes.get(appToken.id)
 				}

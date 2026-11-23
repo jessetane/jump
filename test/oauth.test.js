@@ -282,6 +282,9 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		assert.equal(refreshCalls, 1, 'Concurrent upstream token refreshes must deduplicate')
 		assert.equal(t1.headers.authorization, 'Bearer ya29.fresh_1')
 		assert.equal(t2.headers.authorization, 'Bearer ya29.fresh_1')
+		const noExpiryApp = db.tokens.updateCredentials(app.id, { credentials: { ...db.tokens.get(app.id).credentials, accessToken: 'ya29.noexp' }, expiresAt: null })
+		assert.equal((await providers.google.resolveCredentials(noExpiryApp)).headers.authorization, 'Bearer ya29.noexp')
+		assert.equal(refreshCalls, 1, 'OAuth token without expiresAt must not refresh on every request')
 		returnedEmail = 'UNVERIFIED'
 		await assert.rejects(() => providers.google.exchangeCode({ code: 'code', callbackUrl: 'http://localhost/cb' }), /Could not retrieve account identifier/)
 		returnedEmail = 'FAIL_401'
