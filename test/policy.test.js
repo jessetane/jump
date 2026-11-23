@@ -296,4 +296,6 @@ test('body parser-differential defenses across Content-Type, duplicate JSON keys
 	assert.equal(evaluatePolicy(denyRawSecret, { url: 'https://api.example.com/v1/items', method: 'POST', body: [{ k: 'secret_val' }] }).allowed, false)
 	assert.equal(evaluatePolicy(denyRawSecret, { url: 'https://api.example.com/v1/items', method: 'POST', body: Object.assign(Object.create({ p: 1 }), { k: 'secret_val' }) }).allowed, false)
 	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/raw' }], { url: 'https://api.example.com/v1/raw', method: 'POST', body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00]) }).allowed, true)
+	assert.equal(evaluatePolicy(denyRawSecret, { url: 'https://api.example.com/v1/items', method: 'POST', objectFormat: 'form', body: { a: '1', note: 'top-secret' } }).allowed, false)
+	assert.equal(evaluatePolicy(allowUsdJson, { url: 'https://api.stripe.com/v1/charges', method: 'POST', contentType: 'application/problem+json; charset=utf-8', body: '{"currency":"usd"}' }).allowed, true)
 })

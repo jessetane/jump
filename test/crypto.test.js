@@ -122,6 +122,12 @@ test('session tokens, refresh tokens, and ephemeral oauth codes/states are hashe
 		assert.equal(entry.query, undefined)
 		assert.equal(entry.credentials, undefined)
 	}
+	const tamperApp = db.tokens.create({ userId: session.userId, provider: 'stripe', type: 'static', credentials: { bearer: 'sk_tamper' } })
+	const rawSecret = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(tamperApp.id).credentials)
+	const flipped = `${rawSecret.secret.slice(0, -1)}${rawSecret.secret.endsWith('A') ? 'B' : 'A'}`
+	db.sqlite.prepare('UPDATE tokens SET credentials = ? WHERE id = ?').run(JSON.stringify({ secret: flipped }), tamperApp.id)
+	assert.throws(() => db.tokens.get(tamperApp.id), /unable to authenticate/i)
+	db.tokens.remove(tamperApp.id)
 })
 
 test('encryption key sources, rotation across restarts, and VACUUM scrubbing of old ciphertext', async () => {
@@ -137,6 +143,9 @@ test('encryption key sources, rotation across restarts, and VACUUM scrubbing of 
 			await withEnv({ ENCRYPTION_KEY: '', CREDENTIALS_DIRECTORY: undefined }, () => {
 				db.tokens.initKeys(diyDb)
 				assert.equal(fs.existsSync(`${diyPath}.key`), true)
+				fs.chmodSync(`${diyPath}.key`, 0o644)
+				db.tokens.initKeys(diyDb)
+				assert.equal(fs.statSync(`${diyPath}.key`).mode & 0o777, 0o600, 'initKeys tightens permissive .key permissions')
 				const ctOld = cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_diy_rot' } }), cryptoMod.secretContext('app-1', 'stripe', 'static'))
 				const now = new Date().toISOString()
 				diyDb.prepare("INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES ('app-1', 'stripe', 'static', ?, ?, ?)").run(JSON.stringify({ secret: ctOld }), now, now)

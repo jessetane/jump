@@ -311,6 +311,7 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({ token: gatedAdmin.token }).toString()
 	})).status, 403, 'Local token sign-in rejected when OAuth providers exist')
+	assert.equal(bootstrapLocalAdmin(), null, 'bootstrapLocalAdmin no-ops when OAuth providers are configured')
 	await withEnv({ GOOGLE_CLIENT_ID: undefined, GITHUB_CLIENT_ID: undefined }, async () => {
 		assert.deepEqual(providers.listAuthProviders(), [])
 		const localUser = db.users.create()
