@@ -473,7 +473,7 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 				}
 				pump()
 			})
-			const e413 = await runEarly('/early-413'.replace('/early', '/api/comp/early'))
+			const e413 = await runEarly('/api/comp/early-413')
 			assert.equal(e413.status, 413)
 			assert.equal(e413.headers.connection, 'close')
 			assert.ok(early413Bytes < 1024 * 1024)

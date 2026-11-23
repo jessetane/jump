@@ -124,7 +124,7 @@ test('session tokens, refresh tokens, and ephemeral oauth codes/states are hashe
 	}
 })
 
-test('encryption key sources, rotation across restarts, and VACUUM scrubbing of old ciphertext', () => {
+test('encryption key sources, rotation across restarts, and VACUUM scrubbing of old ciphertext', async () => {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jump-crypto-rot-'))
 	const k1 = cryptoMod.generateKey()
 	const k2 = cryptoMod.generateKey()
@@ -134,7 +134,7 @@ test('encryption key sources, rotation across restarts, and VACUUM scrubbing of 
 		try {
 			diyDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
 			diyDb.exec(TOKEN_DDL)
-			withEnvSync({ ENCRYPTION_KEY: '', CREDENTIALS_DIRECTORY: undefined }, () => {
+			await withEnv({ ENCRYPTION_KEY: '', CREDENTIALS_DIRECTORY: undefined }, () => {
 				db.tokens.initKeys(diyDb)
 				assert.equal(fs.existsSync(`${diyPath}.key`), true)
 				const ctOld = cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_diy_rot' } }), cryptoMod.secretContext('app-1', 'stripe', 'static'))
@@ -160,7 +160,7 @@ test('encryption key sources, rotation across restarts, and VACUUM scrubbing of 
 		try {
 			tpmDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
 			tpmDb.exec(TOKEN_DDL)
-			withEnvSync({ CREDENTIALS_DIRECTORY: credDir, ENCRYPTION_KEY: undefined }, () => {
+			await withEnv({ CREDENTIALS_DIRECTORY: credDir, ENCRYPTION_KEY: undefined }, () => {
 				assert.throws(() => db.tokens.initKeys(tpmDb), /Missing systemd credential/)
 				assert.equal(fs.existsSync(`${tpmDbPath}.key`), false)
 				fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
@@ -189,7 +189,7 @@ test('encryption key sources, rotation across restarts, and VACUUM scrubbing of 
 		const memDb = new DatabaseSync(':memory:')
 		try {
 			memDb.exec(TOKEN_DDL)
-			withEnvSync({ CREDENTIALS_DIRECTORY: undefined, ENCRYPTION_KEY: undefined }, () => {
+			await withEnv({ CREDENTIALS_DIRECTORY: undefined, ENCRYPTION_KEY: undefined }, () => {
 				db.tokens.initKeys(memDb)
 				assert.equal(fs.existsSync(':memory:.key'), false)
 				const now = new Date().toISOString()
@@ -212,7 +212,7 @@ test('encryption key sources, rotation across restarts, and VACUUM scrubbing of 
 			credentials: { headers: { authorization: 'Bearer sk_env_rot_canary' }, baseUrl: 'https://api.stripe.com' }
 		})
 		const sharedKey = fs.readFileSync(`${testDbPath}.key`, 'utf8').trim()
-		withEnvSync({ CREDENTIALS_DIRECTORY: undefined, ENCRYPTION_KEY: `${k2},${sharedKey}` }, () => {
+		await withEnv({ CREDENTIALS_DIRECTORY: undefined, ENCRYPTION_KEY: `${k2},${sharedKey}` }, () => {
 			db.init()
 			process.env.ENCRYPTION_KEY = k2
 			db.init()
@@ -225,23 +225,6 @@ test('encryption key sources, rotation across restarts, and VACUUM scrubbing of 
 		fs.rmSync(tmpDir, { recursive: true, force: true })
 	}
 })
-
-function withEnvSync (vars, fn) {
-	const saved = new Map()
-	for (const [k, v] of Object.entries(vars)) {
-		saved.set(k, process.env[k])
-		if (v === undefined) delete process.env[k]
-		else process.env[k] = v
-	}
-	try {
-		return fn()
-	} finally {
-		for (const [k, v] of saved) {
-			if (v === undefined) delete process.env[k]
-			else process.env[k] = v
-		}
-	}
-}
 
 test('stdout access and mcp logs omit query strings, credentials, and request bodies', async () => {
 	const { session } = createTestSession({ account: 'log-redaction@example.com', admin: true })
