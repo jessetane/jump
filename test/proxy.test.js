@@ -255,6 +255,21 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 				res.end()
 				return
 			}
+			if (upReq.url.startsWith('/qauth/raw-abs')) {
+				res.writeHead(302, { location: `https://other.example.test/next?ApiKey=${qSecret}&ok=1#frag` })
+				res.end()
+				return
+			}
+			if (upReq.url.startsWith('/qauth/raw-proto')) {
+				res.writeHead(302, { location: `//other.example.test/next?apikey=${qSecret}&ok=1#frag` })
+				res.end()
+				return
+			}
+			if (upReq.url.startsWith('/qauth/raw-clean')) {
+				res.writeHead(302, { location: '/v2/keep?safe=1#h' })
+				res.end()
+				return
+			}
 			if (upReq.url.startsWith('/qauth/raw-bad-loc')) {
 				res.writeHead(302, { location: `http://[::1:bad/?ApiKey=${qSecret}` })
 				res.end()
@@ -332,6 +347,15 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 			const rawRel = await req('GET', '/api/namecheap/qauth/raw-rel', { token: session.token, redirect: 'manual' })
 			assert.equal(rawRel.status, 302)
 			assert.equal(rawRel.headers.get('location'), '/v2/next?ok=1#sec')
+			const rawAbs = await req('GET', '/api/namecheap/qauth/raw-abs', { token: session.token, redirect: 'manual' })
+			assert.equal(rawAbs.status, 302)
+			assert.equal(rawAbs.headers.get('location'), 'https://other.example.test/next?ok=1#frag')
+			const rawProto = await req('GET', '/api/namecheap/qauth/raw-proto', { token: session.token, redirect: 'manual' })
+			assert.equal(rawProto.status, 302)
+			assert.equal(rawProto.headers.get('location'), '//other.example.test/next?ok=1#frag')
+			const rawClean = await req('GET', '/api/namecheap/qauth/raw-clean', { token: session.token, redirect: 'manual' })
+			assert.equal(rawClean.status, 302)
+			assert.equal(rawClean.headers.get('location'), '/v2/keep?safe=1#h')
 			const origConsoleError = console.error
 			let errLogs = ''
 			console.error = (...args) => { errLogs += args.map(String).join(' ') }
