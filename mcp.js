@@ -286,10 +286,8 @@ const rpcMethods = {
 	initialize: params => {
 		const requested = params?.protocolVersion
 		const protocolVersion = typeof requested === 'string' && requested ? requested : '2024-11-05'
-		if (process.env.NODE_ENV !== 'test') {
-			const client = params?.clientInfo ? `${params.clientInfo.name || 'unknown'}/${params.clientInfo.version || ''}` : 'unknown'
-			console.log(`[mcp] initialize (client: ${client}, protocol: ${protocolVersion})`)
-		}
+		const client = params?.clientInfo ? `${params.clientInfo.name || 'unknown'}/${params.clientInfo.version || ''}` : 'unknown'
+		console.log(`[mcp] initialize (client: ${client}, protocol: ${protocolVersion})`)
 		return {
 			protocolVersion,
 			capabilities: { tools: { listChanged: false } },
@@ -297,32 +295,24 @@ const rpcMethods = {
 		}
 	},
 	'notifications/initialized': () => {
-		if (process.env.NODE_ENV !== 'test') {
-			console.log('[mcp] notifications/initialized')
-		}
+		console.log('[mcp] notifications/initialized')
 		return {}
 	},
 	ping: () => {
-		if (process.env.NODE_ENV !== 'test') {
-			console.log('[mcp] ping')
-		}
+		console.log('[mcp] ping')
 		return {}
 	},
 	'tools/list': (params, token) => {
-		if (process.env.NODE_ENV !== 'test') {
-			console.log('[mcp] tools/list')
-		}
+		console.log('[mcp] tools/list')
 		return { tools: getAvailableTools(token) }
 	},
 	'tools/call': (params, token, appUrl) => {
 		const name = params?.name
 		const args = { ...params?.arguments }
-		if (process.env.NODE_ENV !== 'test') {
-			const detail = name === 'admin'
-				? ` action=${args.action || 'whoami'}`
-				: args.method ? ` method=${String(args.method).toUpperCase()}` : ''
-			console.log(`[mcp] tools/call: name=${name || '(missing)'}${detail}`)
-		}
+		const detail = name === 'admin'
+			? ` action=${args.action || 'whoami'}`
+			: args.method ? ` method=${String(args.method).toUpperCase()}` : ''
+		console.log(`[mcp] tools/call: name=${name || '(missing)'}${detail}`)
 		return executeTool(name, args, token, appUrl)
 	}
 }

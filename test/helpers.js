@@ -11,7 +11,7 @@ import tls from 'node:tls'
 
 const testDbPath = path.join(os.tmpdir(), `jump-test-${process.pid}-${randomUUID()}.db`)
 process.env.DB_PATH = testDbPath
-process.env.NODE_ENV = 'test'
+console.log = () => {}
 process.env.APP_URL = ''
 process.env.GOOGLE_CLIENT_ID = 'test-client-id'
 process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret'

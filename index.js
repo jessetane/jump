@@ -3,6 +3,7 @@
 import './env.js'
 import http from 'node:http'
 import fs from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { handleOauth } from './oauth.js'
 import { handleMcp } from './mcp.js'
 import { handleRest } from './rest.js'
@@ -67,10 +68,8 @@ const server = http.createServer(async (req, res) => {
 	let pathname = '(invalid)'
 	res.setHeader('x-content-type-options', 'nosniff')
 	res.on('finish', () => {
-		if (process.env.NODE_ENV !== 'test') {
-			const duration = Date.now() - start
-			console.log(`[${res.statusCode}] ${req.method} ${pathname} (${duration}ms)`)
-		}
+		const duration = Date.now() - start
+		console.log(`[${res.statusCode}] ${req.method} ${pathname} (${duration}ms)`)
 	})
 	try {
 		let url
@@ -166,7 +165,8 @@ function bootstrapLocalAdmin () {
 	return session
 }
 
-if (process.env.NODE_ENV !== 'test') {
+const isMain = Boolean(process.argv[1] && fs.existsSync(process.argv[1]) && pathToFileURL(fs.realpathSync(process.argv[1])).href === import.meta.url)
+if (isMain) {
 	const bootstrapped = bootstrapLocalAdmin()
 	if (bootstrapped) {
 		console.log(`[bootstrap] Admin session created for localhost: ${bootstrapped.token}`)

@@ -249,17 +249,15 @@ test('stdout access and mcp logs omit query strings, credentials, and request bo
 	const lines = []
 	console.log = (...args) => lines.push(args.map(String).join(' '))
 	try {
-		await withEnv({ NODE_ENV: 'production' }, async () => {
-			await req('GET', '/?secret=leak_me_123')
-			await req('POST', '/mcp', {
-				token: session.token,
-				body: {
-					jsonrpc: '2.0',
-					id: 1,
-					method: 'tools/call',
-					params: { name: 'admin', arguments: { action: 'whoami', credentials: 'sk_live_secret', body: 'private_email_body' } }
-				}
-			})
+		await req('GET', '/?secret=leak_me_123')
+		await req('POST', '/mcp', {
+			token: session.token,
+			body: {
+				jsonrpc: '2.0',
+				id: 1,
+				method: 'tools/call',
+				params: { name: 'admin', arguments: { action: 'whoami', credentials: 'sk_live_secret', body: 'private_email_body' } }
+			}
 		})
 	} finally {
 		console.log = origLog

@@ -190,7 +190,7 @@ test('getBaseUrl / getClientIp fail-closed proxy trust, OAuth rate limiting, and
 	const subDbPath = path.join(os.tmpdir(), `jump-shutdown-${process.pid}.db`)
 	const child = spawn(process.execPath, [path.join(dirname, '..', 'index.js')], {
 		cwd: dirname,
-		env: { ...process.env, NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(freePort), DB_PATH: subDbPath },
+		env: { ...process.env, HOST: '127.0.0.1', PORT: String(freePort), DB_PATH: subDbPath },
 		stdio: ['ignore', 'pipe', 'pipe']
 	})
 	let inflight = null
