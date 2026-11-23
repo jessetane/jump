@@ -121,7 +121,7 @@ function buildScopesFromSelection (services, baseScopes = [], selectedServices =
 	return Array.from(scopeSet).join(' ')
 }
 
-async function parseTokenResponse (res, fallbackErrorMsg) {
+async function parseOAuthResponse (res, fallbackErrorMsg) {
 	const rawText = await res.text()
 	let data = {}
 	try {
@@ -130,7 +130,10 @@ async function parseTokenResponse (res, fallbackErrorMsg) {
 		data = { error_description: rawText }
 	}
 	if (!res.ok || data.error) {
-		const err = new Error(data.error_description || data.error || fallbackErrorMsg)
+		const errorText = typeof data.error === 'string'
+			? data.error
+			: (data.error?.message || (data.error ? JSON.stringify(data) : ''))
+		const err = new Error(data.error_description || errorText || data.message || fallbackErrorMsg)
 		err.status = res.ok ? 401 : res.status
 		err.data = data
 		throw err
@@ -238,13 +241,15 @@ function createProvider (config) {
 					body: params.toString(),
 					signal: oauthTimeout()
 				})
-				let tokenData
-				try {
-					tokenData = await parseTokenResponse(tokenRes, `Failed to exchange authorization code with ${label}`)
-				} catch (err) {
-					err.status = 502
-					throw err
+				const parseUpstream = async (res, msg) => {
+					try {
+						return await parseOAuthResponse(res, msg)
+					} catch (err) {
+						err.status = 502
+						throw err
+					}
 				}
+				const tokenData = await parseUpstream(tokenRes, `Failed to exchange authorization code with ${label}`)
 				const userRes = await fetch(oauth.userInfoUrl, {
 					headers: {
 						authorization: `Bearer ${tokenData.access_token}`,
@@ -253,20 +258,7 @@ function createProvider (config) {
 					},
 					signal: oauthTimeout()
 				})
-				if (!userRes.ok) {
-					let data = await userRes.text()
-					try {
-						data = JSON.parse(data)
-					} catch {}
-					const msg = typeof data === 'object'
-						? (data?.error_description || data?.error?.message || data?.message || JSON.stringify(data))
-						: (data || 'Failed to fetch user info')
-					const err = new Error(msg)
-					err.status = userRes.status
-					err.data = data
-					throw err
-				}
-				const userInfo = await userRes.json()
+				const userInfo = await parseUpstream(userRes, 'Failed to fetch user info')
 				const account = oauth.extractAccount ? oauth.extractAccount(userInfo) : null
 				if (!account) {
 					const err = new Error(`Could not retrieve account identifier from ${label}.`)
@@ -326,7 +318,7 @@ function createProvider (config) {
 						body: params.toString(),
 						signal: oauthTimeout()
 					})
-					const data = await parseTokenResponse(res, `Failed to refresh ${label} token`)
+					const data = await parseOAuthResponse(res, `Failed to refresh ${label} token`)
 					const expiresAt = data.expires_in ? Date.now() + (data.expires_in * 1000) : null
 					const updatedCreds = {
 						...creds,

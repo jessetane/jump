@@ -267,6 +267,7 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		}
 		if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
 			if (returnedEmail === 'UNVERIFIED') return Response.json({ email: 'spoof@corp.com', verified_email: false })
+			if (returnedEmail === 'FAIL_401') return Response.json({ error: { message: 'bad token' } }, { status: 401 })
 			return Response.json({ email: returnedEmail, verified_email: true })
 		}
 		if (u === 'https://oauth2.googleapis.com/revoke') return new Response(null, { status: 204 })
@@ -278,6 +279,8 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		assert.equal(t2.headers.authorization, 'Bearer ya29.fresh_1')
 		returnedEmail = 'UNVERIFIED'
 		await assert.rejects(() => providers.google.exchangeCode({ code: 'code', callbackUrl: 'http://localhost/cb' }), /Could not retrieve account identifier/)
+		returnedEmail = 'FAIL_401'
+		await assert.rejects(() => providers.google.exchangeCode({ code: 'code', callbackUrl: 'http://localhost/cb' }), err => err.status === 502 && err.message === 'bad token')
 		returnedEmail = 'wrong@example.com'
 		const mismatchState = db.tokens.createState({ sessionId: adminSess.id, reauthAppId: app.id, provider: 'google' })
 		const mismatchRes = await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${mismatchState}`)
