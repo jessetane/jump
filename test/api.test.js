@@ -140,6 +140,9 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	]) {
 		assert.equal((await mcp(session.token, 'admin', bad)).isError, true)
 	}
+	assert.equal((await req('POST', '/api/links', { token: session.token, body: { sessionId: session.id } })).status, 400)
+	assert.equal((await req('POST', '/api/links', { token: session.token, body: { appId: app.id } })).status, 400)
+	assert.equal((await req('DELETE', '/api/links', { token: session.token, body: { appId: app.id } })).status, 400)
 	for (const badProv of ['self', 'sessions', 'my.api']) {
 		assert.equal((await mcp(session.token, 'admin', { action: 'connect_app', provider: badProv, credentials: 'sk', baseUrl: 'https://api.stripe.com' })).isError, true)
 	}

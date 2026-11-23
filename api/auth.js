@@ -121,15 +121,8 @@ function requireAdmin (token, message = 'Access denied: app administration requi
 	return session
 }
 
-function requireApp (userId, appId, { allowShare = true, requireId = false } = {}) {
-	if (requireId && appId === undefined) {
-		const error = new Error('appId is required')
-		error.status = 400
-		throw error
-	}
-	if (appId !== undefined) {
-		appId = requireNonEmptyString(appId, 'appId')
-	}
+function requireApp (userId, appId, { allowShare = true } = {}) {
+	appId = requireNonEmptyString(appId, 'appId')
 	const targetApp = db.tokens.get(appId)
 	if (!targetApp || targetApp.userId !== userId || !db.tokens.isUpstreamApp(targetApp, { allowShare })) {
 		const error = new Error(`App not found: ${appId}`)
@@ -140,6 +133,7 @@ function requireApp (userId, appId, { allowShare = true, requireId = false } = {
 }
 
 function requireTargetSession (userId, sessionId) {
+	sessionId = requireNonEmptyString(sessionId, 'sessionId')
 	const targetSession = db.tokens.get(sessionId)
 	if (!db.tokens.isSession(targetSession) || targetSession.userId !== userId) {
 		const error = new Error(`Session not found: ${sessionId}`)
@@ -490,7 +484,7 @@ async function connectApp (token, opts = {}, appUrl) {
 	const cleanName = optionalString(name, 'name')
 	const cleanAccount = optionalString(account, 'account')
 	if (appId !== undefined) {
-		const existing = requireApp(session.userId, appId, { allowShare: false, requireId: true })
+		const existing = requireApp(session.userId, appId, { allowShare: false })
 		appId = existing.id
 		if (provider && provider !== existing.provider) {
 			const error = new Error(`App ${appId} belongs to provider "${existing.provider}", not "${provider}"`)
@@ -675,7 +669,7 @@ async function updateApp (token, opts = {}) {
 	const session = requireAdmin(token)
 	assertKeys(opts, ['appId', 'name', 'account', 'baseUrl', 'credentials'])
 	const { appId, name, account, baseUrl, credentials } = opts || {}
-	const targetApp = requireApp(session.userId, appId, { allowShare: false, requireId: true })
+	const targetApp = requireApp(session.userId, appId, { allowShare: false })
 	if (name === undefined && account === undefined && baseUrl === undefined && credentials === undefined) {
 		throw badRequest('At least one of name, account, baseUrl, or credentials is required')
 	}
