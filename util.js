@@ -7,6 +7,7 @@ export {
 	getRawBody,
 	getBody,
 	parseAppUrl,
+	positiveNumberEnv,
 	getBaseUrl,
 	getClientIp,
 	serializeFormBody,
@@ -186,6 +187,16 @@ function parseAppUrl (raw) {
 
 if (process.env.APP_URL !== undefined) {
 	process.env.APP_URL = parseAppUrl(process.env.APP_URL)
+}
+
+function positiveNumberEnv (name, fallback) {
+	const raw = process.env[name]
+	if (raw === undefined || String(raw).trim() === '') return fallback
+	const n = Number(raw)
+	if (!Number.isFinite(n) || n <= 0) {
+		throw new Error(`Invalid ${name}: ${raw}`)
+	}
+	return n
 }
 
 function isTrustedProxy (req) {

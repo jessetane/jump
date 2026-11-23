@@ -8,7 +8,7 @@ import zlib from 'node:zlib'
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy, hasBodyPolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
+import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, positiveNumberEnv, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
 
 export {
 	drainSilently,
@@ -398,7 +398,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, header
 	}
 	const status = res.statusCode || 502
 	if (onStatus) onStatus(status)
-	const maxFileSizeMb = Number(process.env.MAX_FILE_SIZE_MB) || 10
+	const maxFileSizeMb = positiveNumberEnv('MAX_FILE_SIZE_MB', 10)
 	const maxFileSizeBytes = maxFileSizeMb * 1024 * 1024
 	const contentLength = res.headers['content-length']
 	if (contentLength && Number(contentLength) > maxFileSizeBytes) {
@@ -625,7 +625,7 @@ async function runProxyCall ({ auth, providerName = 'google', url, method, app, 
 	const start = Date.now()
 	const normalizedMethod = normalizeMethod(method)
 	const provider = getProvider(providerName)
-	const timeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS
+	const timeoutMs = positiveNumberEnv('UPSTREAM_TIMEOUT_MS', DEFAULT_TIMEOUT_MS)
 	const logState = {
 		targetAppId: null,
 		resolvedUrl: String(url),

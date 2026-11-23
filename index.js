@@ -8,7 +8,7 @@ import { handleMcp } from './mcp.js'
 import { handleRest } from './rest.js'
 import { listAuthProviders } from './providers/index.js'
 import * as db from './db/index.js'
-import { getBaseUrl, getClientIp, sendJson, sendHtml } from './util.js'
+import { getBaseUrl, getClientIp, positiveNumberEnv, sendJson, sendHtml } from './util.js'
 
 export { server, bootstrapLocalAdmin }
 
@@ -152,7 +152,7 @@ const server = http.createServer(async (req, res) => {
 		}
 	}
 })
-const upstreamTimeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS) || 60000
+const upstreamTimeoutMs = positiveNumberEnv('UPSTREAM_TIMEOUT_MS', 60000)
 server.headersTimeout = 15000
 server.requestTimeout = 0
 server.timeout = Math.max(60000, upstreamTimeoutMs + 15000)

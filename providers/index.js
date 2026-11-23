@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { validateBaseUrl, resolveTargetUrl, hasPathTraversal } from '../util.js'
+import { validateBaseUrl, resolveTargetUrl, hasPathTraversal, positiveNumberEnv } from '../util.js'
 import googleConfig from './google.js'
 import githubConfig from './github.js'
 
@@ -42,7 +42,7 @@ const DEFAULT_OAUTH_TIMEOUT_MS = 30000
 const inflightRefreshes = new Map()
 
 function oauthTimeout () {
-	return AbortSignal.timeout(Number(process.env.OAUTH_TIMEOUT_MS) || DEFAULT_OAUTH_TIMEOUT_MS)
+	return AbortSignal.timeout(positiveNumberEnv('OAUTH_TIMEOUT_MS', DEFAULT_OAUTH_TIMEOUT_MS))
 }
 
 function parseGrantedServices (scopesStr, services) {

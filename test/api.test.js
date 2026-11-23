@@ -146,6 +146,12 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	for (const badCreds of ['', '   ', 'tok\r\ninj: 1', {}, { bearer: 'a', basic: 'u:p' }, { basic: 'nocolon' }, { headers: { cookie: 'x=1' } }, { headers: { host: 'evil.com' } }, { query: { ApiKey: '1', apikey: '2' } }]) {
 		assert.equal((await req('POST', '/api/apps', { token: session.token, body: { provider: 'stripe', credentials: badCreds, baseUrl: 'https://api.stripe.com' } })).status, 400)
 	}
+	await withEnv({ UPSTREAM_TIMEOUT_MS: undefined }, () => assert.equal(utilMod.positiveNumberEnv('UPSTREAM_TIMEOUT_MS', 60000), 60000))
+	await withEnv({ UPSTREAM_TIMEOUT_MS: '  ' }, () => assert.equal(utilMod.positiveNumberEnv('UPSTREAM_TIMEOUT_MS', 60000), 60000))
+	await withEnv({ UPSTREAM_TIMEOUT_MS: '25' }, () => assert.equal(utilMod.positiveNumberEnv('UPSTREAM_TIMEOUT_MS', 60000), 25))
+	for (const badEnv of ['0', '-5', 'Infinity', '10mb']) {
+		await withEnv({ UPSTREAM_TIMEOUT_MS: badEnv }, () => assert.throws(() => utilMod.positiveNumberEnv('UPSTREAM_TIMEOUT_MS', 60000), /Invalid UPSTREAM_TIMEOUT_MS/))
+	}
 	const upd = db.tokens.updateCredentials(app.id, { credentials: { accessToken: 'ya29.2', refreshToken: '1//r' }, expiresAt: null, scopes: null })
 	assert.equal(upd.expiresAt, null)
 	assert.equal(upd.scopes, null)
