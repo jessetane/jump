@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { validateBaseUrl, resolveTargetUrl, hasPathTraversal, positiveNumberEnv, httpError } from '../util.js'
+import { validateBaseUrl, hasUrlScheme, resolveTargetUrl, hasPathTraversal, positiveNumberEnv, httpError } from '../util.js'
 import googleConfig from './google.js'
 import githubConfig from './github.js'
 
@@ -360,7 +360,7 @@ function createProvider (config) {
 			const appBase = appToken?.credentials?.baseUrl || null
 			if (!appBase && hasWildcardHost) {
 				const clean = targetUrl.trim()
-				if (clean && !clean.startsWith('http://') && !clean.startsWith('https:/')) {
+				if (clean && !hasUrlScheme(clean)) {
 					const noLeadingSlash = clean.replace(/^\/+/, '')
 					const slashIdx = noLeadingSlash.indexOf('/')
 					const firstSegment = slashIdx === -1 ? noLeadingSlash : noLeadingSlash.slice(0, slashIdx)

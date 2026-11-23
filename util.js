@@ -22,6 +22,7 @@ export {
 	stripTrailingDot,
 	lookupUpstreamHost,
 	validateBaseUrl,
+	hasUrlScheme,
 	resolveTargetUrl,
 	hasPathTraversal,
 	parseAccountSpec,
@@ -391,14 +392,18 @@ function validateBaseUrl (baseUrl) {
 	return `${parsed.origin}${pathname}`
 }
 
+function hasUrlScheme (str) {
+	return typeof str === 'string' && /^(?:https?:\/|[a-z][a-z\d+.-]*:\/\/)/i.test(str)
+}
+
 function resolveTargetUrl (targetUrl, baseUrl = null) {
 	if (!targetUrl || typeof targetUrl !== 'string') return ''
 	let clean = targetUrl.trim()
 	if (!clean) return ''
-	if (clean.startsWith('https:/') && !clean.startsWith('https://')) {
-		clean = clean.replace(/^https:\/+/, 'https://')
+	if (/^https:\/[^/]/i.test(clean)) {
+		clean = clean.replace(/^https:\/+/i, 'https://')
 	}
-	if (clean.startsWith('http://') || clean.startsWith('https://')) {
+	if (hasUrlScheme(clean)) {
 		return clean
 	}
 	if (!baseUrl) return clean

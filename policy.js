@@ -1,4 +1,4 @@
-import { resolveTargetUrl, hasPathTraversal, serializeFormBody, isPlainObject } from './util.js'
+import { hasUrlScheme, resolveTargetUrl, hasPathTraversal, serializeFormBody, isPlainObject } from './util.js'
 
 export {
 	evaluatePolicy,
@@ -307,7 +307,7 @@ function validatePolicy (policy) {
 			if (rule.path.includes('?') || rule.path.includes('#')) {
 				return { valid: false, error: `Rule at index ${i} path must not contain query parameters or fragments` }
 			}
-			if (/^https?:\/+/i.test(rule.path.trim())) {
+			if (hasUrlScheme(rule.path.trim())) {
 				return { valid: false, error: `Rule at index ${i} path must be a pathname; use "origin" to specify hostnames` }
 			}
 			if (hasPathTraversal(rule.path)) {
