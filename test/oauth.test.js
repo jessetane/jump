@@ -206,22 +206,54 @@ test('PKCE code exchange, client_id binding, refresh rotation, 60s dedup, /oauth
 })
 
 test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLocalAdmin', async () => {
-	const { user, app } = createTestSession({ account: 'verify-flow@example.com' })
+	const { user, session, app } = createTestSession({ account: 'verify-flow@example.com' })
+	const extraApp = db.tokens.create({ userId: user.id, provider: 'stripe', type: 'static', name: 'Extra Stripe', credentials: { bearer: 'sk_extra' } })
+	const newApp = db.tokens.create({ userId: user.id, provider: 'linear', type: 'static', name: 'New Linear', credentials: { bearer: 'lin_new' } })
+	const { session: otherSess, app: foreignApp } = createTestSession({ account: 'verify-other@example.com' })
 	const badVerify = db.tokens.createState({ mode: 'verify', userId: null })
 	assert.equal((await req('GET', `/oauth/verify?code=${badVerify}`)).status, 400)
 	const wrongMode = db.tokens.createState({ mode: 'login', userId: user.id })
 	assert.equal((await req('GET', `/oauth/verify?code=${wrongMode}`)).status, 400)
+	const missingSessVerify = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: 'missing-session' })
+	assert.equal((await req('GET', `/oauth/verify?code=${missingSessVerify}`)).status, 400)
+	const crossUserSessVerify = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: otherSess.id })
+	assert.equal((await req('GET', `/oauth/verify?code=${crossUserSessVerify}`)).status, 400)
+	const existingSessVerify = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: session.id, admin: 1, newAppIds: [newApp.id], name: 'Linked Session' })
+	const getExistingVerify = await req('GET', `/oauth/verify?code=${existingSessVerify}`)
+	assert.equal(getExistingVerify.status, 200)
+	assert.ok(getExistingVerify.text.includes(`value="${app.id}" checked>`), 'Existing linked app is pre-checked')
+	assert.ok(getExistingVerify.text.includes(`value="${newApp.id}" checked>`), 'Newly connected admin app is pre-checked')
+	assert.ok(getExistingVerify.text.includes(`value="${extraApp.id}">`), 'Unlinked prior app stays unchecked')
+	const postExistingBody = new URLSearchParams({ code: existingSessVerify })
+	postExistingBody.append('app_id', extraApp.id)
+	postExistingBody.append('app_id', foreignApp.id)
+	postExistingBody.append('app_id', 'bogus-id')
+	const postExistingVerify = await req('POST', '/oauth/verify', {
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: postExistingBody.toString()
+	})
+	assert.equal(postExistingVerify.status, 200)
+	assert.deepEqual(db.links.listBySessionId(session.id).map(l => l.appId), [extraApp.id], 'Existing-session /oauth/verify unlinks unchecked apps and drops cross-user/invalid app_ids')
 	const verifyCode = db.tokens.createState({ mode: 'verify', userId: user.id, name: 'Verify App', clientRedirectUri: 'https://antigravity.google/oauth-callback', clientState: 'st1' })
 	assert.equal((await req('GET', `/oauth/verify?code=${verifyCode}`)).status, 200)
 	assert.ok(db.tokens.getState(verifyCode), 'GET /oauth/verify must not consume state (scanner-safe)')
+	const postVerifyBody = new URLSearchParams({ code: verifyCode })
+	postVerifyBody.append('app_id', app.id)
+	postVerifyBody.append('app_id', foreignApp.id)
+	postVerifyBody.append('app_id', 'bogus-id')
 	const postVerify = await req('POST', '/oauth/verify', {
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams({ code: verifyCode, app_id: app.id }).toString(),
+		body: postVerifyBody.toString(),
 		redirect: 'manual'
 	})
 	assert.equal(postVerify.status, 302)
 	assert.equal(db.tokens.getState(verifyCode), null)
-	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS n FROM links WHERE app_id = ?").get(app.id).n, 1, 'Only original createTestSession link exists until /oauth/token exchanges auth code')
+	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS n FROM links WHERE app_id = ?").get(app.id).n, 0, 'Unlinked app has no links until /oauth/token exchanges auth code')
+	const authCode = new URL(postVerify.headers.get('location')).searchParams.get('code')
+	const tokenRes = await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: authCode, redirect_uri: 'https://antigravity.google/oauth-callback' } })
+	assert.equal(tokenRes.status, 200)
+	const verifySess = db.tokens.getByToken(tokenRes.data.access_token)
+	assert.deepEqual(db.links.listBySessionId(verifySess.id).map(l => l.appId), [app.id], 'Fresh-login /oauth/verify drops cross-user/invalid app_ids')
 	const { session: gatedAdmin } = createTestSession({ account: 'local-gated@example.com', admin: true })
 	assert.equal((await req('POST', '/oauth/authorize/consent', {
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
