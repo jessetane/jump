@@ -66,6 +66,11 @@ test('MCP JSON-RPC framing, method guards, and internal error masking', async ()
 	assert.equal(missingName.data.result.isError, true)
 	const unknownTool = await req('POST', '/mcp', { token: session.token, body: { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'missing', arguments: {} } } })
 	assert.equal(unknownTool.data.result.isError, true)
+	for (const badArgs of ['bad', [1, 2], 123, null]) {
+		const res = await req('POST', '/mcp', { token: session.token, body: { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'admin', arguments: badArgs } } })
+		assert.equal(res.data.result.isError, true)
+		assert.match(res.data.result.content[0].text, /arguments must be an object/)
+	}
 	const protoAction = await mcpMod.executeTool('admin', { action: 'toString' }, 'invalid-token')
 	assert.equal(protoAction.isError, true)
 	assert.match(protoAction.content[0].text, /Unknown action: toString/)

@@ -3,7 +3,7 @@ import RpcEngine from 'rpc-engine'
 import * as api from './api/index.js'
 import * as db from './db/index.js'
 import { getProvider, parseProviderTool } from './providers/index.js'
-import { assertKeys, getBody, getBaseUrl, httpError, sendJson } from './util.js'
+import { assertKeys, getBody, getBaseUrl, httpError, isPlainObject, sendJson } from './util.js'
 
 export {
 	executeTool,
@@ -237,6 +237,9 @@ async function executeTool (name, args = {}, token, appUrl) {
 		return { isError: true, content: [{ type: 'text', text: 'Tool name is required' }] }
 	}
 	try {
+		if (args !== undefined && !isPlainObject(args)) {
+			throw httpError(400, 'Tool arguments must be an object')
+		}
 		if (name === 'admin') {
 			const { action: rawAction, ...actionArgs } = args || {}
 			const action = rawAction || 'whoami'
@@ -308,10 +311,11 @@ const rpcMethods = Object.assign(Object.create(null), {
 	},
 	'tools/call': (params, token, appUrl) => {
 		const name = params?.name
-		const args = { ...params?.arguments }
+		const args = params?.arguments
+		const preview = isPlainObject(args) ? args : {}
 		const detail = name === 'admin'
-			? ` action=${args.action || 'whoami'}`
-			: args.method ? ` method=${String(args.method).toUpperCase()}` : ''
+			? ` action=${preview.action || 'whoami'}`
+			: preview.method ? ` method=${String(preview.method).toUpperCase()}` : ''
 		console.log(`[mcp] tools/call: name=${name || '(missing)'}${detail}`)
 		return executeTool(name, args, token, appUrl)
 	}
