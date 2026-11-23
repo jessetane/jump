@@ -160,6 +160,19 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	assert.equal((await req('DELETE', `/api/apps/${app.id}?revoke=invalid`, { token: session.token })).status, 400)
 	assert.equal((await req('GET', '/api/logs?allowed=invalid', { token: session.token })).status, 400)
 	assert.throws(() => db.logs.listByUserId(user.id, { allowed: 'invalid' }), /allowed must be a boolean/)
+	for (const key of ['sessionId', 'appId', 'provider']) {
+		for (const badVal of [true, 123, {}, ['x']]) {
+			assert.throws(() => db.logs.listByUserId(user.id, { [key]: badVal }), new RegExp(`${key} must be a string`))
+			const res = await mcp(session.token, 'admin', { action: 'list_logs', [key]: badVal })
+			assert.equal(res.isError, true)
+			assert.match(res.content[0].text, new RegExp(`${key} must be a string`))
+		}
+	}
+	const nonAdmin = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+	const nonAdminBadType = await mcp(nonAdmin.token, 'admin', { action: 'list_logs', sessionId: 123 })
+	assert.equal(nonAdminBadType.isError, true)
+	assert.match(nonAdminBadType.content[0].text, /sessionId must be a string/)
+	assert.equal((await mcp(nonAdmin.token, 'admin', { action: 'list_logs', sessionId: '   ' })).isError, undefined)
 	for (const badLimit of ['abc', '0', '-5', '1001', '1.5', '']) {
 		assert.equal((await req('GET', `/api/logs?limit=${encodeURIComponent(badLimit)}`, { token: session.token })).status, 400)
 		assert.throws(() => db.logs.listByUserId(user.id, { limit: badLimit }), /limit must be an integer between 1 and 1000/)

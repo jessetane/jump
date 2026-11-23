@@ -31,7 +31,8 @@ export {
 	httpError,
 	assertKeys,
 	tightenFileMode,
-	requireBoolean
+	requireBoolean,
+	optionalString
 }
 
 const HOP_BY_HOP_HEADERS = [
@@ -99,6 +100,14 @@ function requireBoolean (val, name, defaultValue = undefined) {
 		if (lower === 'false' || lower === '0') return false
 	}
 	throw httpError(400, `${name} must be a boolean`)
+}
+
+function optionalString (val, label) {
+	if (val === undefined || val === null) return null
+	if (typeof val !== 'string') {
+		throw httpError(400, `${label} must be a string`)
+	}
+	return val.trim() || null
 }
 
 function parseAccountSpec (rawAccount, rawProvider = null) {

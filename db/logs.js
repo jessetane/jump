@@ -1,6 +1,6 @@
 import { sqlite } from './index.js'
 import { userAccountSql } from './users.js'
-import { httpError, requireBoolean } from '../util.js'
+import { httpError, requireBoolean, optionalString } from '../util.js'
 import { randomUUID } from 'node:crypto'
 
 export {
@@ -142,17 +142,20 @@ function listByUserId (userId, opts = {}) {
 			AND logs.created >= ?
 	`
 	const params = [userId, userId, userId, userId, minDate]
-	if (sessionId) {
+	const cleanSessionId = optionalString(sessionId, 'sessionId')
+	if (cleanSessionId) {
 		query += ' AND logs.session_id = ?'
-		params.push(sessionId)
+		params.push(cleanSessionId)
 	}
-	if (appId) {
+	const cleanAppId = optionalString(appId, 'appId')
+	if (cleanAppId) {
 		query += ' AND COALESCE(owned.id, share.id) = ?'
-		params.push(appId)
+		params.push(cleanAppId)
 	}
-	if (provider) {
+	const cleanProvider = optionalString(provider, 'provider')
+	if (cleanProvider) {
 		query += ' AND logs.provider = ?'
-		params.push(provider)
+		params.push(cleanProvider)
 	}
 	const parsedAllowed = requireBoolean(allowed, 'allowed')
 	if (parsedAllowed !== undefined) {

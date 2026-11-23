@@ -2,7 +2,7 @@ import * as db from '../db/index.js'
 import { RESERVED_PROVIDERS, isValidProviderId, getProvider, listAuthProviders, requireAuthProvider } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, assertKeys, getBaseUrl, httpError, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
+import { HOP_BY_HOP_HEADERS, assertKeys, getBaseUrl, httpError, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean, optionalString } from '../util.js'
 
 export {
 	whoami,
@@ -283,14 +283,6 @@ async function listApps (token, opts = {}) {
 	}
 	const apps = allTokens.filter(t => t.provider !== 'self').map(a => formatApp(a, { sharesByAppId }))
 	return { apps }
-}
-
-function optionalString (val, label) {
-	if (val === undefined || val === null) return null
-	if (typeof val !== 'string') {
-		throw httpError(400, `${label} must be a string`)
-	}
-	return val.trim() || null
 }
 
 function requireNonEmptyString (val, label) {
@@ -757,10 +749,11 @@ async function listLogs (token, opts = {}) {
 	const session = requireSession(token)
 	assertKeys(opts, ['sessionId', 'appId', 'provider', 'allowed', 'limit'])
 	const { sessionId, appId, provider, allowed, limit } = opts || {}
-	if (!session.admin && sessionId && sessionId !== session.id) {
+	const cleanSessionId = optionalString(sessionId, 'sessionId')
+	if (!session.admin && cleanSessionId && cleanSessionId !== session.id) {
 		throw httpError(403, 'Access denied: log administration requires admin privileges')
 	}
-	const effectiveSessionId = session.admin ? sessionId : session.id
+	const effectiveSessionId = session.admin ? cleanSessionId : session.id
 	const logs = db.logs.listByUserId(session.userId, {
 		sessionId: effectiveSessionId,
 		appId,
