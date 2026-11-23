@@ -26,7 +26,7 @@ function isValidFieldScalar (val) {
 
 function parseUrlEncoded (str) {
 	const params = new URLSearchParams(str)
-	const obj = {}
+	const obj = Object.create(null)
 	for (const [k, v] of params.entries()) {
 		if (Object.hasOwn(obj, k)) {
 			obj[k] = Array.isArray(obj[k]) ? [...obj[k], v] : [obj[k], v]

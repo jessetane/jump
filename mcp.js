@@ -159,7 +159,7 @@ function buildProviderTool (providerName, providerLinks = []) {
 	}
 }
 
-const adminActions = {
+const adminActions = Object.assign(Object.create(null), {
 	whoami: api.auth.whoami,
 	list_sessions: api.auth.listSessions,
 	get_session: api.auth.getSession,
@@ -177,7 +177,7 @@ const adminActions = {
 	link_login: api.auth.linkLogin,
 	unlink_login: api.auth.unlinkLogin,
 	list_logs: api.auth.listLogs
-}
+})
 
 function formatContent (result) {
 	if (result?.binary) {
@@ -282,7 +282,7 @@ function getAvailableTools (auth) {
 	return list
 }
 
-const rpcMethods = {
+const rpcMethods = Object.assign(Object.create(null), {
 	initialize: params => {
 		const requested = params?.protocolVersion
 		const protocolVersion = typeof requested === 'string' && requested ? requested : '2024-11-05'
@@ -315,7 +315,7 @@ const rpcMethods = {
 		console.log(`[mcp] tools/call: name=${name || '(missing)'}${detail}`)
 		return executeTool(name, args, token, appUrl)
 	}
-}
+})
 
 async function handleMcp (req, res, token) {
 	const base = getBaseUrl(req)

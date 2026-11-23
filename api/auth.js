@@ -403,7 +403,7 @@ function normalizeCredentials (raw) {
 			}
 		}
 	}
-	const query = {}
+	const query = Object.create(null)
 	if (raw.query !== undefined) {
 		if (!isPlainObject(raw.query) || Object.keys(raw.query).length === 0) {
 			throw httpError(400, 'credentials.query must be a non-empty object of parameter names to string values')
@@ -428,7 +428,7 @@ function normalizeCredentials (raw) {
 			query[param] = val
 		}
 	}
-	const headerMap = Object.fromEntries(headers)
+	const headerMap = Object.assign(Object.create(null), Object.fromEntries(headers))
 	const hasHeaders = Object.keys(headerMap).length > 0
 	const hasQuery = Object.keys(query).length > 0
 	if (!hasHeaders && !hasQuery) {

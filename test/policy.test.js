@@ -205,7 +205,9 @@ test('body field-map and raw-glob predicates across JSON, form, nested paths, ar
 	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/flags', body: { dry_run: '', mode: 'fast' }, bodyType: 'form' }], { url: 'https://api.example.com/v1/flags', method: 'POST', body: 'dry_run&mode=fast' }).allowed, true)
 	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/form', body: { '<foo>': 'bar>' }, bodyType: 'form' }], { url: 'https://api.stripe.com/v1/form', method: 'POST', body: '<foo>=bar>' }).allowed, true)
 	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/proto', body: { toString: '*', constructor: '*' } }], { url: 'https://api.example.com/v1/proto', method: 'POST', body: {} }).allowed, false)
-	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/proto', body: { toString: 'hello' }, bodyType: 'form' }], { url: 'https://api.example.com/v1/proto', method: 'POST', body: 'toString=hello' }).allowed, true)
+	assert.equal(evaluatePolicy([{ action: 'deny', methods: ['POST'], path: '/v1/proto', body: { ['__proto__']: 'evil' }, bodyType: 'form' }, { action: 'allow', methods: ['POST'], path: '/v1/proto', body: { toString: 'hello', ['__proto__']: 'safe' }, bodyType: 'form' }], { url: 'https://api.example.com/v1/proto', method: 'POST', body: 'toString=hello&__proto__=safe' }).allowed, true)
+	assert.equal(evaluatePolicy([{ action: 'deny', methods: ['POST'], path: '/v1/proto', body: { ['__proto__']: 'evil' }, bodyType: 'form' }, { action: 'allow' }], { url: 'https://api.example.com/v1/proto', method: 'POST', body: '__proto__=evil' }).allowed, false)
+	assert.equal(evaluatePolicy([{ action: 'deny', query: { ['__proto__']: 'evil' } }, { action: 'allow' }], { url: 'https://api.example.com/v1/proto?__proto__=evil' }).allowed, false)
 	const denyXml = [
 		{ action: 'deny', methods: ['POST'], path: '/soap', body: ['*<DeleteDomain*', '*<Transfer*'] },
 		{ action: 'allow', methods: ['POST'], path: '/soap', body: '*<DomainList*>*' }

@@ -56,7 +56,7 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 	}, token, req, res)
 }
 
-const resources = {
+const resources = Object.assign(Object.create(null), {
 	health: {
 		GET (req, res, { query }) {
 			assertKeys(query, [])
@@ -154,7 +154,7 @@ const resources = {
 			sendJson(res, await api.auth.listLogs(token, query))
 		}
 	}
-}
+})
 
 async function dispatchRest (req, res, handlerTable, { token, query, id, idKey }) {
 	const handler = Object.hasOwn(handlerTable, req.method) && typeof handlerTable[req.method] === 'function'

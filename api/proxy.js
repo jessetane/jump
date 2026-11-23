@@ -150,7 +150,7 @@ async function readResponseBody (source, maxBytes) {
 }
 
 function sanitizeCallerHeaders (headers, extraStrip = null) {
-	const clean = {}
+	const clean = Object.create(null)
 	if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return clean
 	for (const [k, v] of Object.entries(headers)) {
 		if (v === undefined || v === null) continue
@@ -208,7 +208,7 @@ function toAuthEntries (credentials) {
 }
 
 function attachAuth (hopUrl, baseHeaders, authHeaders, queryEntries) {
-	const hopHeaders = { ...baseHeaders }
+	const hopHeaders = Object.assign(Object.create(null), baseHeaders)
 	for (const [k, v] of authHeaders) {
 		hopHeaders[k] = v
 	}

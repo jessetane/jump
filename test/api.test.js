@@ -9,6 +9,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { useServer, baseUrl, createTestSession, withEnv, mcp, req, db, mcpMod, utilMod, server } from './helpers.js'
+import { getProvider, parseProviderTool } from '../providers/index.js'
 
 const dirname = path.dirname(fileURLToPath(import.meta.url))
 useServer()
@@ -65,6 +66,9 @@ test('MCP JSON-RPC framing, method guards, and internal error masking', async ()
 	assert.equal(missingName.data.result.isError, true)
 	const unknownTool = await req('POST', '/mcp', { token: session.token, body: { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'missing', arguments: {} } } })
 	assert.equal(unknownTool.data.result.isError, true)
+	const protoAction = await mcpMod.executeTool('admin', { action: 'toString' }, 'invalid-token')
+	assert.equal(protoAction.isError, true)
+	assert.match(protoAction.content[0].text, /Unknown action: toString/)
 	const origErr = console.error
 	const logged = []
 	console.error = (...args) => logged.push(args)
@@ -110,9 +114,14 @@ test('canonical REST contract rejects method/payload smuggling, trailing slashes
 	assert.equal((await req('GET', '/api/apps?provider=stripe', { token: session.token })).status, 400)
 	assert.equal((await req('POST', '/api/apps', { token: session.token, body: '["arr"]', headers: { 'content-type': 'application/json' } })).status, 400)
 	assert.equal((await req('PATCH', `/api/apps/${app.id}`, { token: session.token, body: { appId: app.id, name: 'X' } })).status, 400)
-	for (const p of ['/api/sessions/', '/api/apps/', '/api/logins/', '/api/health/extra', '/api/whoami/extra', '/api/links/123', '/api/shares/123', '/api/logs/123']) {
+	for (const p of ['/api/toString', '/api/constructor/foo', '/api/__proto__/foo', '/api/sessions/', '/api/apps/', '/api/logins/', '/api/health/extra', '/api/whoami/extra', '/api/links/123', '/api/shares/123', '/api/logs/123']) {
 		assert.equal((await req('GET', p, { token: session.token })).status, 404, `Reserved/trailing path must 404: ${p}`)
 	}
+	assert.equal(getProvider('constructor').id, 'constructor')
+	assert.equal(getProvider('__proto__').id, '__proto__')
+	assert.equal(parseProviderTool('constructor_api'), null)
+	assert.equal(parseProviderTool('__proto___api'), null)
+	assert.equal((await req('POST', '/api/apps', { token: session.token, body: { provider: 'constructor', credentials: 'sk' } })).status, 400)
 	assert.equal((await req('DELETE', '/api/apps/%E0%A4%A', { token: session.token })).status, 400)
 	const specialApp = db.tokens.create({ id: 'app:sp/id%1', userId: session.userId, provider: 'stripe', type: 'static', credentials: { headers: { authorization: 'Bearer sk' }, baseUrl: 'https://api.stripe.com' } })
 	assert.equal((await req('PATCH', `/api/apps/${encodeURIComponent(specialApp.id)}`, { token: session.token, body: { name: 'Renamed' } })).status, 200)

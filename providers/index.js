@@ -18,7 +18,7 @@ export {
 }
 
 const PROVIDER_ID_PATTERN = /^[a-z0-9_-]+$/
-const RESERVED_PROVIDERS = new Set(['self', 'health', 'whoami', 'logins', 'sessions', 'apps', 'links', 'shares', 'logs'])
+const RESERVED_PROVIDERS = new Set(['self', 'health', 'whoami', 'logins', 'sessions', 'apps', 'links', 'shares', 'logs', '__proto__', 'constructor', 'prototype'])
 
 function isValidProviderId (name) {
 	return typeof name === 'string' && PROVIDER_ID_PATTERN.test(name) && !RESERVED_PROVIDERS.has(name)
@@ -33,10 +33,10 @@ function parseProviderTool (toolName) {
 const google = createProvider(googleConfig)
 const github = createProvider(githubConfig)
 
-const providers = {
+const providers = Object.assign(Object.create(null), {
 	google,
 	github
-}
+})
 
 const DEFAULT_OAUTH_TIMEOUT_MS = 30000
 const inflightRefreshes = new Map()
@@ -162,7 +162,7 @@ function createProvider (config) {
 	const hasWildcardHost = allowedHosts.some(h => h.startsWith('*.'))
 	let services = null
 	if (oauth?.services) {
-		services = {}
+		services = Object.create(null)
 		for (const [key, svc] of Object.entries(oauth.services)) {
 			services[key] = { id: key, ...svc }
 		}

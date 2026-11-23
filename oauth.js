@@ -1117,7 +1117,7 @@ async function handleRevoke (req, res) {
 	sendJson(res, { status: 'ok' })
 }
 
-const routes = {
+const routes = Object.assign(Object.create(null), {
 	'/oauth/register': (req, res) => handleRegister(req, res),
 	'/oauth/authorize': (req, res, { query }) => handleAuthorize(req, res, query),
 	'/oauth/authorize/consent': (req, res) => handleAuthorizeConsent(req, res),
@@ -1125,7 +1125,7 @@ const routes = {
 	'/oauth/callback': (req, res, { query }) => handleCallback(req, res, query),
 	'/oauth/token': (req, res) => handleToken(req, res),
 	'/oauth/revoke': (req, res) => handleRevoke(req, res)
-}
+})
 
 async function handleOauth (req, res, { pathname, url, query }) {
 	if (pathname === '/.well-known/oauth-protected-resource' || pathname.startsWith('/.well-known/oauth-protected-resource/')) {
