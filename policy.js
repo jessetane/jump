@@ -37,25 +37,6 @@ function parseUrlEncoded (str) {
 	return obj
 }
 
-function normalizeFormObject (obj) {
-	const out = {}
-	for (const [k, v] of Object.entries(obj)) {
-		if (v === undefined || v === null) continue
-		if (Array.isArray(v)) {
-			const items = []
-			for (const item of v) {
-				if (item !== undefined && item !== null) {
-					items.push(typeof item === 'object' ? JSON.stringify(item) : String(item))
-				}
-			}
-			if (items.length > 0) out[k] = items
-		} else {
-			out[k] = typeof v === 'object' ? JSON.stringify(v) : String(v)
-		}
-	}
-	return out
-}
-
 function hasDuplicateJsonKeys (str) {
 	const stack = []
 	let i = 0
@@ -112,7 +93,7 @@ function parseBodyObject (body, bodyType = 'json', objectFormat = 'json', conten
 	if (isEmptyBody(body)) return {}
 	if (isPlainObject(body)) {
 		if (objectFormat !== bodyType) return null
-		return bodyType === 'form' ? normalizeFormObject(body) : body
+		return bodyType === 'form' ? parseUrlEncoded(serializeFormBody(body)) : body
 	}
 	let raw
 	if (typeof body === 'string') {
