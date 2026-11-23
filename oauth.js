@@ -316,8 +316,9 @@ async function handleAuthorize (req, res, query) {
 			try {
 				assertSsoLink(linkLogins, p.id)
 				return true
-			} catch {
-				return false
+			} catch (err) {
+				if (err.status === 403) return false
+				throw err
 			}
 		})
 	}

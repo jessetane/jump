@@ -168,6 +168,10 @@ test('SSO_DOMAINS pinning prevents wrong-IdP login/linking, claim hijacking, and
 			const corpUser = db.logins.findUserByAccount('alice@corp.com', 'google')
 			const corpAdmin = db.tokens.create({ userId: corpUser.id, provider: 'self', admin: 1 })
 			assert.equal((await mcp(corpAdmin.token, 'admin', { action: 'link_login', provider: 'github' })).isError, true)
+			const badSsoCode = db.tokens.createState({ mode: 'setup_link', sessionId: corpAdmin.id })
+			await withEnv({ SSO_DOMAINS: 'invalid-entry' }, async () => {
+				assert.equal((await req('GET', `/oauth/authorize?code=${badSsoCode}`)).status, 500, 'authorize propagates invalid SSO_DOMAINS instead of swallowing')
+			})
 			const contractor = db.logins.resolveUser('github', 'contractor-gh')
 			const contractorAdmin = db.tokens.create({ userId: contractor.id, provider: 'self', admin: 1 })
 			gEmail = 'bob@corp.com'

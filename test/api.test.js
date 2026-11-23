@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -197,6 +197,19 @@ test('getBaseUrl / getClientIp fail-closed proxy trust, OAuth rate limiting, and
 	const freePort = probe.address().port
 	await new Promise(resolve => probe.close(resolve))
 	const subDbPath = path.join(os.tmpdir(), `jump-shutdown-${process.pid}.db`)
+	for (const [envKey, envVal, errMatch] of [
+		['SSO_DOMAINS', 'bad-entry', /Invalid SSO_DOMAINS entry/],
+		['OAUTH_RATE_LIMIT', 'abc', /Invalid OAUTH_RATE_LIMIT/]
+	]) {
+		const bootFail = spawnSync(process.execPath, [path.join(dirname, '..', 'index.js')], {
+			cwd: dirname,
+			env: { ...process.env, HOST: '127.0.0.1', PORT: String(freePort), DB_PATH: subDbPath, [envKey]: envVal },
+			encoding: 'utf8'
+		})
+		for (const suffix of ['', '-wal', '-shm', '.key']) fs.rmSync(`${subDbPath}${suffix}`, { force: true })
+		assert.notEqual(bootFail.status, 0)
+		assert.match(bootFail.stderr, errMatch)
+	}
 	const child = spawn(process.execPath, [path.join(dirname, '..', 'index.js')], {
 		cwd: dirname,
 		env: { ...process.env, HOST: '127.0.0.1', PORT: String(freePort), DB_PATH: subDbPath },

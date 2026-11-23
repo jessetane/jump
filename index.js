@@ -9,6 +9,7 @@ import { handleMcp } from './mcp.js'
 import { handleRest } from './rest.js'
 import { listAuthProviders } from './providers/index.js'
 import * as db from './db/index.js'
+import { parseSsoDomains } from './sso.js'
 import { getBaseUrl, getClientIp, httpError, positiveNumberEnv, sendJson, sendHtml } from './util.js'
 
 export { server, bootstrapLocalAdmin }
@@ -24,11 +25,19 @@ const RATE_WINDOW_MS = 60000
 const MAX_RATE_BUCKETS = 10000
 const oauthRateBuckets = new Map()
 
+function parseOauthRateLimit () {
+	const raw = process.env.OAUTH_RATE_LIMIT
+	if (raw === undefined || raw.trim() === '') return 60
+	const n = Number(raw)
+	if (!Number.isFinite(n)) {
+		throw new Error(`Invalid OAUTH_RATE_LIMIT: ${raw}`)
+	}
+	return n
+}
+
 function checkOauthRateLimit (req, res) {
-	const rawLimit = process.env.OAUTH_RATE_LIMIT
-	const parsedLimit = rawLimit === undefined || rawLimit.trim() === '' ? 60 : Number(rawLimit)
-	if (parsedLimit <= 0) return true
-	const limit = Number.isFinite(parsedLimit) ? parsedLimit : 60
+	const limit = parseOauthRateLimit()
+	if (limit <= 0) return true
 	const ip = getClientIp(req) || 'unknown'
 	const now = Date.now()
 	let entry = oauthRateBuckets.get(ip)
@@ -146,6 +155,10 @@ const server = http.createServer(async (req, res) => {
 	}
 })
 const upstreamTimeoutMs = positiveNumberEnv('UPSTREAM_TIMEOUT_MS', 60000)
+positiveNumberEnv('OAUTH_TIMEOUT_MS', 30000)
+positiveNumberEnv('MAX_FILE_SIZE_MB', 10)
+parseOauthRateLimit()
+parseSsoDomains()
 server.headersTimeout = 15000
 server.requestTimeout = 0
 server.timeout = Math.max(60000, upstreamTimeoutMs + 15000)
