@@ -301,8 +301,7 @@ function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeou
 	})
 }
 
-async function executeBufferedUpstream ({ credentials, url, method, body, headers, timeoutMs, onStatus, onSameOriginRedirect }) {
-	const baseHeaders = sanitizeCallerHeaders(headers)
+async function executeBufferedUpstream ({ credentials, url, method, body, baseHeaders, timeoutMs, onStatus, onSameOriginRedirect }) {
 	baseHeaders['user-agent'] ||= 'jump'
 	baseHeaders['accept-encoding'] = SUPPORTED_ENCODINGS
 	let curMethod = method
@@ -489,7 +488,7 @@ function normalizeMethod (method) {
 	return upper
 }
 
-function resolveUpstreamContext (session, provider, rawApp, url, headers) {
+function resolveUpstreamContext (session, provider, rawApp, url, baseHeaders) {
 	const links = db.links.listBySessionId(session.id)
 	const providerLinks = links.filter(l => l.app?.provider === provider.id)
 	if (providerLinks.length === 0) {
@@ -509,15 +508,7 @@ function resolveUpstreamContext (session, provider, rawApp, url, headers) {
 		}
 	}
 	const resolvedUrl = provider.normalizeTargetUrl(url, upstreamApp)
-	let contentType = ''
-	if (headers && typeof headers === 'object') {
-		for (const [k, v] of Object.entries(headers)) {
-			if (k.toLowerCase() === 'content-type' && v !== undefined && v !== null) {
-				contentType = String(v)
-				break
-			}
-		}
-	}
+	const contentType = baseHeaders['content-type'] || ''
 	const objectFormat = isFormContentType(contentType) ? 'form' : 'json'
 	const sharePolicy = targetLink.app?.type === 'share' ? targetLink.app.credentials?.policy : null
 	const inspectsBody = hasBodyPolicy(sharePolicy) || hasBodyPolicy(targetLink.policy)
@@ -565,7 +556,7 @@ async function resolveUpstreamCredentials (session, provider, targetLink, upstre
 	return resolvedCreds
 }
 
-async function runProxyCall ({ auth, providerName = 'google', url, method, app, headers }, fn) {
+async function runProxyCall ({ auth, providerName = 'google', url, method, app, headers, extraStrip = null }, fn) {
 	const session = db.tokens.resolveSession(auth)
 	if (!session) {
 		throw httpError(401, 'Authentication required')
@@ -575,6 +566,7 @@ async function runProxyCall ({ auth, providerName = 'google', url, method, app, 
 	}
 	const start = Date.now()
 	const normalizedMethod = normalizeMethod(method)
+	const baseHeaders = sanitizeCallerHeaders(headers, extraStrip)
 	const provider = getProvider(providerName)
 	const timeoutMs = positiveNumberEnv('UPSTREAM_TIMEOUT_MS', DEFAULT_TIMEOUT_MS)
 	const logState = {
@@ -597,10 +589,10 @@ async function runProxyCall ({ auth, providerName = 'google', url, method, app, 
 		})
 	}
 	try {
-		const ctx = resolveUpstreamContext(session, provider, app, url, headers)
+		const ctx = resolveUpstreamContext(session, provider, app, url, baseHeaders)
 		logState.targetAppId = ctx.targetAppId
 		logState.resolvedUrl = ctx.resolvedUrl
-		return await fn({ session, provider, normalizedMethod, timeoutMs, ctx, logState, recordLog })
+		return await fn({ session, provider, normalizedMethod, baseHeaders, timeoutMs, ctx, logState, recordLog })
 	} catch (err) {
 		recordLog(err.status || 502, err.message)
 		throw err
@@ -610,7 +602,7 @@ async function runProxyCall ({ auth, providerName = 'google', url, method, app, 
 async function request (opts = {}, auth) {
 	assertKeys(opts, PROXY_REQUEST_KEYS)
 	const { provider: providerName = 'google', url, method = 'GET', body, headers, app } = opts
-	return runProxyCall({ auth, providerName, url, method, app, headers }, async ({ session, provider, normalizedMethod, timeoutMs, ctx, logState, recordLog }) => {
+	return runProxyCall({ auth, providerName, url, method, app, headers }, async ({ session, provider, normalizedMethod, baseHeaders, timeoutMs, ctx, logState, recordLog }) => {
 		ctx.checkTargetPolicy(ctx.resolvedUrl, normalizedMethod, body, ctx.contentType)
 		logState.allowed = true
 		const credentials = await resolveUpstreamCredentials(session, provider, ctx.targetLink, ctx.upstreamApp)
@@ -620,7 +612,7 @@ async function request (opts = {}, auth) {
 			url: ctx.resolvedUrl,
 			method: normalizedMethod,
 			body,
-			headers,
+			baseHeaders,
 			timeoutMs,
 			onStatus: s => { upstreamStatus = s },
 			onSameOriginRedirect: ({ url: nextUrl, method: nextMethod, hasBody }) => {
@@ -637,7 +629,7 @@ async function request (opts = {}, auth) {
 
 async function stream (opts = {}, auth, req, res) {
 	const { provider: providerName = 'google', url, app } = opts
-	return runProxyCall({ auth, providerName, url, method: req.method, app, headers: req.headers }, async ({ session, provider, normalizedMethod, timeoutMs, ctx, logState, recordLog }) => {
+	return runProxyCall({ auth, providerName, url, method: req.method, app, headers: req.headers, extraStrip: REST_EXTRA_STRIPPED_HEADERS }, async ({ session, provider, normalizedMethod, baseHeaders, timeoutMs, ctx, logState, recordLog }) => {
 		const allowsBody = reqMethodAllowsBody(normalizedMethod)
 		let bufferedBody = undefined
 		let bodyStream = null
@@ -655,7 +647,6 @@ async function stream (opts = {}, auth, req, res) {
 		ctx.checkTargetPolicy(ctx.resolvedUrl, normalizedMethod, bufferedBody, ctx.contentType)
 		logState.allowed = true
 		const credentials = await resolveUpstreamCredentials(session, provider, ctx.targetLink, ctx.upstreamApp)
-		const baseHeaders = sanitizeCallerHeaders(req.headers, REST_EXTRA_STRIPPED_HEADERS)
 		baseHeaders['user-agent'] ||= 'jump'
 		if (allowsBody && !bodyStream) {
 			if (bufferedBody !== undefined) {

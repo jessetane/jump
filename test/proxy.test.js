@@ -502,7 +502,7 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 			res.end(JSON.stringify({ ok: true, url: upReq.url, auth: upReq.headers.authorization || null, body: captured.at(-1).body }))
 		})
 	}, async ({ url: upstreamUrl }) => {
-		const { session } = createTestSession({ account: 'creds-proxy@example.com', admin: true, withApp: false })
+		const { user, session } = createTestSession({ account: 'creds-proxy@example.com', admin: true, withApp: false })
 		const basicApp = JSON.parse((await mcp(session.token, 'admin', { action: 'connect_app', provider: 'mailgun', credentials: { basic: 'api:key-mg' }, baseUrl: upstreamUrl })).content[0].text).app
 		await mcp(session.token, 'admin', { action: 'link_app', sessionId: session.id, appId: basicApp.id })
 		await mcp(session.token, 'mailgun_api', {
@@ -513,6 +513,15 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		})
 		assert.equal(captured.at(-1).headers.authorization, `Basic ${Buffer.from('api:key-mg').toString('base64')}`)
 		assert.equal(captured.at(-1).body, 'from=a%40b.com&tag=x&tag=y&vars=%7B%22plan%22%3A%22pro%22%7D')
+		const scopedCt = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+		db.links.create({ sessionId: scopedCt.id, appId: basicApp.id, policy: [{ action: 'deny', methods: ['POST'], body: { tag: 'evil' }, bodyType: 'form' }, { action: 'allow', methods: ['POST'], path: '/v3/messages' }] })
+		const ctDiffBlocked = await mcp(scopedCt.token, 'mailgun_api', {
+			url: '/v3/messages',
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
+			body: { tag: 'evil' }
+		})
+		assert.equal(ctDiffBlocked.isError, true, 'Mixed-case Content-Type cannot bypass form body policy')
 		await mcp(session.token, 'mailgun_api', { url: '/v3/get-strip', method: 'GET', body: { unwanted: 1 } })
 		assert.equal(captured.at(-1).body, '', 'GET strips body')
 		assert.equal(captured.at(-1).headers['content-type'], undefined)
