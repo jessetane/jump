@@ -543,6 +543,9 @@ async function resolveUpstreamCredentials (session, provider, targetLink, upstre
 	try {
 		resolvedCreds = await provider.resolveCredentials(upstreamApp)
 	} catch (err) {
+		if (err.status !== 400 && err.status !== 401) {
+			throw err
+		}
 		const hint = targetLink.app?.type === 'share'
 			? `Ask the app owner (${targetLink.app.sharedBy || 'admin'}) to re-authenticate.`
 			: session.admin

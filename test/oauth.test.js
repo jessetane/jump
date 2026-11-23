@@ -316,15 +316,39 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		assert.ok(db.links.listBySessionId(adminSess.id).some(l => l.appId === createdApp.id), 'connect flow auto-links new OAuth app')
 	})
 	await withEnv({ OAUTH_TIMEOUT_MS: '25' }, async () => {
-		await withMockFetch((input, init) => {
-			const form = new URLSearchParams(String(init?.body || ''))
-			if (form.get('code') !== 'slow' || form.get('redirect_uri') !== 'http://localhost/cb') {
-				return Response.json({ error: 'invalid_request' }, { status: 400 })
+		const expiredApp = db.tokens.updateCredentials(app.id, { credentials: { ...db.tokens.get(app.id).credentials }, expiresAt: Date.now() - 1000 })
+		await withEnv({ GOOGLE_CLIENT_SECRET: undefined }, async () => {
+			assert.equal((await req('GET', `/api/google/gmail/v1/users/me/profile?app=${expiredApp.id}`, { token: adminSess.token })).status, 500)
+		})
+		let refreshMode = 'slow'
+		await withMockFetch((input, init, origFetch) => {
+			const u = typeof input === 'string' ? input : input.url
+			if (u === 'https://oauth2.googleapis.com/token') {
+				const form = new URLSearchParams(String(init?.body || ''))
+				if (form.get('grant_type') === 'refresh_token') {
+					if (refreshMode === 'invalid_client') return Response.json({ error: 'invalid_client' }, { status: 400 })
+					if (refreshMode === 'upstream_503') return Response.json({ error: 'temporarily_unavailable' }, { status: 503 })
+					if (refreshMode === 'invalid_grant') return Response.json({ error: 'invalid_grant', error_description: 'Token revoked' }, { status: 400 })
+				}
+				if (refreshMode === 'exchange' && (form.get('code') !== 'slow' || form.get('redirect_uri') !== 'http://localhost/cb')) {
+					return Response.json({ error: 'invalid_request' }, { status: 400 })
+				}
+				return new Promise((_, reject) => {
+					init?.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true })
+				})
 			}
-			return new Promise((_, reject) => {
-				init?.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true })
-			})
+			return origFetch(input, init)
 		}, async () => {
+			assert.equal((await req('GET', `/api/google/gmail/v1/users/me/profile?app=${expiredApp.id}`, { token: adminSess.token })).status, 504)
+			refreshMode = 'invalid_client'
+			assert.equal((await req('GET', `/api/google/gmail/v1/users/me/profile?app=${expiredApp.id}`, { token: adminSess.token })).status, 502)
+			refreshMode = 'upstream_503'
+			assert.equal((await req('GET', `/api/google/gmail/v1/users/me/profile?app=${expiredApp.id}`, { token: adminSess.token })).status, 502)
+			refreshMode = 'invalid_grant'
+			const revokedRes = await req('GET', `/api/google/gmail/v1/users/me/profile?app=${expiredApp.id}`, { token: adminSess.token })
+			assert.equal(revokedRes.status, 401)
+			assert.match(revokedRes.data.error, /connect_app/)
+			refreshMode = 'exchange'
 			await assert.rejects(() => providers.google.exchangeCode({ code: 'slow', callbackUrl: 'http://localhost/cb' }), /aborted|timeout/i)
 			const start = Date.now()
 			await providers.google.revokeToken(db.tokens.get(app.id))

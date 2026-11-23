@@ -299,17 +299,33 @@ function createProvider (config) {
 						refresh_token: creds.refreshToken,
 						grant_type: 'refresh_token'
 					})
-					const res = await fetch(oauth.tokenUrl, {
-						method: 'POST',
-						headers: {
-							accept: 'application/json',
-							'content-type': 'application/x-www-form-urlencoded',
-							'user-agent': 'jump'
-						},
-						body: params.toString(),
-						signal: oauthTimeout()
-					})
-					const data = await parseOAuthResponse(res, `Failed to refresh ${label} token`)
+					let res
+					try {
+						res = await fetch(oauth.tokenUrl, {
+							method: 'POST',
+							headers: {
+								accept: 'application/json',
+								'content-type': 'application/x-www-form-urlencoded',
+								'user-agent': 'jump'
+							},
+							body: params.toString(),
+							signal: oauthTimeout()
+						})
+					} catch (err) {
+						if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+							throw httpError(504, `Timed out refreshing ${label} access token`)
+						}
+						throw httpError(502, `Failed to reach ${label} token endpoint: ${err.message}`)
+					}
+					let data
+					try {
+						data = await parseOAuthResponse(res, `Failed to refresh ${label} token`)
+					} catch (err) {
+						if (err.status >= 500 || err.data?.error === 'invalid_client' || err.data?.error === 'unauthorized_client') {
+							err.status = 502
+						}
+						throw err
+					}
 					const expiresAt = data.expires_in ? Date.now() + (data.expires_in * 1000) : null
 					const updatedCreds = {
 						...creds,
