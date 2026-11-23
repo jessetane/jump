@@ -85,10 +85,6 @@
 				} else if (clientName && subEl) {
 					subEl.textContent = 'Authorize ' + clientName
 				}
-				if (params.admin !== undefined) {
-					const adminEl = document.getElementById('admin')
-					if (adminEl) adminEl.checked = params.admin === 'true' || params.admin === '1' || params.admin === 'on'
-				}
 				const btnContainer = document.getElementById('provider-buttons')
 				const filteredProviders = params.provider
 					? providers.filter(p => p.id === String(params.provider).toLowerCase())
