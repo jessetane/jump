@@ -181,6 +181,9 @@ async function createSession (token, opts = {}) {
 	if (!policyCheck.valid) {
 		throw httpError(400, policyCheck.error)
 	}
+	if (policyCheck.policy !== null && linkAppIds.length === 0) {
+		throw httpError(400, 'policy requires at least one appId in linkAppIds')
+	}
 	const appsToLink = []
 	for (const appId of linkAppIds) {
 		appsToLink.push(requireApp(session.userId, appId))

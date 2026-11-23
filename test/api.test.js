@@ -153,7 +153,9 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 		{ action: 'list_apps', provider: 'stripe' },
 		{ action: 'update_session' },
 		{ action: 'revoke_session', sessionId: '' },
-		{ action: 'create_session', linkAppIds: ['missing'] }
+		{ action: 'create_session', linkAppIds: ['missing'] },
+		{ action: 'create_session', policy: [{ action: 'allow' }] },
+		{ action: 'create_session', linkAppIds: [], policy: [] }
 	]) {
 		assert.equal((await mcp(session.token, 'admin', bad)).isError, true)
 	}
