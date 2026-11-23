@@ -395,4 +395,30 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			assert.ok(Date.now() - start < 1000)
 		})
 	})
+	const ghRevokeApp = db.tokens.create({ userId: adminSess.userId, provider: 'github', type: 'oauth', credentials: { accessToken: 'gho_rev', account: 'octo' } })
+	let ghRevokeReqs = []
+	await withMockFetch((input, init, origFetch) => {
+		const u = typeof input === 'string' ? input : input.url
+		if (u.startsWith('https://api.github.com/applications/')) {
+			ghRevokeReqs.push({ url: u, method: init?.method, auth: init?.headers?.authorization, body: init?.body })
+			if (ghRevokeReqs.length > 1) return Promise.reject(new Error('network down'))
+			return new Response(null, { status: 204 })
+		}
+		return origFetch(input, init)
+	}, async () => {
+		await withEnv({ GITHUB_CLIENT_ID: undefined, GITHUB_CLIENT_SECRET: undefined }, async () => {
+			await providers.github.revokeToken(ghRevokeApp)
+		})
+		assert.equal(ghRevokeReqs.length, 0, 'GitHub revoke is a no-op without client credentials')
+		await withEnv({ GITHUB_CLIENT_ID: 'gh_id', GITHUB_CLIENT_SECRET: 'gh_sec' }, async () => {
+			await providers.github.revokeToken(ghRevokeApp)
+			assert.equal(ghRevokeReqs.length, 1)
+			assert.equal(ghRevokeReqs[0].url, 'https://api.github.com/applications/gh_id/token')
+			assert.equal(ghRevokeReqs[0].method, 'DELETE')
+			assert.equal(ghRevokeReqs[0].auth, `Basic ${Buffer.from('gh_id:gh_sec').toString('base64')}`)
+			assert.deepEqual(JSON.parse(ghRevokeReqs[0].body), { access_token: 'gho_rev' })
+			await providers.github.revokeToken(ghRevokeApp)
+			assert.equal(ghRevokeReqs.length, 2, 'GitHub revoke swallows upstream errors without throwing')
+		})
+	})
 })

@@ -207,6 +207,18 @@ test('login-key lifecycle, lockout guard, verified-email pending claim guard, an
 	const unverifiedUser = db.logins.resolveUser('custom_unverified_idp', 'prec-claim@acme.com')
 	assert.equal(db.tokens.listByUserId(unverifiedUser.id).filter(t => t.type === 'share').length, 0, 'Unverified-email provider never claims unscoped pending email shares')
 	await withEnv({ GITHUB_CLIENT_ID: 'gh-id', GITHUB_CLIENT_SECRET: 'gh-sec' }, async () => {
+		const soleWorker = db.tokens.create({ userId: sole.user.id, provider: 'self', admin: 0 })
+		assert.equal((await req('POST', '/api/logins', { token: soleWorker.token, body: { provider: 'github' } })).status, 403)
+		const linkLoginRes = await req('POST', '/api/logins', { token: sole.session.token, body: { provider: 'github' } })
+		assert.equal(linkLoginRes.status, 200)
+		assert.match(linkLoginRes.data.connectUrl, /\/oauth\/authorize\?code=/)
+		assert.equal((await req('POST', '/api/shares', { token: soleWorker.token, body: { appId: shayApp.id, account: 'rest-share@example.com' } })).status, 403)
+		const shareRest = await req('POST', '/api/shares', { token: shay.session.token, body: { appId: shayApp.id, account: 'rest-share@example.com', policy: [{ action: 'allow', path: '/v1/*' }] } })
+		assert.equal(shareRest.status, 201)
+		assert.ok(db.tokens.get(shareRest.data.shareId))
+		assert.equal((await req('DELETE', `/api/shares?appId=${shayApp.id}&account=rest-share@example.com`, { token: soleWorker.token })).status, 403)
+		assert.equal((await req('DELETE', `/api/shares?appId=${shayApp.id}&account=rest-share@example.com`, { token: shay.session.token })).status, 200)
+		assert.equal(db.tokens.get(shareRest.data.shareId), null)
 		let gEmail = 'primary-owner@example.com'
 		let ghLogin = 'accidental-new-gh'
 		await withMockFetch(async (input, init, origFetch) => {
