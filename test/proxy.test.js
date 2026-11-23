@@ -313,6 +313,9 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 	assert.doesNotThrow(() => bodilessErr.destroy(new Error('reset')))
 	let lastAcceptEnc = null
 	let uploadAborted = false
+	let uploadHits = 0
+	let lastUploadBody = ''
+	let lastUploadContentLength = null
 	let early200Bytes = 0
 	let early413Bytes = 0
 	await withUpstream(async (upReq, res) => {
@@ -354,8 +357,15 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 			return
 		}
 		if (upReq.url === '/upload-stream') {
+			uploadHits++
+			const chunks = []
 			let bytes = 0
-			for await (const c of upReq) bytes += c.byteLength
+			for await (const c of upReq) {
+				bytes += c.byteLength
+				if (bytes <= 4096) chunks.push(c)
+			}
+			lastUploadBody = bytes <= 4096 ? Buffer.concat(chunks).toString('utf8') : ''
+			lastUploadContentLength = upReq.headers['content-length'] || null
 			res.writeHead(200, { 'content-type': 'application/json' })
 			res.end(JSON.stringify({ bytes }))
 			return
@@ -444,6 +454,71 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 				body: zlib.gzipSync(Buffer.from(JSON.stringify({ msg: 'secret' })))
 			})
 			assert.equal(gzDenied.status, 415, 'Body-inspected REST requests reject Content-Encoding with 415')
+			const hitsBefore = uploadHits
+			const allowedRestBody = JSON.stringify({ msg: 'hello-rest' })
+			const allowedRest = await req('POST', '/api/comp/upload-stream', {
+				token: inspectedSess.token,
+				headers: { 'content-type': 'application/json' },
+				body: allowedRestBody
+			})
+			assert.equal(allowedRest.status, 200)
+			assert.equal(lastUploadBody, allowedRestBody)
+			assert.equal(lastUploadContentLength, String(Buffer.byteLength(allowedRestBody)))
+			assert.equal((await req('POST', '/api/comp/upload-stream', {
+				token: inspectedSess.token,
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ msg: 'contains secret here' })
+			})).status, 403)
+			assert.equal(uploadHits, hitsBefore + 1, 'Denied REST body never reaches upstream')
+			assert.equal((await req('POST', '/api/comp/upload-stream', {
+				token: inspectedSess.token,
+				headers: { 'content-type': 'application/octet-stream' },
+				body: Buffer.alloc(1024 * 1024 + 1, 0x61)
+			})).status, 413, 'Inspected REST request body enforces 1 MB getRawBody limit')
+			const jsonPolicySess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+			db.links.create({
+				sessionId: jsonPolicySess.id,
+				appId: app.id,
+				policy: [
+					{ action: 'deny', methods: ['POST'], body: { role: 'admin' } },
+					{ action: 'allow', methods: ['POST'], path: '/upload-stream' }
+				]
+			})
+			assert.equal((await req('POST', '/api/comp/upload-stream', {
+				token: jsonPolicySess.token,
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ role: 'user' })
+			})).status, 200)
+			assert.equal((await req('POST', '/api/comp/upload-stream', {
+				token: jsonPolicySess.token,
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ role: 'admin' })
+			})).status, 403)
+			assert.equal((await req('POST', '/api/comp/upload-stream', {
+				token: jsonPolicySess.token,
+				headers: { 'content-type': 'application/json' },
+				body: '{malformed'
+			})).status, 403, 'Malformed JSON under inspecting REST policy fails closed')
+			const formPolicySess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+			db.links.create({
+				sessionId: formPolicySess.id,
+				appId: app.id,
+				policy: [
+					{ action: 'deny', methods: ['POST'], body: { tag: 'evil' }, bodyType: 'form' },
+					{ action: 'allow', methods: ['POST'], path: '/upload-stream' }
+				]
+			})
+			assert.equal((await req('POST', '/api/comp/upload-stream', {
+				token: formPolicySess.token,
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body: 'tag=ok'
+			})).status, 200)
+			assert.equal((await req('POST', '/api/comp/upload-stream', {
+				token: formPolicySess.token,
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body: 'tag=evil'
+			})).status, 403)
+			assert.equal(uploadHits, hitsBefore + 3, 'Only allowed inspected requests reach upstream')
 			const uninspectedSess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
 			db.links.create({ sessionId: uninspectedSess.id, appId: app.id, policy: [{ action: 'allow', methods: ['POST'], path: '/upload-stream' }] })
 			assert.equal((await req('POST', '/api/comp/upload-stream', {
