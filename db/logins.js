@@ -6,7 +6,6 @@ import { randomUUID } from 'node:crypto'
 
 export {
 	init,
-	get,
 	listByUserId,
 	getAccountByUserId,
 	findUserByAccount,

@@ -5,8 +5,7 @@ export {
 	init,
 	create,
 	get,
-	userAccountSql,
-	CREATE_USERS_SQL
+	userAccountSql
 }
 
 function userAccountSql (userIdExpr) {

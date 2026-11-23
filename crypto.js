@@ -8,7 +8,6 @@ export {
 	parseKey,
 	parseKeyList,
 	loadKeys,
-	getKeys,
 	secretContext,
 	encryptSecret,
 	openSecret,

@@ -23,7 +23,6 @@ export {
 	removeShare,
 	updateCredentials,
 	updateSession,
-	touch,
 	remove,
 	prune,
 	createState,

@@ -2,7 +2,6 @@ import { httpError } from './util.js'
 
 export {
 	parseSsoDomains,
-	getSsoDomain,
 	assertSsoLogin,
 	assertSsoLink,
 	resolveShareProvider,
