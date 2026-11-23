@@ -201,7 +201,7 @@ function formatContent (result) {
 }
 
 function formatError (err, toolName = 'tool') {
-	if (!err?.status) {
+	if (!err?.status || err.status === 500) {
 		console.error(err)
 		return {
 			isError: true,
