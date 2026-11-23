@@ -326,7 +326,7 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 	await withEnv({ OAUTH_TIMEOUT_MS: '25' }, async () => {
 		const expiredApp = db.tokens.updateCredentials(app.id, { credentials: { ...db.tokens.get(app.id).credentials }, expiresAt: Date.now() - 1000 })
 		await withEnv({ GOOGLE_CLIENT_SECRET: undefined }, async () => {
-			assert.equal((await req('GET', `/api/google/gmail/v1/users/me/profile?app=${expiredApp.id}`, { token: adminSess.token })).status, 500)
+			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 500)
 		})
 		let refreshMode = 'slow'
 		await withMockFetch((input, init, origFetch) => {
@@ -347,13 +347,13 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			}
 			return origFetch(input, init)
 		}, async () => {
-			assert.equal((await req('GET', `/api/google/gmail/v1/users/me/profile?app=${expiredApp.id}`, { token: adminSess.token })).status, 504)
+			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 504)
 			refreshMode = 'invalid_client'
-			assert.equal((await req('GET', `/api/google/gmail/v1/users/me/profile?app=${expiredApp.id}`, { token: adminSess.token })).status, 502)
+			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 502)
 			refreshMode = 'upstream_503'
-			assert.equal((await req('GET', `/api/google/gmail/v1/users/me/profile?app=${expiredApp.id}`, { token: adminSess.token })).status, 502)
+			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 502)
 			refreshMode = 'invalid_grant'
-			const revokedRes = await req('GET', `/api/google/gmail/v1/users/me/profile?app=${expiredApp.id}`, { token: adminSess.token })
+			const revokedRes = await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })
 			assert.equal(revokedRes.status, 401)
 			assert.match(revokedRes.data.error, /connect_app/)
 			refreshMode = 'exchange'

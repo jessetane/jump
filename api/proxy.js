@@ -424,7 +424,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, baseHe
 }
 
 const PROXY_REQUEST_KEYS = ['provider', 'url', 'method', 'body', 'headers', 'app']
-const REST_EXTRA_STRIPPED_HEADERS = new Set(['x-api-key'])
+const REST_EXTRA_STRIPPED_HEADERS = new Set(['x-api-key', 'x-upstream-app'])
 
 function countValues (items, getKey) {
 	const counts = new Map()

@@ -40,19 +40,11 @@ async function handleProviderProxy (req, res, provider, targetPath, url, token) 
 	if (!targetPath) {
 		throw httpError(404, 'not found')
 	}
-	const appValues = url?.searchParams?.getAll('app') || []
-	if (appValues.length > 1) {
-		throw httpError(400, 'Duplicate query parameter "app"')
-	}
-	const app = appValues.length === 1 ? appValues[0] : undefined
-	const forwardParams = new URLSearchParams(url?.searchParams)
-	forwardParams.delete('app')
-	const qs = forwardParams.toString()
-	const search = qs ? `?${qs}` : ''
+	const search = url?.search || ''
 	await api.proxy.stream({
 		provider,
 		url: `${targetPath}${search}`,
-		app
+		app: req.headers['x-upstream-app']
 	}, token, req, res)
 }
 

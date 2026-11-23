@@ -134,7 +134,7 @@ test('canonical REST contract rejects method/payload smuggling, trailing slashes
 	const specialApp = db.tokens.create({ id: 'app:sp/id%1', userId: session.userId, provider: 'stripe', type: 'static', credentials: { headers: { authorization: 'Bearer sk' }, baseUrl: 'https://api.stripe.com' } })
 	assert.equal((await req('PATCH', `/api/apps/${encodeURIComponent(specialApp.id)}`, { token: session.token, body: { name: 'Renamed' } })).status, 200)
 	assert.equal((await req('DELETE', `/api/apps/${encodeURIComponent(specialApp.id)}?revoke=false`, { token: session.token })).status, 200)
-	assert.equal((await req('GET', `/api/stripe/v1/customers?app=${app.id}&app=x`, { token: session.token })).status, 400, 'Duplicate query param app fails 400')
+	assert.equal((await req('GET', '/api/google/v1/customers', { token: session.token, headers: { 'x-upstream-app': '' } })).status, 400, 'Empty X-Upstream-App header fails 400')
 })
 
 test('strict input validation parity, requireBoolean, invalid credential rejection, and log retention pruning', async () => {
