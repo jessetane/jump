@@ -138,7 +138,15 @@ test('canonical REST contract rejects method/payload smuggling, trailing slashes
 	assert.equal((await req('POST', '/api/apps', { token: session.token, body: { provider: 'constructor', credentials: 'sk' } })).status, 400)
 	assert.equal((await req('DELETE', '/api/apps/%E0%A4%A', { token: session.token })).status, 400)
 	const specialApp = db.tokens.create({ id: 'app:sp/id%1', userId: session.userId, provider: 'stripe', type: 'static', credentials: { headers: { authorization: 'Bearer sk' }, baseUrl: 'https://api.stripe.com' } })
-	assert.equal((await req('PATCH', `/api/apps/${encodeURIComponent(specialApp.id)}`, { token: session.token, body: { name: 'Renamed' } })).status, 200)
+	assert.equal((await req('PATCH', `/api/apps/${encodeURIComponent(specialApp.id)}`, { token: session.token, body: { name: 'Renamed', credentials: 'sk_new', baseUrl: 'https://api.stripe.com/v1', account: 'biz@stripe.test' } })).status, 200)
+	const updatedSpecial = db.tokens.get(specialApp.id)
+	assert.equal(updatedSpecial.name, 'Renamed')
+	assert.equal(updatedSpecial.credentials.headers.authorization, 'Bearer sk_new')
+	assert.equal(updatedSpecial.credentials.baseUrl, 'https://api.stripe.com/v1')
+	assert.equal(updatedSpecial.credentials.account, 'biz@stripe.test')
+	for (const forbiddenOauthPatch of [{ credentials: 'bad' }, { baseUrl: 'https://www.googleapis.com' }, { account: 'x' }]) {
+		assert.equal((await req('PATCH', `/api/apps/${app.id}`, { token: session.token, body: forbiddenOauthPatch })).status, 400)
+	}
 	assert.equal((await req('DELETE', `/api/apps/${encodeURIComponent(specialApp.id)}?revoke=false`, { token: session.token })).status, 200)
 	assert.equal((await req('GET', '/api/google/v1/customers', { token: session.token, headers: { 'x-upstream-app': '' } })).status, 400, 'Empty X-Upstream-App header fails 400')
 })
@@ -157,6 +165,15 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 		assert.throws(() => db.logs.listByUserId(user.id, { limit: badLimit }), /limit must be an integer between 1 and 1000/)
 	}
 	assert.equal((await req('GET', '/api/logs?limit=10', { token: session.token })).status, 200)
+	const l1 = db.logs.create({ userId: user.id, sessionId: session.id, appId: app.id, provider: 'stripe', method: 'GET', url: 'https://api.stripe.com/v1/ok', allowed: true, status: 200 })
+	const l2 = db.logs.create({ userId: user.id, sessionId: target.id, appId: app.id, provider: 'google', method: 'POST', url: 'https://www.googleapis.com/denied', allowed: false, status: 403 })
+	const filteredLogs1 = await req('GET', '/api/logs?provider=stripe&allowed=true&limit=1', { token: session.token })
+	assert.equal(filteredLogs1.status, 200)
+	assert.deepEqual(filteredLogs1.data.logs.map(l => l.id), [l1.id])
+	const filteredLogs2 = await req('GET', `/api/logs?sessionId=${target.id}&allowed=false`, { token: session.token })
+	assert.equal(filteredLogs2.status, 200)
+	assert.deepEqual(filteredLogs2.data.logs.map(l => l.id), [l2.id])
+	db.sqlite.prepare('DELETE FROM logs WHERE id IN (?, ?)').run(l1.id, l2.id)
 	for (const bad of [
 		{ action: 'update_app', appId: app.id },
 		{ action: 'update_app', appId: app.id, name: 'X', apiKey: 'legacy' },

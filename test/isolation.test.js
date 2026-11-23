@@ -201,7 +201,12 @@ test('login-key lifecycle, lockout guard, verified-email pending claim guard, an
 	const sole = createTestSession({ account: 'sole-lock@example.com', admin: true })
 	const soleLogin = db.logins.listByUserId(sole.user.id)[0]
 	assert.equal((await req('DELETE', `/api/logins/${encodeURIComponent(soleLogin.id)}`, { token: sole.session.token })).status, 400, 'Cannot unlink sole remaining login key')
+	const secondLogin = db.logins.upsert({ userId: sole.user.id, provider: 'github', account: 'sole-second-gh' })
+	assert.equal((await req('DELETE', `/api/logins/${encodeURIComponent(secondLogin.id)}`, { token: sole.session.token })).status, 200)
+	assert.equal(db.logins.listByUserId(sole.user.id).length, 1)
 	const shay = createTestSession({ account: 'shay-claim@example.com', admin: true, withApp: false })
+	const shayLogin = db.logins.listByUserId(shay.user.id)[0]
+	assert.equal((await req('DELETE', `/api/logins/${encodeURIComponent(shayLogin.id)}`, { token: sole.session.token })).status, 404, 'Cannot unlink foreign user login')
 	const shayApp = db.tokens.create({ userId: shay.user.id, provider: 'stripe', type: 'static', credentials: { headers: { authorization: 'Bearer sk_claim' }, baseUrl: 'https://api.stripe.com' } })
 	db.tokens.upsertShare({ userId: null, account: 'prec-claim@acme.com', authProvider: null, appId: shayApp.id, provider: 'stripe', policy: [{ action: 'allow', path: '/v1/unscoped' }] })
 	const unverifiedUser = db.logins.resolveUser('custom_unverified_idp', 'prec-claim@acme.com')
