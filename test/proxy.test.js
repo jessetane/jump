@@ -414,6 +414,11 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 			res.end()
 			return
 		}
+		if (upReq.url === '/upstream-500') {
+			res.writeHead(500, { 'content-type': 'application/json' })
+			res.end(JSON.stringify({ error: 'upstream crash' }))
+			return
+		}
 		res.writeHead(200, { 'content-type': 'application/json' })
 		res.end(JSON.stringify({ method: upReq.method }))
 	}, async ({ url: upstreamUrl }) => {
@@ -429,6 +434,12 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 			assert.deepEqual(imgRes.content[0], { type: 'image', mimeType: 'image/png', data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64') })
 			assert.equal((await mcp(session.token, 'comp_api', { url: '/latin1' })).content[0].text, 'Café')
 			assert.equal((await mcp(session.token, 'comp_api', { url: '/bomb' })).isError, true)
+			const mcp500 = await mcp(session.token, 'comp_api', { url: '/upstream-500' })
+			assert.equal(mcp500.isError, true)
+			assert.equal(mcp500.content[0].text, 'Comp API Error (500): {"error":"upstream crash"}')
+			const rest500 = await req('GET', '/api/comp/upstream-500', { token: session.token })
+			assert.equal(rest500.status, 500)
+			assert.deepEqual(rest500.data, { error: 'upstream crash' })
 			assert.equal((await mcp(session.token, 'comp_api', { url: '/ws-upgrade' })).isError, true)
 			assert.equal((await mcp(session.token, 'comp_api', { url: '/gzip', method: 'CONNECT' })).isError, true)
 			const restLarge = await fetch(`${baseUrl()}/api/comp/large-stream`, { headers: { authorization: `Bearer ${session.token}` } })

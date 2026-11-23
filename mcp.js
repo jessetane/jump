@@ -201,7 +201,7 @@ function formatContent (result) {
 }
 
 function formatError (err, toolName = 'tool') {
-	if (!err?.status || err.status === 500) {
+	if (!err?.status || (err.status === 500 && !err.upstream)) {
 		console.error(err)
 		return {
 			isError: true,
@@ -218,7 +218,7 @@ function formatError (err, toolName = 'tool') {
 		console.warn(`[mcp] ${err.message}`)
 	} else {
 		console.warn(`[mcp] ${toolName} error (${err.status}): ${err.message}`)
-		const providerId = 'data' in err ? parseProviderTool(toolName) : null
+		const providerId = err.upstream ? parseProviderTool(toolName) : null
 		const prefix = providerId ? `${getProvider(providerId).name} API Error (${err.status}): ` : ''
 		return {
 			isError: true,

@@ -302,7 +302,6 @@ function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeou
 }
 
 async function executeBufferedUpstream ({ credentials, url, method, body, baseHeaders, timeoutMs, onStatus, onSameOriginRedirect }) {
-	baseHeaders['user-agent'] ||= 'jump'
 	baseHeaders['accept-encoding'] = SUPPORTED_ENCODINGS
 	let curMethod = method
 	const allowsBody = reqMethodAllowsBody(curMethod)
@@ -418,7 +417,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, baseHe
 		const msg = result?.binary ? `Binary error response (${contentType})`
 			: typeof result === 'object' ? JSON.stringify(result)
 			: result
-		throw httpError(status, msg, { data: result })
+		throw httpError(status, msg, { upstream: true })
 	}
 	return result
 }
@@ -570,6 +569,7 @@ async function runProxyCall ({ auth, providerName = 'google', url, method, app, 
 	const start = Date.now()
 	const normalizedMethod = normalizeMethod(method)
 	const baseHeaders = sanitizeCallerHeaders(headers, extraStrip)
+	baseHeaders['user-agent'] ||= 'jump'
 	const provider = getProvider(providerName)
 	const timeoutMs = positiveNumberEnv('UPSTREAM_TIMEOUT_MS', DEFAULT_TIMEOUT_MS)
 	const logState = {
@@ -650,7 +650,6 @@ async function stream (opts = {}, auth, req, res) {
 		ctx.checkTargetPolicy(ctx.resolvedUrl, normalizedMethod, bufferedBody, ctx.contentType)
 		logState.allowed = true
 		const credentials = await resolveUpstreamCredentials(session, provider, ctx.targetLink, ctx.upstreamApp)
-		baseHeaders['user-agent'] ||= 'jump'
 		if (allowsBody && !bodyStream) {
 			if (bufferedBody !== undefined) {
 				baseHeaders['content-length'] = String(bufferedBody.byteLength)
