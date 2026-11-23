@@ -32,7 +32,8 @@ export {
 	assertKeys,
 	tightenFileMode,
 	requireBoolean,
-	optionalString
+	optionalString,
+	streamAbortError
 }
 
 const HOP_BY_HOP_HEADERS = [
@@ -439,7 +440,21 @@ function hasPathTraversal (urlOrPath) {
 	return /(?:^|\/|%2f)(?:\.|%2e)(?:;|%3b)/i.test(pathPart)
 }
 
+function streamAbortError (stream, closedMsg) {
+	if (stream?.errored) {
+		const err = stream.errored
+		if (typeof err === 'object' && !err.status) err.status = 400
+		return err
+	}
+	if (stream?.destroyed && !stream.readableEnded) {
+		return httpError(400, closedMsg)
+	}
+	return null
+}
+
 function getRawBody (req, maxBytes = 1024 * 1024) {
+	const abortErr = streamAbortError(req, 'Request stream closed prematurely')
+	if (abortErr) return Promise.reject(abortErr)
 	return new Promise((resolve, reject) => {
 		let size = 0
 		let settled = false

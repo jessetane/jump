@@ -8,7 +8,7 @@ import zlib from 'node:zlib'
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy, hasBodyPolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, getUserAgent, httpError, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, positiveNumberEnv, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
+import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, getUserAgent, httpError, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, positiveNumberEnv, serializeFormBody, streamAbortError, stripTrailingDot, validateBaseUrl } from '../util.js'
 
 export {
 	drainSilently,
@@ -227,6 +227,8 @@ function isFormContentType (contentType) {
 }
 
 function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeoutMs }) {
+	const abortErr = streamAbortError(bodyStream, 'Client upload aborted')
+	if (abortErr) return Promise.reject(abortErr)
 	const parsed = new URL(targetUrl)
 	if (!isAllowedUpstreamProtocol(parsed)) {
 		return Promise.reject(httpError(400, `Unsupported upstream protocol: ${parsed.protocol}`))

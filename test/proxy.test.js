@@ -5,7 +5,7 @@ import http from 'node:http'
 import net from 'node:net'
 import { PassThrough, Readable } from 'node:stream'
 import zlib from 'node:zlib'
-import { VIRTUAL_UPSTREAM_IP, useServer, baseUrl, testDbPath, createTestSession, withUpstream, withDnsTest, withEnv, mcp, req, db, providers, proxy, utilMod } from './helpers.js'
+import { VIRTUAL_UPSTREAM_IP, useServer, baseUrl, testDbPath, createTestSession, withUpstream, withDnsTest, withEnv, withMockFetch, mcp, req, db, providers, proxy, utilMod } from './helpers.js'
 
 useServer()
 
@@ -769,6 +769,64 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		await withEnv({ USER_AGENT: 'custom-agent/2.0' }, async () => {
 			assert.equal((await mcp(session.token, 'stripe_api', { url: '/b/1', app: 'billing' })).isError, undefined)
 			assert.equal(captured.at(-1).headers['user-agent'], 'custom-agent/2.0')
+		})
+	})
+})
+
+test('aborted streams fail immediately when destroyed before sendUpstreamHop or getRawBody attaches listeners', async () => {
+	const destroyedBody = new PassThrough()
+	destroyedBody.destroy()
+	await assert.rejects(() => proxy.sendUpstreamHop('https://api.example.test/up', { method: 'POST', headers: {}, bodyStream: destroyedBody, timeoutMs: 5000 }), err => err.status === 400 && err.message === 'Client upload aborted')
+	const erroredBody = new PassThrough()
+	erroredBody.on('error', () => {})
+	erroredBody.destroy(new Error('socket reset'))
+	await assert.rejects(() => proxy.sendUpstreamHop('https://api.example.test/up', { method: 'POST', headers: {}, bodyStream: erroredBody, timeoutMs: 5000 }), err => err.status === 400 && err.message === 'socket reset')
+	const destroyedRaw = new PassThrough()
+	destroyedRaw.destroy()
+	await assert.rejects(() => utilMod.getRawBody(destroyedRaw), err => err.status === 400 && err.message === 'Request stream closed prematurely')
+	await withEnv({ GOOGLE_CLIENT_ID: 'gid', GOOGLE_CLIENT_SECRET: 'gsec', UPSTREAM_TIMEOUT_MS: '5000' }, async () => {
+		const { user, session } = createTestSession({ account: 'abort-refresh@example.com', admin: true, withApp: false })
+		const gApp = db.tokens.create({ userId: user.id, provider: 'google', type: 'oauth', expiresAt: Date.now() - 60000, credentials: { account: 'abort-refresh@example.com', accessToken: 'stale_tok', refreshToken: 'ref_tok' } })
+		db.links.create({ sessionId: session.id, appId: gApp.id })
+		let releaseRefresh
+		const refreshGate = new Promise(r => { releaseRefresh = r })
+		let refreshStartedResolve
+		const refreshStarted = new Promise(r => { refreshStartedResolve = r })
+		const dialedHosts = []
+		await withDnsTest({ onDial: host => dialedHosts.push(host) }, async () => {
+			await withMockFetch(async (input, init, origFetch) => {
+				const u = typeof input === 'string' ? input : input.url
+				if (u === 'https://oauth2.googleapis.com/token') {
+					refreshStartedResolve()
+					await refreshGate
+					return Response.json({ access_token: 'fresh_tok', expires_in: 3600 })
+				}
+				return origFetch(input, init)
+			}, async () => {
+				const port = new URL(baseUrl()).port
+				const sock = net.createConnection({ host: '127.0.0.1', port })
+				await new Promise((resolve, reject) => {
+					sock.once('connect', () => {
+						sock.write(`POST /api/google/https://www.googleapis.com/upload/drive/v3/files HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${session.token}\r\nContent-Length: 1048576\r\n\r\npartial`)
+						resolve()
+					})
+					sock.once('error', reject)
+				})
+				await refreshStarted
+				sock.destroy()
+				await new Promise(r => setTimeout(r, 30))
+				releaseRefresh()
+				let logs = []
+				for (let i = 0; i < 40; i++) {
+					logs = db.logs.listByUserId(user.id, { provider: 'google' })
+					if (logs.length > 0) break
+					await new Promise(r => setTimeout(r, 15))
+				}
+				assert.equal(logs.length, 1)
+				assert.equal(logs[0].status, 400)
+				assert.match(logs[0].error, /Client upload aborted|aborted/)
+				assert.equal(dialedHosts.length, 0)
+			})
 		})
 	})
 })
