@@ -168,6 +168,9 @@ test('path globbing, traversal canonicalization, %2F preservation, and linear-ti
 		'https://api.example.com/v1/public/%2e%2e/admin/users',
 		'https://api.example.com/v1/public/..;/admin/users',
 		'https://api.example.com/v1/public/%2e%2e%3b/admin/users',
+		'https://api.example.com/v1/.;/admin/users',
+		'https://api.example.com/v1/.;v=1/admin/users',
+		'https://api.example.com/v1/%2e%3b/admin/users',
 		'https://api.example.com/v1/public/%252e%252e/admin/users',
 		'https://api.example.com/v1/public\\..\\admin\\users',
 		'https://api.example.com/v1/admin%5cusers'
