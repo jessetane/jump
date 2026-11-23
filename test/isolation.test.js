@@ -260,6 +260,7 @@ test('login-key lifecycle, lockout guard, verified-email pending claim guard, an
 				assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=gh&state=${ssoMergeState}`)).status, 403, 'Merge rejects absorbing logins violating SSO_DOMAINS')
 				assert.ok(db.users.get(pinned.id))
 			})
+			assert.throws(() => db.logins.upsert({ userId: 'nonexistent-user', provider: 'google', account: 'primary-owner@example.com', merge: true }), { status: 404, message: 'User not found' })
 		})
 	})
 })

@@ -102,7 +102,9 @@ function runInTransaction (fn) {
 function mergeUsers (userIdA, userIdB) {
 	const uA = users.get(userIdA)
 	const uB = users.get(userIdB)
-	const [surviving, absorbed] = (uB && (!uA || uB.created < uA.created)) ? [uB, uA] : [uA, uB]
+	if (!uA || !uB) throw httpError(404, 'User not found')
+	if (uA.id === uB.id) return uA.id
+	const [surviving, absorbed] = uB.created < uA.created ? [uB, uA] : [uA, uB]
 	sqlite.prepare('UPDATE logins SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
 	sqlite.prepare('UPDATE tokens SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
 	sqlite.prepare('UPDATE logs SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
