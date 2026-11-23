@@ -7,8 +7,6 @@ import { getBody, getBaseUrl, getClientIp, httpError, isPlainObject, sendJson, s
 
 export {
 	handleOauth,
-	handleAuthorize,
-	handleAuthorizeConsent,
 	isAllowedRedirectUri,
 	deriveClientName
 }
