@@ -211,8 +211,46 @@ test('PKCE code exchange, client_id binding, refresh rotation, 60s dedup, /oauth
 	assert.ok(db.tokens.get(app.id), 'Upstream app exempt from dormancy pruning')
 })
 
+test('parseGrantedServices and summarizeScopes handle delimiters, mixed modes, counts, and rwDiff fallback', () => {
+	const { parseGrantedServices, summarizeScopes } = providers
+	const gServices = providers.google.services
+	assert.deepEqual(parseGrantedServices('', gServices), [])
+	assert.deepEqual(parseGrantedServices('https://www.googleapis.com/auth/userinfo.email', null), [])
+	assert.equal(summarizeScopes('', gServices), '')
+	assert.equal(summarizeScopes('https://www.googleapis.com/auth/userinfo.email', gServices), '')
+	assert.deepEqual(
+		parseGrantedServices('https://mail.google.com/,https://www.googleapis.com/auth/calendar.readonly', gServices),
+		[{ id: 'calendar', mode: 'ro' }, { id: 'gmail', mode: 'rw' }]
+	)
+	assert.equal(summarizeScopes('https://www.googleapis.com/auth/gmail.readonly', gServices), 'gmail (ro)')
+	assert.equal(summarizeScopes('https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/calendar.readonly', gServices), 'calendar, gmail (ro)')
+	assert.equal(summarizeScopes('https://mail.google.com/ https://www.googleapis.com/auth/calendar.readonly', gServices), 'calendar (ro), gmail (rw)')
+	const firstFour = Object.values(gServices).slice(0, 4)
+	assert.equal(summarizeScopes(firstFour.flatMap(s => s.ro).join(' '), gServices), '4 (ro)')
+	assert.equal(summarizeScopes([...firstFour[0].rw, ...firstFour[1].rw, ...firstFour[2].ro, ...firstFour[3].ro].join(' '), gServices), '4 (2 rw, 2 ro)')
+	assert.equal(summarizeScopes(Object.values(gServices).flatMap(s => s.ro).join(' '), gServices), '21 (ro)')
+	assert.equal(summarizeScopes(Object.values(gServices).flatMap(s => s.rw).join(' '), gServices), 'all (rw)')
+	const synthServices = {
+		same: { id: 'same', ro: ['x'], rw: ['x', 'y'] },
+		other: { id: 'other', ro: ['o.ro'], rw: ['o.rw'] }
+	}
+	assert.equal(summarizeScopes('x o.ro', synthServices), 'all (ro)')
+	assert.equal(summarizeScopes('x y o.rw', synthServices), 'all (rw)')
+	assert.deepEqual(parseGrantedServices('x', synthServices), [{ id: 'same', mode: 'ro' }])
+	assert.deepEqual(parseGrantedServices('x y', synthServices), [{ id: 'same', mode: 'rw' }])
+	const sameBoth = {
+		exact: { id: 'exact', ro: ['a', 'b'], rw: ['a', 'b'] },
+		second: { id: 'second', ro: ['s.ro'], rw: ['s.rw'] }
+	}
+	assert.deepEqual(parseGrantedServices('a', sameBoth), [{ id: 'exact', mode: 'ro' }])
+	assert.deepEqual(parseGrantedServices('a b', sameBoth), [{ id: 'exact', mode: 'rw' }])
+})
+
 test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLocalAdmin', async () => {
-	const { user, session, app } = createTestSession({ account: 'verify-flow@example.com' })
+	const { user, session, app } = createTestSession({
+		account: 'verify-flow@example.com',
+		scopes: 'https://mail.google.com/ https://www.googleapis.com/auth/calendar.readonly'
+	})
 	const extraApp = db.tokens.create({ userId: user.id, provider: 'stripe', type: 'static', name: 'Extra Stripe', credentials: { bearer: 'sk_extra' } })
 	const newApp = db.tokens.create({ userId: user.id, provider: 'linear', type: 'static', name: 'New Linear', credentials: { bearer: 'lin_new' } })
 	const { session: otherSess, app: foreignApp } = createTestSession({ account: 'verify-other@example.com' })
@@ -227,6 +265,7 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 	const existingSessVerify = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: session.id, admin: 1, newAppIds: [newApp.id], name: 'Linked Session' })
 	const getExistingVerify = await req('GET', `/oauth/verify?code=${existingSessVerify}`)
 	assert.equal(getExistingVerify.status, 200)
+	assert.ok(getExistingVerify.text.includes('Test Google App · calendar (ro), gmail (rw)'), 'Verify page renders app scope summary')
 	assert.ok(getExistingVerify.text.includes(`value="${app.id}" checked>`), 'Existing linked app is pre-checked')
 	assert.ok(getExistingVerify.text.includes(`value="${newApp.id}" checked>`), 'Newly connected admin app is pre-checked')
 	assert.ok(getExistingVerify.text.includes(`value="${extraApp.id}">`), 'Unlinked prior app stays unchecked')
@@ -338,7 +377,11 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, revoke, and OAUTH_TIMEOUT_MS', async () => {
 	let { session: adminSess, app } = createTestSession({ account: 'reauth-owner@example.com', admin: true, expiresAt: Date.now() - 1000 })
 	const { session: workerSess } = createTestSession({ account: 'reauth-worker@example.com', admin: false, withApp: false })
-	app = db.tokens.updateCredentials(app.id, { credentials: { accessToken: 'ya29.old', refreshToken: '1//old-r', account: 'reauth-owner@example.com' }, expiresAt: Date.now() - 1000 })
+	app = db.tokens.updateCredentials(app.id, {
+		credentials: { accessToken: 'ya29.old', refreshToken: '1//old-r', account: 'reauth-owner@example.com' },
+		expiresAt: Date.now() - 1000,
+		scopes: 'https://mail.google.com/ https://www.googleapis.com/auth/calendar.readonly'
+	})
 	let returnedEmail = 'wrong@example.com'
 	let refreshCalls = 0
 	await withMockFetch(async (input, init, origFetch) => {
@@ -389,7 +432,17 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${nonAdminState}`)).status, 403)
 		const reauthConnect = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'google', appId: app.id })).content[0].text)
 		const reauthUrl = new URL(reauthConnect.connectUrl)
-		assert.ok((await (await origFetch(`${baseUrl()}${reauthUrl.pathname}${reauthUrl.search}`)).text()).includes(app.id), 'reauth connect page pre-populates reauth_app_id')
+		const reauthHtml = await (await origFetch(`${baseUrl()}${reauthUrl.pathname}${reauthUrl.search}`)).text()
+		const initMatch = reauthHtml.match(/const initData = (\{[^\n]+\})/)
+		assert.ok(initMatch, 'reauth connect page embeds initData JSON')
+		const initData = JSON.parse(initMatch[1])
+		assert.equal(initData.params.reauth_app_id, app.id, 'reauth connect page pre-populates reauth_app_id')
+		assert.equal(initData.params.services, 'calendar,gmail', 'reauth connect page pre-populates granted services')
+		assert.equal(initData.params.write, 'gmail', 'reauth connect page pre-populates granted write services')
+		const overrideHtml = await (await origFetch(`${baseUrl()}${reauthUrl.pathname}${reauthUrl.search}&services=docs&write=docs`)).text()
+		const overrideData = JSON.parse(overrideHtml.match(/const initData = (\{[^\n]+\})/)[1])
+		assert.equal(overrideData.params.services, 'docs')
+		assert.equal(overrideData.params.write, 'docs')
 		const connectInfo = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'google', name: 'Work Google' })).content[0].text)
 		const connectUrl = new URL(connectInfo.connectUrl)
 		const connectCode = connectUrl.searchParams.get('code')
