@@ -364,28 +364,34 @@ function matchPattern (pattern, str) {
 	if (pattern === str) return true
 	const patSegs = pattern.split('/')
 	const strSegs = str.split('/')
-	let pi = 0
-	let si = 0
-	let starPi = -1
-	let starSi = 0
-	while (si < strSegs.length) {
-		if (pi < patSegs.length && patSegs[pi] === '**') {
-			starPi = pi++
-			starSi = si
-		} else if (pi < patSegs.length && !patSegs[pi].includes('**') && matchValuePattern(patSegs[pi], strSegs[si])) {
-			pi++
-			si++
-		} else if (pi < patSegs.length && patSegs[pi].includes('**')) {
-			return matchValuePattern(patSegs.slice(pi).join('/'), strSegs.slice(si).join('/'))
-		} else if (starPi !== -1) {
-			pi = starPi + 1
-			si = ++starSi
+	const n = strSegs.length
+	let dp = new Uint8Array(n + 1)
+	dp[0] = 1
+	for (const pat of patSegs) {
+		const next = new Uint8Array(n + 1)
+		if (pat === '**') {
+			let reachable = 0
+			for (let s = 0; s <= n; s++) {
+				if (dp[s]) reachable = 1
+				next[s] = reachable
+			}
+		} else if (pat.includes('**')) {
+			for (let s = 0; s < n; s++) {
+				if (!dp[s]) continue
+				for (let end = s + 1; end <= n; end++) {
+					if (!next[end] && matchValuePattern(pat, strSegs.slice(s, end).join('/'))) {
+						next[end] = 1
+					}
+				}
+			}
 		} else {
-			return false
+			for (let s = 0; s < n; s++) {
+				if (dp[s] && matchValuePattern(pat, strSegs[s])) next[s + 1] = 1
+			}
 		}
+		dp = next
 	}
-	while (pi < patSegs.length && patSegs[pi] === '**') pi++
-	return pi === patSegs.length
+	return dp[n] === 1
 }
 
 function normalizeUrl (targetUrl, baseUrl = null) {
