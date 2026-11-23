@@ -295,8 +295,14 @@ function getActiveSession (id) {
 	if (!isSession(session)) return null
 	const now = Date.now()
 	if (session.expiresAt) {
-		if (session.expiresAt <= now) return null
 		if (session.updated < new Date(now - DORMANT_MS).toISOString()) return null
+		if (session.expiresAt <= now) {
+			const refreshable = sqlite.prepare(`
+				SELECT 1 FROM tokens
+				WHERE id = ? AND json_extract(credentials, '$.refreshToken') IS NOT NULL
+			`).get(id)
+			if (!refreshable) return null
+		}
 	}
 	return session
 }

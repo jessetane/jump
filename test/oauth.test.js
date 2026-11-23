@@ -543,3 +543,41 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		})
 	})
 })
+
+test('getActiveSession allows in-flight setup/verify for refreshable OAuth sessions past 1h access expiry but rejects expired non-refreshable sessions', async () => {
+	const { user, app } = createTestSession({ account: 'midflow@example.com', admin: true })
+	const refreshableSess = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		type: 'bearer',
+		admin: 1,
+		expiresAt: Date.now() - 1000,
+		credentials: { refreshToken: 'rt_midflow' }
+	})
+	const hardExpiredSess = db.tokens.create({
+		userId: user.id,
+		provider: 'self',
+		type: 'bearer',
+		admin: 1,
+		expiresAt: Date.now() - 1000
+	})
+	assert.equal(db.tokens.resolveSession(refreshableSess.token), null)
+	assert.ok(db.tokens.getActiveSession(refreshableSess.id))
+	assert.equal(db.tokens.getActiveSession(hardExpiredSess.id), null)
+	const verifyRefreshable = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: refreshableSess.id, admin: true, newAppIds: [app.id] })
+	const verifyGet = await req('GET', `/oauth/verify?code=${verifyRefreshable}`)
+	assert.equal(verifyGet.status, 200)
+	const verifyPost = await req('POST', '/oauth/verify', {
+		headers: { 'content-type': 'application/x-www-form-urlencoded', origin: baseUrl() },
+		body: `code=${encodeURIComponent(verifyRefreshable)}&app_id=${encodeURIComponent(app.id)}`
+	})
+	assert.equal(verifyPost.status, 200)
+	assert.ok(db.links.listBySessionId(refreshableSess.id).some(l => l.appId === app.id))
+	const setupState = db.tokens.createState({ mode: 'setup_link', sessionId: refreshableSess.id })
+	assert.equal((await req('GET', `/oauth/authorize?code=${encodeURIComponent(setupState)}`)).status, 200)
+	const verifyHardExpired = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: hardExpiredSess.id, admin: true, newAppIds: [app.id] })
+	assert.equal((await req('GET', `/oauth/verify?code=${verifyHardExpired}`)).status, 400)
+	const staleUpdated = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString()
+	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(staleUpdated, refreshableSess.id)
+	assert.equal(db.tokens.getActiveSession(refreshableSess.id), null)
+})
