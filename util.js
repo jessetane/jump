@@ -8,6 +8,7 @@ export {
 	getBody,
 	parseAppUrl,
 	positiveNumberEnv,
+	getUserAgent,
 	getBaseUrl,
 	getClientIp,
 	serializeFormBody,
@@ -189,6 +190,15 @@ function positiveNumberEnv (name, fallback) {
 		throw new Error(`Invalid ${name}: ${raw}`)
 	}
 	return n
+}
+
+function getUserAgent () {
+	const raw = process.env.USER_AGENT
+	const trimmed = typeof raw === 'string' ? raw.trim() : ''
+	if (!trimmed || /[\r\n\0]/.test(trimmed)) {
+		throw new Error('USER_AGENT must be set to a non-empty single-line string')
+	}
+	return trimmed
 }
 
 function isTrustedProxy (req) {

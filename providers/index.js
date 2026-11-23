@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { validateBaseUrl, hasUrlScheme, resolveTargetUrl, hasPathTraversal, positiveNumberEnv, httpError } from '../util.js'
+import { validateBaseUrl, hasUrlScheme, resolveTargetUrl, hasPathTraversal, positiveNumberEnv, getUserAgent, httpError } from '../util.js'
 import googleConfig from './google.js'
 import githubConfig from './github.js'
 
@@ -229,7 +229,7 @@ function createProvider (config) {
 					headers: {
 						accept: 'application/json',
 						'content-type': 'application/x-www-form-urlencoded',
-						'user-agent': 'jump'
+						'user-agent': getUserAgent()
 					},
 					body: params.toString(),
 					signal: oauthTimeout()
@@ -247,7 +247,7 @@ function createProvider (config) {
 					headers: {
 						authorization: `Bearer ${tokenData.access_token}`,
 						accept: 'application/json',
-						'user-agent': 'jump'
+						'user-agent': getUserAgent()
 					},
 					signal: oauthTimeout()
 				})
@@ -308,7 +308,7 @@ function createProvider (config) {
 							headers: {
 								accept: 'application/json',
 								'content-type': 'application/x-www-form-urlencoded',
-								'user-agent': 'jump'
+								'user-agent': getUserAgent()
 							},
 							body: params.toString(),
 							signal: oauthTimeout()

@@ -8,7 +8,7 @@ import zlib from 'node:zlib'
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy, hasBodyPolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, httpError, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, positiveNumberEnv, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
+import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, getUserAgent, httpError, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, positiveNumberEnv, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
 
 export {
 	drainSilently,
@@ -569,7 +569,7 @@ async function runProxyCall ({ auth, providerName = 'google', url, method, app, 
 	const start = Date.now()
 	const normalizedMethod = normalizeMethod(method)
 	const baseHeaders = sanitizeCallerHeaders(headers, extraStrip)
-	baseHeaders['user-agent'] ||= 'jump'
+	baseHeaders['user-agent'] ||= getUserAgent()
 	const provider = getProvider(providerName)
 	const timeoutMs = positiveNumberEnv('UPSTREAM_TIMEOUT_MS', DEFAULT_TIMEOUT_MS)
 	const logState = {

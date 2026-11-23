@@ -10,7 +10,7 @@ import { handleRest } from './rest.js'
 import { listAuthProviders } from './providers/index.js'
 import * as db from './db/index.js'
 import { parseSsoDomains } from './sso.js'
-import { getBaseUrl, getClientIp, httpError, positiveNumberEnv, sendJson, sendHtml } from './util.js'
+import { getBaseUrl, getClientIp, getUserAgent, httpError, positiveNumberEnv, sendJson, sendHtml } from './util.js'
 
 export { server, bootstrapLocalAdmin }
 
@@ -159,6 +159,7 @@ positiveNumberEnv('OAUTH_TIMEOUT_MS', 30000)
 positiveNumberEnv('MAX_FILE_SIZE_MB', 10)
 parseOauthRateLimit()
 parseSsoDomains()
+getUserAgent()
 server.headersTimeout = 15000
 server.requestTimeout = 0
 server.timeout = Math.max(60000, upstreamTimeoutMs + 15000)

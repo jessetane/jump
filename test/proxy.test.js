@@ -691,5 +691,11 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		assert.equal(restSelName.status, 200)
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer sk_3')
 		assert.equal(captured.at(-1).url, '/b/1?other=2')
+		assert.equal((await mcp(session.token, 'stripe_api', { url: '/b/1', app: 'billing' })).isError, undefined)
+		assert.equal(captured.at(-1).headers['user-agent'], 'jump-test')
+		await withEnv({ USER_AGENT: 'custom-agent/2.0' }, async () => {
+			assert.equal((await mcp(session.token, 'stripe_api', { url: '/b/1', app: 'billing' })).isError, undefined)
+			assert.equal(captured.at(-1).headers['user-agent'], 'custom-agent/2.0')
+		})
 	})
 })

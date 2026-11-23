@@ -219,12 +219,17 @@ test('getBaseUrl / getClientIp fail-closed proxy trust, OAuth rate limiting, and
 	await new Promise(resolve => probe.close(resolve))
 	const subDbPath = path.join(os.tmpdir(), `jump-shutdown-${process.pid}.db`)
 	for (const [envKey, envVal, errMatch] of [
+		['USER_AGENT', undefined, /USER_AGENT must be set/],
+		['USER_AGENT', '   ', /USER_AGENT must be set/],
 		['SSO_DOMAINS', 'bad-entry', /Invalid SSO_DOMAINS entry/],
 		['OAUTH_RATE_LIMIT', 'abc', /Invalid OAUTH_RATE_LIMIT/]
 	]) {
+		const env = { ...process.env, HOST: '127.0.0.1', PORT: String(freePort), DB_PATH: subDbPath, USER_AGENT: 'jump-test' }
+		if (envVal === undefined) delete env[envKey]
+		else env[envKey] = envVal
 		const bootFail = spawnSync(process.execPath, [path.join(dirname, '..', 'index.js')], {
 			cwd: dirname,
-			env: { ...process.env, HOST: '127.0.0.1', PORT: String(freePort), DB_PATH: subDbPath, [envKey]: envVal },
+			env,
 			encoding: 'utf8'
 		})
 		for (const suffix of ['', '-wal', '-shm', '.key']) fs.rmSync(`${subDbPath}${suffix}`, { force: true })
@@ -233,7 +238,7 @@ test('getBaseUrl / getClientIp fail-closed proxy trust, OAuth rate limiting, and
 	}
 	const child = spawn(process.execPath, [path.join(dirname, '..', 'index.js')], {
 		cwd: dirname,
-		env: { ...process.env, HOST: '127.0.0.1', PORT: String(freePort), DB_PATH: subDbPath },
+		env: { ...process.env, HOST: '127.0.0.1', PORT: String(freePort), DB_PATH: subDbPath, USER_AGENT: 'jump-test' },
 		stdio: ['ignore', 'pipe', 'pipe']
 	})
 	let inflight = null

@@ -17,6 +17,7 @@ process.env.GOOGLE_CLIENT_ID = 'test-client-id'
 process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret'
 process.env.ALLOWED_REDIRECT_DOMAINS = 'chatgpt.com,*.antigravity.google,antigravity,cursor,vscode'
 process.env.OAUTH_RATE_LIMIT = '10000'
+process.env.USER_AGENT = 'jump-test'
 
 const { server, bootstrapLocalAdmin } = await import('../index.js')
 const db = await import('../db/index.js')

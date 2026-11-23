@@ -1,3 +1,5 @@
+import { getUserAgent } from '../util.js'
+
 export default {
 	id: 'github',
 	name: 'GitHub',
@@ -18,7 +20,7 @@ export default {
 					authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
 					accept: 'application/vnd.github+json',
 					'content-type': 'application/json',
-					'user-agent': 'jump'
+					'user-agent': getUserAgent()
 				},
 				body: JSON.stringify({ access_token: token }),
 				signal
