@@ -95,7 +95,7 @@ const adminTool = {
 						},
 						body: {
 							type: ['object', 'string', 'array', 'null'],
-							description: 'Optional request body constraint (omit to pass body through uninspected): (a) field-map object: non-empty map of field keys (dot-notation like "recipient.email" traverses nested JSON; flat keys like "metadata[env]" for form) to primitive glob(s) or null—same presence/absence and array-every semantics as query; empty bodies evaluate as {}; (b) string or string[] of globs: case-insensitive full-body match where "*" crosses newlines (e.g. "*<DeleteDomain*" matches both "<DeleteDomain>" and "<DeleteDomain/>"); (c) null: requires an empty request body.'
+							description: 'Optional request body constraint (omit to pass body through uninspected): (a) field-map object: non-empty map of literal field keys (or nested plain objects mirroring JSON, e.g. { recipient: { email: "*@good.com" } }; use flat keys like "metadata[env]" for form) to primitive glob(s) or null—same presence/absence and array-every semantics as query; empty bodies evaluate as {}; (b) string or string[] of globs: case-insensitive full-body match where "*" crosses newlines (e.g. "*<DeleteDomain*" matches both "<DeleteDomain>" and "<DeleteDomain/>"); (c) null: requires an empty request body.'
 						},
 						bodyType: {
 							type: 'string',

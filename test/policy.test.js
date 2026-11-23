@@ -60,7 +60,9 @@ test('validatePolicy rejects malformed rules and accepts valid schemas', () => {
 		[{ action: 'allow', body: {} }],
 		[{ action: 'allow', body: { '': '1' } }],
 		[{ action: 'allow', body: { k: [] } }],
-		[{ action: 'allow', body: { k: { nested: 1 } } }],
+		[{ action: 'allow', body: { k: {} } }],
+		[{ action: 'allow', body: { k: { nested: 1 } }, bodyType: 'form' }],
+		[{ action: 'allow', body: { k: [{ nested: 1 }] } }],
 		[{ action: 'allow', body: { k: ['ok', undefined] } }],
 		[{ action: 'allow', bodyType: 'form' }],
 		[{ action: 'allow', body: null, bodyType: 'json' }],
@@ -178,13 +180,18 @@ test('query parameter allow vs deny symmetry across scalars, null, and repeated 
 
 test('body field-map and raw-glob predicates across JSON, form, nested paths, arrays, and prototype keys', () => {
 	const allowTags = [
-		{ action: 'allow', methods: ['POST'], path: '/v1/items', body: { tags: ['safe-*', 'public'], 'meta.env': 'staging', debug: null } }
+		{ action: 'allow', methods: ['POST'], path: '/v1/items', body: { tags: ['safe-*', 'public'], meta: { env: 'staging' }, debug: null } }
 	]
 	assert.equal(evaluatePolicy(allowTags, { url: 'https://api.example.com/v1/items', method: 'POST', body: { tags: ['public', 'safe-1'], meta: { env: 'staging' } } }).allowed, true)
-	assert.equal(evaluatePolicy(allowTags, { url: 'https://api.example.com/v1/items', method: 'POST', body: Buffer.from(JSON.stringify({ tags: 'safe-1', 'meta.env': 'staging' })) }).allowed, true)
+	assert.equal(evaluatePolicy(allowTags, { url: 'https://api.example.com/v1/items', method: 'POST', body: Buffer.from(JSON.stringify({ tags: 'safe-1', 'meta.env': 'staging' })) }).allowed, false, 'Literal dotted key does not satisfy nested object rule')
 	assert.equal(evaluatePolicy(allowTags, { url: 'https://api.example.com/v1/items', method: 'POST', body: { tags: ['public', 'secret'], meta: { env: 'staging' } } }).allowed, false)
 	assert.equal(evaluatePolicy(allowTags, { url: 'https://api.example.com/v1/items', method: 'POST', body: { tags: [], meta: { env: 'staging' } } }).allowed, false)
 	assert.equal(evaluatePolicy(allowTags, { url: 'https://api.example.com/v1/items', method: 'POST', body: { tags: { nested: 'public' }, meta: { env: 'staging' } } }).allowed, false)
+	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/items', body: { 'meta.env': 'staging' } }], { url: 'https://api.example.com/v1/items', method: 'POST', body: { meta: { env: 'staging' } } }).allowed, false, 'Flat dotted rule does not traverse nested objects')
+	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/items', body: { 'meta.env': 'staging' } }], { url: 'https://api.example.com/v1/items', method: 'POST', body: { 'meta.env': 'staging' } }).allowed, true)
+	assert.equal(validatePolicy([{ action: 'allow', body: { meta: { env: 'staging' } }, bodyType: 'form' }]).valid, false, 'Form rules reject nested objects')
+	assert.equal(validatePolicy([{ action: 'allow', body: { meta: {} } }]).valid, false, 'Empty nested object rejected')
+	assert.equal(validatePolicy([{ action: 'allow', query: { meta: { env: 'staging' } } }]).valid, false, 'Query rules reject nested objects')
 	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/ping', body: null }], { url: 'https://api.example.com/v1/ping', method: 'POST', body: Buffer.alloc(0) }).allowed, true)
 	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/ping', body: null }], { url: 'https://api.example.com/v1/ping', method: 'POST', body: 'non-empty' }).allowed, false)
 	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/slash', body: { text: 'a*b' } }], { url: 'https://api.example.com/v1/slash', method: 'POST', body: { text: 'a/mid/b' } }).allowed, true)
@@ -195,7 +202,16 @@ test('body field-map and raw-glob predicates across JSON, form, nested paths, ar
 	]
 	assert.equal(evaluatePolicy(denyJson, { url: 'https://api.example.com/v1/items', method: 'POST', body: { tags: ['public', 'admin-root'] } }).allowed, false)
 	assert.equal(evaluatePolicy(denyJson, { url: 'https://api.example.com/v1/items', method: 'POST', body: { recipient: ['a@ok.com', 'leak@competitor.com'] } }).allowed, false)
-	assert.equal(evaluatePolicy(denyJson, { url: 'https://api.example.com/v1/items', method: 'POST', body: { recipient: { email: 'leak@competitor.com' } } }).allowed, false)
+	assert.equal(evaluatePolicy(denyJson, { url: 'https://api.example.com/v1/items', method: 'POST', body: { recipient: { email: 'ok@good.com' } } }).allowed, false, 'Scalar deny rule fails closed on object value')
+	const denyNested = [
+		{ action: 'deny', methods: ['POST'], path: '/v1/items', body: { recipient: { email: '*@competitor.com' } } },
+		{ action: 'allow', methods: ['POST'], path: '/v1/items' }
+	]
+	assert.equal(evaluatePolicy(denyNested, { url: 'https://api.example.com/v1/items', method: 'POST', body: { recipient: { email: 'ok@good.com' } } }).allowed, true)
+	assert.equal(evaluatePolicy(denyNested, { url: 'https://api.example.com/v1/items', method: 'POST', body: { recipient: { email: 'leak@competitor.com' } } }).allowed, false)
+	assert.equal(evaluatePolicy(denyNested, { url: 'https://api.example.com/v1/items', method: 'POST', body: { 'recipient.email': 'ok@good.com', recipient: { email: 'leak@competitor.com' } } }).allowed, false)
+	assert.equal(evaluatePolicy(denyNested, { url: 'https://api.example.com/v1/items', method: 'POST', body: { recipient: [{ email: 'ok@good.com' }, { email: 'leak@competitor.com' }] } }).allowed, false)
+	assert.equal(evaluatePolicy(denyNested, { url: 'https://api.example.com/v1/items', method: 'POST', body: { recipient: [{ email: 'ok@good.com' }] } }).allowed, true)
 	const denyForm = [
 		{ action: 'deny', methods: ['POST'], path: '/v3/messages', body: { tag: 'internal-*' }, bodyType: 'form' },
 		{ action: 'allow', methods: ['POST'], path: '/v3/messages' }

@@ -133,19 +133,6 @@ function bodyToString (body, objectFormat = 'json') {
 	return String(body)
 }
 
-function resolveField (obj, key) {
-	if (!obj || typeof obj !== 'object') return undefined
-	if (Object.hasOwn(obj, key)) return obj[key]
-	if (!key.includes('.')) return undefined
-	const parts = key.split('.')
-	let cur = obj
-	for (const part of parts) {
-		if (!cur || typeof cur !== 'object' || !Object.hasOwn(cur, part)) return undefined
-		cur = cur[part]
-	}
-	return cur
-}
-
 function matchValuePattern (pattern, str) {
 	if (typeof pattern !== 'string' || typeof str !== 'string') return false
 	if (pattern === '*' || pattern === '**') return true
@@ -189,7 +176,7 @@ function matchFieldValue (expected, actual, action = 'allow') {
 	return action === 'deny' ? values.some(matchOne) : values.every(matchOne)
 }
 
-function validateFieldMap (map, label, ruleIndex) {
+function validateFieldMap (map, label, ruleIndex, allowNested = false) {
 	if (!isPlainObject(map)) {
 		return `Rule at index ${ruleIndex} ${label} must be a non-empty object`
 	}
@@ -205,17 +192,35 @@ function validateFieldMap (map, label, ruleIndex) {
 			if (v.length === 0 || !v.every(isValidFieldScalar)) {
 				return `Rule at index ${ruleIndex} ${label} field "${k}" must be a primitive or non-empty array of primitives`
 			}
+		} else if (allowNested && isPlainObject(v)) {
+			const nestedErr = validateFieldMap(v, `${label}.${k}`, ruleIndex, true)
+			if (nestedErr) return nestedErr
 		} else if (!isValidFieldScalar(v)) {
-			return `Rule at index ${ruleIndex} ${label} field "${k}" must be a primitive or non-empty array of primitives`
+			return `Rule at index ${ruleIndex} ${label} field "${k}" must be a primitive${allowNested ? ', non-empty object,' : ''} or non-empty array of primitives`
 		}
 	}
 	return null
 }
 
 function matchFieldMap (expectedMap, actualObj, action = 'allow') {
-	if (!actualObj) return false
+	if (!actualObj || typeof actualObj !== 'object') return false
 	for (const [key, expected] of Object.entries(expectedMap)) {
-		if (!matchFieldValue(expected, resolveField(actualObj, key), action)) return false
+		const actual = Object.hasOwn(actualObj, key) ? actualObj[key] : undefined
+		if (isPlainObject(expected)) {
+			if (Array.isArray(actual)) {
+				if (actual.length === 0) return false
+				const ok = action === 'deny'
+					? actual.some(item => isPlainObject(item) && matchFieldMap(expected, item, action))
+					: actual.every(item => isPlainObject(item) && matchFieldMap(expected, item, action))
+				if (!ok) return false
+			} else if (actual === undefined || actual === null) {
+				if (!matchFieldMap(expected, Object.create(null), action)) return false
+			} else if (!isPlainObject(actual) || !matchFieldMap(expected, actual, action)) {
+				return false
+			}
+			continue
+		}
+		if (!matchFieldValue(expected, actual, action)) return false
 	}
 	return true
 }
@@ -320,7 +325,8 @@ function validatePolicy (policy) {
 					return { valid: false, error: `Rule at index ${i} body array must be a non-empty array of non-empty pattern strings` }
 				}
 			} else if (isPlainObject(rule.body)) {
-				const bodyErr = validateFieldMap(rule.body, 'body', i)
+				const bodyType = typeof rule.bodyType === 'string' ? rule.bodyType.trim().toLowerCase() : 'json'
+				const bodyErr = validateFieldMap(rule.body, 'body', i, bodyType !== 'form')
 				if (bodyErr) return { valid: false, error: bodyErr }
 			} else {
 				return { valid: false, error: `Rule at index ${i} body must be a non-empty object, pattern string, array of pattern strings, or null` }
