@@ -19,13 +19,8 @@ export default {
 			if (user.verified_email === false) return null
 			return (user.email || '').toLowerCase() || null
 		},
-		async revoke ({ token, signal }) {
-			await fetch('https://oauth2.googleapis.com/revoke', {
-				method: 'POST',
-				headers: { 'content-type': 'application/x-www-form-urlencoded' },
-				body: new URLSearchParams({ token }).toString(),
-				signal
-			})
+		async revoke ({ token, fetch: fetchReq }) {
+			await fetchReq('https://oauth2.googleapis.com/revoke', { form: { token } })
 		},
 		baseScopes: [
 			'https://www.googleapis.com/auth/userinfo.email',

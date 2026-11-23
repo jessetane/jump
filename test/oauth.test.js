@@ -361,24 +361,47 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 500)
 		})
 		let refreshMode = 'slow'
+		let googleRevokeReq = null
 		await withMockFetch((input, init, origFetch) => {
 			const u = typeof input === 'string' ? input : input.url
+			if (u === 'https://oauth2.googleapis.com/revoke') {
+				googleRevokeReq = { method: init?.method, ua: init?.headers?.['user-agent'], body: init?.body }
+				return new Response(null, { status: 200 })
+			}
 			if (u === 'https://oauth2.googleapis.com/token') {
 				const form = new URLSearchParams(String(init?.body || ''))
 				if (form.get('grant_type') === 'refresh_token') {
 					if (refreshMode === 'invalid_client') return Response.json({ error: 'invalid_client' }, { status: 400 })
 					if (refreshMode === 'upstream_503') return Response.json({ error: 'temporarily_unavailable' }, { status: 503 })
 					if (refreshMode === 'invalid_grant') return Response.json({ error: 'invalid_grant', error_description: 'Token revoked' }, { status: 400 })
+					if (refreshMode === 'body_stall') {
+						return new Response(new ReadableStream({
+							start (c) {
+								init?.signal?.addEventListener('abort', () => c.error(init.signal.reason), { once: true })
+							}
+						}), { status: 200, headers: { 'content-type': 'application/json' } })
+					}
 				}
-				if (refreshMode === 'exchange' && (form.get('code') !== 'slow' || form.get('redirect_uri') !== 'http://localhost/cb')) {
+				if (refreshMode === 'exchange_net_err') return Promise.reject(new Error('ECONNRESET'))
+				if (refreshMode === 'exchange_userinfo_slow' && form.get('code') === 'ui-slow') {
+					return Response.json({ access_token: 'ya29.ui-slow' })
+				}
+				if (refreshMode === 'exchange' && (form.get('code') !== 'slow' || !['http://localhost/cb', `${baseUrl()}/oauth/callback`].includes(form.get('redirect_uri')))) {
 					return Response.json({ error: 'invalid_request' }, { status: 400 })
 				}
 				return new Promise((_, reject) => {
 					init?.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true })
 				})
 			}
+			if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+				return new Promise((_, reject) => {
+					init?.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true })
+				})
+			}
 			return origFetch(input, init)
-		}, async () => {
+		}, async origFetch => {
+			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 504)
+			refreshMode = 'body_stall'
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 504)
 			refreshMode = 'invalid_client'
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 502)
@@ -389,9 +412,18 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			assert.equal(revokedRes.status, 401)
 			assert.match(revokedRes.data.error, /connect_app/)
 			refreshMode = 'exchange'
-			await assert.rejects(() => providers.google.exchangeCode({ code: 'slow', callbackUrl: 'http://localhost/cb' }), /aborted|timeout/i)
+			await assert.rejects(() => providers.google.exchangeCode({ code: 'slow', callbackUrl: 'http://localhost/cb' }), { status: 504, message: /timed out/i })
+			const slowCbState = db.tokens.createState({ mode: 'login', provider: 'google' })
+			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=slow&state=${slowCbState}`)).status, 504)
+			refreshMode = 'exchange_userinfo_slow'
+			const slowUiState = db.tokens.createState({ mode: 'login', provider: 'google' })
+			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=ui-slow&state=${slowUiState}`)).status, 504)
+			refreshMode = 'exchange_net_err'
+			const netErrState = db.tokens.createState({ mode: 'login', provider: 'google' })
+			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=net&state=${netErrState}`)).status, 502)
 			const start = Date.now()
 			await providers.google.revokeToken(db.tokens.get(app.id))
+			assert.equal(googleRevokeReq?.ua, 'jump-test')
 			assert.ok(Date.now() - start < 1000)
 		})
 	})
@@ -400,7 +432,7 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 	await withMockFetch((input, init, origFetch) => {
 		const u = typeof input === 'string' ? input : input.url
 		if (u.startsWith('https://api.github.com/applications/')) {
-			ghRevokeReqs.push({ url: u, method: init?.method, auth: init?.headers?.authorization, body: init?.body })
+			ghRevokeReqs.push({ url: u, method: init?.method, auth: init?.headers?.authorization, ua: init?.headers?.['user-agent'], body: init?.body })
 			if (ghRevokeReqs.length > 1) return Promise.reject(new Error('network down'))
 			return new Response(null, { status: 204 })
 		}
@@ -415,6 +447,7 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			assert.equal(ghRevokeReqs.length, 1)
 			assert.equal(ghRevokeReqs[0].url, 'https://api.github.com/applications/gh_id/token')
 			assert.equal(ghRevokeReqs[0].method, 'DELETE')
+			assert.equal(ghRevokeReqs[0].ua, 'jump-test')
 			assert.equal(ghRevokeReqs[0].auth, `Basic ${Buffer.from('gh_id:gh_sec').toString('base64')}`)
 			assert.deepEqual(JSON.parse(ghRevokeReqs[0].body), { access_token: 'gho_rev' })
 			await providers.github.revokeToken(ghRevokeApp)

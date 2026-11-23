@@ -121,8 +121,7 @@ function buildScopesFromSelection (services, baseScopes = [], selectedServices =
 	return Array.from(scopeSet).join(' ')
 }
 
-async function parseOAuthResponse (res, fallbackErrorMsg) {
-	const rawText = await res.text()
+function parseOAuthResponse (res, rawText, fallbackErrorMsg) {
 	let data = {}
 	try {
 		data = rawText ? JSON.parse(rawText) : {}
@@ -136,6 +135,46 @@ async function parseOAuthResponse (res, fallbackErrorMsg) {
 		throw httpError(res.ok ? 401 : res.status, data.error_description || errorText || data.message || fallbackErrorMsg, { data })
 	}
 	return data
+}
+
+async function withOauthTransport (fn, label, action) {
+	try {
+		return await fn()
+	} catch (err) {
+		if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+			throw httpError(504, `Timed out ${action} (${label})`)
+		}
+		throw httpError(502, `Failed ${action} (${label}): ${err.message}`)
+	}
+}
+
+function fetchOauth (url, { method = 'GET', headers = {}, body, form } = {}, label = 'Upstream', action = 'contacting OAuth endpoint') {
+	const resolvedHeaders = {
+		'user-agent': getUserAgent(),
+		...headers
+	}
+	let resolvedMethod = method
+	let resolvedBody = body
+	if (form !== undefined) {
+		resolvedMethod = 'POST'
+		resolvedHeaders['content-type'] ||= 'application/x-www-form-urlencoded'
+		resolvedBody = new URLSearchParams(form).toString()
+	}
+	return withOauthTransport(() => fetch(url, {
+		method: resolvedMethod,
+		headers: resolvedHeaders,
+		...(resolvedBody !== undefined && { body: resolvedBody }),
+		signal: oauthTimeout()
+	}), label, action)
+}
+
+async function fetchOauthJson (url, opts, label, action, fallbackErrorMsg) {
+	const res = await fetchOauth(url, {
+		...opts,
+		headers: { accept: 'application/json', ...opts?.headers }
+	}, label, action)
+	const rawText = await withOauthTransport(() => res.text(), label, action)
+	return parseOAuthResponse(res, rawText, fallbackErrorMsg)
 }
 
 function requireOauthEnv (envPrefix) {
@@ -217,41 +256,26 @@ function createProvider (config) {
 			},
 			async exchangeCode ({ code, callbackUrl }) {
 				const { clientId, clientSecret } = requireOauthEnv(envPrefix)
-				const params = new URLSearchParams({
-					code,
-					client_id: clientId,
-					client_secret: clientSecret,
-					redirect_uri: callbackUrl,
-					grant_type: 'authorization_code'
-				})
-				const tokenRes = await fetch(oauth.tokenUrl, {
-					method: 'POST',
-					headers: {
-						accept: 'application/json',
-						'content-type': 'application/x-www-form-urlencoded',
-						'user-agent': getUserAgent()
-					},
-					body: params.toString(),
-					signal: oauthTimeout()
-				})
-				const parseUpstream = async (res, msg) => {
+				const fetchUpstreamJson = async (url, opts, action, msg) => {
 					try {
-						return await parseOAuthResponse(res, msg)
+						return await fetchOauthJson(url, opts, label, action, msg)
 					} catch (err) {
-						err.status = 502
+						if (err.status !== 504) err.status = 502
 						throw err
 					}
 				}
-				const tokenData = await parseUpstream(tokenRes, `Failed to exchange authorization code with ${label}`)
-				const userRes = await fetch(oauth.userInfoUrl, {
-					headers: {
-						authorization: `Bearer ${tokenData.access_token}`,
-						accept: 'application/json',
-						'user-agent': getUserAgent()
-					},
-					signal: oauthTimeout()
-				})
-				const userInfo = await parseUpstream(userRes, 'Failed to fetch user info')
+				const tokenData = await fetchUpstreamJson(oauth.tokenUrl, {
+					form: {
+						code,
+						client_id: clientId,
+						client_secret: clientSecret,
+						redirect_uri: callbackUrl,
+						grant_type: 'authorization_code'
+					}
+				}, 'exchanging authorization code', `Failed to exchange authorization code with ${label}`)
+				const userInfo = await fetchUpstreamJson(oauth.userInfoUrl, {
+					headers: { authorization: `Bearer ${tokenData.access_token}` }
+				}, 'fetching user info', 'Failed to fetch user info')
 				const account = oauth.extractAccount ? oauth.extractAccount(userInfo) : null
 				if (!account) {
 					throw httpError(400, `Could not retrieve account identifier from ${label}.`)
@@ -271,7 +295,12 @@ function createProvider (config) {
 				try {
 					const clientId = process.env[`${envPrefix}_CLIENT_ID`]
 					const clientSecret = process.env[`${envPrefix}_CLIENT_SECRET`]
-					await oauth.revoke({ token, clientId, clientSecret, signal: oauthTimeout() })
+					await oauth.revoke({
+						token,
+						clientId,
+						clientSecret,
+						fetch: (url, init) => fetchOauth(url, init, label, 'revoking token')
+					})
 				} catch (err) {
 					console.warn(`Failed to revoke token with ${label} upstream:`, err.message)
 				}
@@ -295,36 +324,19 @@ function createProvider (config) {
 				}
 				const refreshPromise = (async () => {
 					const { clientId, clientSecret } = requireOauthEnv(envPrefix)
-					const params = new URLSearchParams({
-						client_id: clientId,
-						client_secret: clientSecret,
-						refresh_token: creds.refreshToken,
-						grant_type: 'refresh_token'
-					})
-					let res
-					try {
-						res = await fetch(oauth.tokenUrl, {
-							method: 'POST',
-							headers: {
-								accept: 'application/json',
-								'content-type': 'application/x-www-form-urlencoded',
-								'user-agent': getUserAgent()
-							},
-							body: params.toString(),
-							signal: oauthTimeout()
-						})
-					} catch (err) {
-						if (err.name === 'TimeoutError' || err.name === 'AbortError') {
-							throw httpError(504, `Timed out refreshing ${label} access token`)
-						}
-						throw httpError(502, `Failed to reach ${label} token endpoint: ${err.message}`)
-					}
 					let data
 					try {
-						data = await parseOAuthResponse(res, `Failed to refresh ${label} token`)
+						data = await fetchOauthJson(oauth.tokenUrl, {
+							form: {
+								client_id: clientId,
+								client_secret: clientSecret,
+								refresh_token: creds.refreshToken,
+								grant_type: 'refresh_token'
+							}
+						}, label, 'refreshing access token', `Failed to refresh ${label} token`)
 					} catch (err) {
 						if (err.status >= 500 || err.data?.error === 'invalid_client' || err.data?.error === 'unauthorized_client') {
-							err.status = 502
+							err.status = err.status === 504 ? 504 : 502
 						}
 						throw err
 					}

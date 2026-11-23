@@ -1,5 +1,3 @@
-import { getUserAgent } from '../util.js'
-
 export default {
 	id: 'github',
 	name: 'GitHub',
@@ -12,18 +10,16 @@ export default {
 		extractAccount (user) {
 			return user.login || null
 		},
-		async revoke ({ token, clientId, clientSecret, signal }) {
+		async revoke ({ token, clientId, clientSecret, fetch: fetchReq }) {
 			if (!clientId || !clientSecret) return
-			await fetch(`https://api.github.com/applications/${clientId}/token`, {
+			await fetchReq(`https://api.github.com/applications/${clientId}/token`, {
 				method: 'DELETE',
 				headers: {
 					authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
 					accept: 'application/vnd.github+json',
-					'content-type': 'application/json',
-					'user-agent': getUserAgent()
+					'content-type': 'application/json'
 				},
-				body: JSON.stringify({ access_token: token }),
-				signal
+				body: JSON.stringify({ access_token: token })
 			})
 		},
 		baseScopes: ['read:user'],
