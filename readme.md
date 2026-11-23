@@ -126,42 +126,57 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 	* `list_logs` - Query proxied request audit logs.
 
 ### HTTP
-```
-POST   /mcp                                     # json-rpc mcp endpoint (also POST /)
+
+```sh
+# MCP & Static
+GET    /                                        # landing page
 GET    /style.css                               # shared ui stylesheet
+POST   /mcp                                     # json-rpc mcp endpoint (also POST / and POST /mcp/*)
+
+# OAuth & Discovery
+GET    /.well-known/oauth-protected-resource    # rfc 9728 discovery
+GET    /.well-known/oauth-authorization-server  # rfc 8414 discovery
+POST   /oauth/register                          # rfc 7591 dynamic client registration
 GET    /oauth/authorize                         # oauth / token sign-in screen
 POST   /oauth/authorize/consent                 # oauth / token sign-in submission
 GET    /oauth/verify                            # session activation & app selection screen
 POST   /oauth/verify                            # session activation & app linking
-POST   /oauth/register                          # rfc 7591 dynamic client registration
 POST   /oauth/token                             # oauth 2.0 pkce token exchange
 POST   /oauth/revoke                            # rfc 7009 token revocation
 GET    /oauth/callback                          # upstream oauth callback
 GET    /providers/:provider/connect             # upstream oauth scope selection
 POST   /providers/:provider/consent             # upstream oauth redirect
-GET    /.well-known/oauth-protected-resource    # rfc 9728 discovery
-GET    /.well-known/oauth-authorization-server  # rfc 8414 discovery
+
+# System & Identity
 GET    /api/health                              # health check
 GET    /api/whoami                              # session & linked apps info
 POST   /api/logins                              # link sign-in provider (admin)
 DELETE /api/logins/:id                          # unlink sign-in provider (admin)
+
+# Sessions
 GET    /api/sessions                            # list sessions (admin)
 POST   /api/sessions                            # create session (admin)
 DELETE /api/sessions?allOthers=true             # revoke all other sessions (admin)
 GET    /api/sessions/:id                        # get session
 PATCH  /api/sessions/:id                        # update session
 DELETE /api/sessions/:id                        # revoke session
+
+# Apps, Links & Shares
 GET    /api/apps                                # list connected apps (admin)
 POST   /api/apps                                # connect app (admin)
 PATCH  /api/apps/:id                            # update app (admin)
 DELETE /api/apps/:id                            # disconnect app (admin)
-POST   /api/shares                              # share app with user (admin)
-DELETE /api/shares?appId=...&account=...        # unshare app from user (admin)
 POST   /api/links                               # link app to session (admin)
 DELETE /api/links?sessionId=...&appId=...       # unlink app from session (admin)
-GET    /api/logs                                # list usage logs
-ALL    /api/:provider/*                         # transparent rest proxy
+POST   /api/shares                              # share app with user (admin)
+DELETE /api/shares?appId=...&account=...        # unshare app from user (admin)
+
+# Audit & Upstream Proxy
+GET    /api/logs                                # list usage logs (sessionId, appId, provider, allowed, limit)
+ALL    /api/:provider/*                         # streaming rest proxy
 ```
+
+For `ALL /api/:provider/*`, authenticate with your session `Authorization: Bearer <token>`, pass `X-Upstream-App: <id|name|account>` when multiple apps are linked for the same provider (stripped before forwarding), and pass upstream path/query parameters directly in the URL.
 
 ## Security
 
