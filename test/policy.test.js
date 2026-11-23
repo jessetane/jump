@@ -265,11 +265,22 @@ test('body parser-differential defenses across Content-Type, duplicate JSON keys
 		body: '{"currency":"usd","_":"\\r\\n--B\\r\\nContent-Disposition: form-data; name=\\"currency\\"\\r\\n\\r\\neur\\r\\n--B--\\r\\n"}'
 	}).allowed, false, 'Multipart Content-Type must not match bodyType: json rule')
 	assert.equal(evaluatePolicy(allowUsdJson, { url: 'https://api.stripe.com/v1/charges', method: 'POST', body: '{"currency":"eur","currency":"usd"}' }).allowed, false, 'Duplicate JSON keys must fail allow rule')
+	assert.equal(evaluatePolicy(allowUsdJson, { url: 'https://api.stripe.com/v1/charges', method: 'POST', body: '{"cur\\u0072ency":"eur","currency":"usd"}' }).allowed, false, 'Unicode-escaped duplicate JSON keys must fail allow rule')
 	assert.equal(evaluatePolicy([{ action: 'deny', methods: ['POST'], path: '/v1/charges', body: { currency: 'btc' } }, { action: 'allow' }], {
 		url: 'https://api.stripe.com/v1/charges',
 		method: 'POST',
 		body: '{"currency":"btc","currency":"usd"}'
 	}).allowed, false, 'Duplicate JSON keys must fail closed on deny rule')
+	assert.equal(evaluatePolicy([{ action: 'deny', methods: ['POST'], path: '/v1/charges', body: { currency: 'btc' } }, { action: 'allow' }], {
+		url: 'https://api.stripe.com/v1/charges',
+		method: 'POST',
+		body: '{"cur\\u0072ency":"btc","currency":"usd"}'
+	}).allowed, false, 'Unicode-escaped duplicate JSON keys must fail closed on deny rule')
+	assert.equal(evaluatePolicy([{ action: 'allow', methods: ['POST'], path: '/v1/charges', body: { meta: { role: 'user' } } }], {
+		url: 'https://api.stripe.com/v1/charges',
+		method: 'POST',
+		body: '{"meta":{"ro\\u006ce":"admin","role":"user"}}'
+	}).allowed, false, 'Nested unicode-escaped duplicate JSON keys must fail allow rule')
 	assert.equal(evaluatePolicy([{ action: 'deny', methods: ['POST'], path: '/v1/charges', body: { currency: 'btc' }, bodyType: 'form' }, { action: 'allow' }], {
 		url: 'https://api.stripe.com/v1/charges',
 		method: 'POST',
