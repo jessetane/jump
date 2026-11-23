@@ -419,6 +419,8 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 			assert.equal(restLarge.headers.get('x-content-type-options'), 'nosniff')
 			assert.equal(restLarge.headers.get('content-security-policy'), 'sandbox')
 			assert.equal((await req('HEAD', '/api/comp/large-stream', { token: session.token })).status, 200)
+			assert.equal((await mcp(session.token, 'comp_api', { url: '/large-stream', method: 'HEAD' })).isError, undefined)
+			assert.equal((await mcp(session.token, 'comp_api', { url: '/large-stream', method: 'GET' })).isError, true)
 			const resetRes = await req('GET', '/api/comp/pre-byte-reset', { token: session.token })
 			assert.equal(resetRes.status, 502)
 			assert.equal(resetRes.headers.get('content-encoding'), null)

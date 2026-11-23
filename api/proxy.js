@@ -382,12 +382,12 @@ async function executeBufferedUpstream ({ credentials, url, method, body, baseHe
 	const maxFileSizeMb = positiveNumberEnv('MAX_FILE_SIZE_MB', 10)
 	const maxFileSizeBytes = maxFileSizeMb * 1024 * 1024
 	const contentLength = res.headers['content-length']
-	if (contentLength && Number(contentLength) > maxFileSizeBytes) {
+	const skipBody = curMethod === 'HEAD' || BODILESS_STATUSES.has(status)
+	if (!skipBody && contentLength && Number(contentLength) > maxFileSizeBytes) {
 		res.destroy()
 		throw fileTooLargeError(Number(contentLength), maxFileSizeBytes)
 	}
 	const rawContentType = res.headers['content-type'] || ''
-	const skipBody = curMethod === 'HEAD' || BODILESS_STATUSES.has(status)
 	const buf = skipBody ? (drainSilently(res), Buffer.alloc(0)) : await readResponseBody(res, maxFileSizeBytes)
 	const contentType = rawContentType.split(';')[0].trim().toLowerCase()
 	const charsetMatch = rawContentType.match(/charset=([^;]+)/i)
