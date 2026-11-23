@@ -1,3 +1,5 @@
+import { httpError } from './util.js'
+
 export {
 	parseSsoDomains,
 	getSsoDomain,
@@ -23,22 +25,16 @@ function parseSsoDomains (raw = process.env.SSO_DOMAINS) {
 		if (!entry) continue
 		const parts = entry.split(':')
 		if (parts.length < 2 || parts.length > 3) {
-			const err = new Error(`Invalid SSO_DOMAINS entry "${entry}"; expected "domain:provider" or "domain:provider:strict"`)
-			err.status = 500
-			throw err
+			throw httpError(500, `Invalid SSO_DOMAINS entry "${entry}"; expected "domain:provider" or "domain:provider:strict"`)
 		}
 		const domain = parts[0].trim().toLowerCase()
 		const provider = parts[1].trim().toLowerCase()
 		const flag = parts.length === 3 ? parts[2].trim().toLowerCase() : null
 		if (!domain || !provider || domain.includes('@') || /\s/.test(domain) || /\s/.test(provider) || (flag !== null && flag !== 'strict')) {
-			const err = new Error(`Invalid SSO_DOMAINS entry "${entry}"; expected "domain:provider" or "domain:provider:strict"`)
-			err.status = 500
-			throw err
+			throw httpError(500, `Invalid SSO_DOMAINS entry "${entry}"; expected "domain:provider" or "domain:provider:strict"`)
 		}
 		if (domains.has(domain)) {
-			const err = new Error(`Duplicate domain "${domain}" in SSO_DOMAINS`)
-			err.status = 500
-			throw err
+			throw httpError(500, `Duplicate domain "${domain}" in SSO_DOMAINS`)
 		}
 		domains.set(domain, { domain, provider, strict: flag === 'strict' })
 	}
@@ -54,9 +50,7 @@ function assertSsoLogin (provider, account) {
 	const cleanProvider = String(provider || '').trim().toLowerCase()
 	const pin = getSsoDomain(account)
 	if (pin && pin.provider !== cleanProvider) {
-		const err = new Error(`Access denied: SSO domain "${pin.domain}" requires signing in with "${pin.provider}"`)
-		err.status = 403
-		throw err
+		throw httpError(403, `Access denied: SSO domain "${pin.domain}" requires signing in with "${pin.provider}"`)
 	}
 }
 
@@ -66,22 +60,16 @@ function assertSsoLink (existingLogins = [], provider, account = null) {
 	for (const login of existingLogins) {
 		const existingPin = getSsoDomain(login.account, domains)
 		if (existingPin && existingPin.provider !== cleanProvider) {
-			const err = new Error(`Access denied: SSO domain "${existingPin.domain}" prevents linking logins from "${cleanProvider}"`)
-			err.status = 403
-			throw err
+			throw httpError(403, `Access denied: SSO domain "${existingPin.domain}" prevents linking logins from "${cleanProvider}"`)
 		}
 	}
 	const targetPin = account ? getSsoDomain(account, domains) : null
 	if (targetPin) {
 		if (targetPin.provider !== cleanProvider) {
-			const err = new Error(`Access denied: SSO domain "${targetPin.domain}" requires linking with "${targetPin.provider}"`)
-			err.status = 403
-			throw err
+			throw httpError(403, `Access denied: SSO domain "${targetPin.domain}" requires linking with "${targetPin.provider}"`)
 		}
 		if (existingLogins.some(l => String(l.provider || '').trim().toLowerCase() !== targetPin.provider)) {
-			const err = new Error(`Access denied: SSO domain "${targetPin.domain}" cannot be linked to an account with other sign-in providers`)
-			err.status = 403
-			throw err
+			throw httpError(403, `Access denied: SSO domain "${targetPin.domain}" cannot be linked to an account with other sign-in providers`)
 		}
 	}
 }
@@ -91,9 +79,7 @@ function resolveShareProvider (selfLogins = [], targetAccount, explicitProvider 
 	const cleanProvider = explicitProvider ? String(explicitProvider).trim().toLowerCase() : null
 	const targetPin = getSsoDomain(targetAccount, domains)
 	if (targetPin && cleanProvider && cleanProvider !== targetPin.provider) {
-		const err = new Error(`Access denied: SSO domain "${targetPin.domain}" requires sharing within "${targetPin.provider}"`)
-		err.status = 403
-		throw err
+		throw httpError(403, `Access denied: SSO domain "${targetPin.domain}" requires sharing within "${targetPin.provider}"`)
 	}
 	const strictPins = []
 	for (const login of selfLogins) {
@@ -103,9 +89,7 @@ function resolveShareProvider (selfLogins = [], targetAccount, explicitProvider 
 	const effectiveProvider = cleanProvider || targetPin?.provider || strictPins[0]?.provider || null
 	for (const pin of strictPins) {
 		if (effectiveProvider !== pin.provider) {
-			const err = new Error(`Access denied: SSO domain "${pin.domain}" requires sharing within "${pin.provider}"`)
-			err.status = 403
-			throw err
+			throw httpError(403, `Access denied: SSO domain "${pin.domain}" requires sharing within "${pin.provider}"`)
 		}
 	}
 	return effectiveProvider

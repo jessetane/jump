@@ -2,7 +2,7 @@ import * as db from '../db/index.js'
 import { RESERVED_PROVIDERS, isValidProviderId, getProvider, listAuthProviders, requireAuthProvider } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, assertKeys, getBaseUrl, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
+import { HOP_BY_HOP_HEADERS, assertKeys, getBaseUrl, httpError, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean } from '../util.js'
 
 export {
 	whoami,
@@ -104,9 +104,7 @@ async function whoami (token, opts = {}, appUrl) {
 function requireSession (token) {
 	const session = db.tokens.resolveSession(token)
 	if (!session) {
-		const error = new Error('Authentication required')
-		error.status = 401
-		throw error
+		throw httpError(401, 'Authentication required')
 	}
 	return session
 }
@@ -114,9 +112,7 @@ function requireSession (token) {
 function requireAdmin (token, message = 'Access denied: app administration requires admin privileges') {
 	const session = requireSession(token)
 	if (!session.admin) {
-		const error = new Error(message)
-		error.status = 403
-		throw error
+		throw httpError(403, message)
 	}
 	return session
 }
@@ -125,9 +121,7 @@ function requireApp (userId, appId, { allowShare = true } = {}) {
 	appId = requireNonEmptyString(appId, 'appId')
 	const targetApp = db.tokens.get(appId)
 	if (!targetApp || targetApp.userId !== userId || !db.tokens.isUpstreamApp(targetApp, { allowShare })) {
-		const error = new Error(`App not found: ${appId}`)
-		error.status = 404
-		throw error
+		throw httpError(404, `App not found: ${appId}`)
 	}
 	return targetApp
 }
@@ -136,9 +130,7 @@ function requireTargetSession (userId, sessionId) {
 	sessionId = requireNonEmptyString(sessionId, 'sessionId')
 	const targetSession = db.tokens.get(sessionId)
 	if (!db.tokens.isSession(targetSession) || targetSession.userId !== userId) {
-		const error = new Error(`Session not found: ${sessionId}`)
-		error.status = 404
-		throw error
+		throw httpError(404, `Session not found: ${sessionId}`)
 	}
 	return targetSession
 }
@@ -148,15 +140,11 @@ function requireShareTarget (token, opts = {}, allowedKeys = ['appId', 'account'
 	assertKeys(opts, allowedKeys)
 	const { appId, account, provider = null } = opts
 	if (!appId) {
-		const error = new Error('appId is required')
-		error.status = 400
-		throw error
+		throw httpError(400, 'appId is required')
 	}
 	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
 	if (!cleanAccount) {
-		const error = new Error('Valid recipient account identifier is required')
-		error.status = 400
-		throw error
+		throw httpError(400, 'Valid recipient account identifier is required')
 	}
 	const targetApp = requireApp(session.userId, appId, { allowShare: false })
 	return { session, targetApp, cleanAccount, cleanProvider }
@@ -174,9 +162,7 @@ async function getSession (token, opts = {}) {
 	assertKeys(opts, ['sessionId'])
 	const sessionId = requireNonEmptyString(opts.sessionId, 'sessionId')
 	if (!session.admin && sessionId !== session.id) {
-		const error = new Error('Access denied: session administration requires admin privileges')
-		error.status = 403
-		throw error
+		throw httpError(403, 'Access denied: session administration requires admin privileges')
 	}
 	const targetSession = requireTargetSession(session.userId, sessionId)
 	return { session: formatSession(targetSession, session.id) }
@@ -189,13 +175,11 @@ async function createSession (token, opts = {}) {
 	const cleanName = optionalString(name, 'name')
 	const isAdmin = requireBoolean(admin, 'admin', false)
 	if (!Array.isArray(linkAppIds)) {
-		throw badRequest('linkAppIds must be an array')
+		throw httpError(400, 'linkAppIds must be an array')
 	}
 	const policyCheck = validatePolicy(policy)
 	if (!policyCheck.valid) {
-		const error = new Error(policyCheck.error)
-		error.status = 400
-		throw error
+		throw httpError(400, policyCheck.error)
 	}
 	const appsToLink = []
 	for (const appId of linkAppIds) {
@@ -236,9 +220,7 @@ async function revokeSession (token, opts = {}) {
 	const shouldRevokeAllOthers = requireBoolean(allOthers, 'allOthers', false)
 	if (shouldRevokeAllOthers) {
 		if (!session.admin) {
-			const error = new Error('Access denied: revoking other sessions requires admin privileges')
-			error.status = 403
-			throw error
+			throw httpError(403, 'Access denied: revoking other sessions requires admin privileges')
 		}
 		const userSessions = db.tokens.listByUserId(session.userId, { provider: 'self' })
 		const others = userSessions.filter(s => s.id !== session.id)
@@ -253,9 +235,7 @@ async function revokeSession (token, opts = {}) {
 	}
 	if (sessionId && sessionId !== session.id) {
 		if (!session.admin) {
-			const error = new Error('Access denied: revoking other sessions requires admin privileges')
-			error.status = 403
-			throw error
+			throw httpError(403, 'Access denied: revoking other sessions requires admin privileges')
 		}
 		const targetSession = db.tokens.get(sessionId)
 		if (!db.tokens.isSession(targetSession) || targetSession.userId !== session.userId) {
@@ -305,18 +285,14 @@ async function listApps (token, opts = {}) {
 function optionalString (val, label) {
 	if (val === undefined || val === null) return null
 	if (typeof val !== 'string') {
-		const error = new Error(`${label} must be a string`)
-		error.status = 400
-		throw error
+		throw httpError(400, `${label} must be a string`)
 	}
 	return val.trim() || null
 }
 
 function requireNonEmptyString (val, label) {
 	if (typeof val !== 'string' || !val.trim()) {
-		const error = new Error(`${label} must be a non-empty string`)
-		error.status = 400
-		throw error
+		throw httpError(400, `${label} must be a non-empty string`)
 	}
 	return val.trim()
 }
@@ -324,9 +300,7 @@ function requireNonEmptyString (val, label) {
 function requireValidBaseUrl (rawBase) {
 	const normalized = rawBase ? validateBaseUrl(rawBase) : null
 	if (!normalized) {
-		const error = new Error('Valid https:// baseUrl is required for static apps')
-		error.status = 400
-		throw error
+		throw httpError(400, 'Valid https:// baseUrl is required for static apps')
 	}
 	return normalized
 }
@@ -339,32 +313,26 @@ const DISALLOWED_CREDENTIAL_HEADERS = new Set([
 	'cookie'
 ])
 
-function badRequest (message) {
-	const error = new Error(message)
-	error.status = 400
-	return error
-}
-
 function assertHeaderValue (val, label) {
 	if (typeof val !== 'string' || !val.trim() || /[\r\n]/.test(val)) {
-		throw badRequest(`${label} must be a valid non-empty HTTP header value`)
+		throw httpError(400, `${label} must be a valid non-empty HTTP header value`)
 	}
 	try {
 		new Headers().set('x-check', val)
 	} catch {
-		throw badRequest(`${label} contains invalid HTTP header characters`)
+		throw httpError(400, `${label} contains invalid HTTP header characters`)
 	}
 }
 
 function normalizeBearerToken (raw, label) {
 	if (typeof raw !== 'string' || !raw.trim()) {
-		throw badRequest(`${label} must be a non-empty string`)
+		throw httpError(400, `${label} must be a non-empty string`)
 	}
 	assertHeaderValue(raw, label)
 	const trimmed = raw.trim()
 	if (/^Bearer(?:[ \t]+|$)/i.test(trimmed)) {
 		const rest = trimmed.replace(/^Bearer/i, '').trim()
-		if (!rest) throw badRequest(`${label} must contain a non-empty token`)
+		if (!rest) throw httpError(400, `${label} must contain a non-empty token`)
 		return rest
 	}
 	return trimmed
@@ -376,11 +344,11 @@ function normalizeCredentials (raw) {
 		return { headers: { authorization: `Bearer ${token}` } }
 	}
 	if (!isPlainObject(raw)) {
-		throw badRequest('credentials must be a non-empty string or object')
+		throw httpError(400, 'credentials must be a non-empty string or object')
 	}
 	for (const key of Object.keys(raw)) {
 		if (!ALLOWED_CREDENTIAL_KEYS.has(key)) {
-			throw badRequest(`Unknown credentials field "${key}"`)
+			throw httpError(400, `Unknown credentials field "${key}"`)
 		}
 	}
 	const headers = new Headers()
@@ -392,29 +360,29 @@ function normalizeCredentials (raw) {
 	}
 	if (raw.basic !== undefined) {
 		if (typeof raw.basic !== 'string' || !raw.basic.trim()) {
-			throw badRequest('credentials.basic must be a non-empty "user:pass" string')
+			throw httpError(400, 'credentials.basic must be a non-empty "user:pass" string')
 		}
 		if (/[\x00-\x1f\x7f]/.test(raw.basic)) {
-			throw badRequest('credentials.basic must not contain control characters')
+			throw httpError(400, 'credentials.basic must not contain control characters')
 		}
 		const cleanBasic = raw.basic.trim()
 		if (!cleanBasic.includes(':') || cleanBasic === ':') {
-			throw badRequest('credentials.basic must be in "user:pass" format')
+			throw httpError(400, 'credentials.basic must be in "user:pass" format')
 		}
 		if (authSource) {
-			throw badRequest('Conflicting Authorization credentials: specify only one of bearer, basic, or headers.authorization')
+			throw httpError(400, 'Conflicting Authorization credentials: specify only one of bearer, basic, or headers.authorization')
 		}
 		headers.set('authorization', `Basic ${Buffer.from(cleanBasic).toString('base64')}`)
 		authSource = 'basic'
 	}
 	if (raw.headers !== undefined) {
 		if (!isPlainObject(raw.headers) || Object.keys(raw.headers).length === 0) {
-			throw badRequest('credentials.headers must be a non-empty object of header names to string values')
+			throw httpError(400, 'credentials.headers must be a non-empty object of header names to string values')
 		}
 		for (const [rawName, val] of Object.entries(raw.headers)) {
 			const name = rawName.toLowerCase()
 			if (DISALLOWED_CREDENTIAL_HEADERS.has(name)) {
-				throw badRequest(`Forbidden header in credentials.headers: "${name}"`)
+				throw httpError(400, `Forbidden header in credentials.headers: "${name}"`)
 			}
 			assertHeaderValue(val, `credentials.headers["${rawName}"]`)
 			let alreadySet = false
@@ -422,13 +390,13 @@ function normalizeCredentials (raw) {
 				alreadySet = headers.has(rawName)
 				if (!alreadySet) headers.set(rawName, val)
 			} catch {
-				throw badRequest(`Invalid HTTP header name in credentials.headers: "${rawName}"`)
+				throw httpError(400, `Invalid HTTP header name in credentials.headers: "${rawName}"`)
 			}
 			if (alreadySet) {
 				if (name === 'authorization' && authSource !== 'headers.authorization') {
-					throw badRequest('Conflicting Authorization credentials: specify only one of bearer, basic, or headers.authorization')
+					throw httpError(400, 'Conflicting Authorization credentials: specify only one of bearer, basic, or headers.authorization')
 				}
-				throw badRequest(`Duplicate header in credentials.headers: "${name}"`)
+				throw httpError(400, `Duplicate header in credentials.headers: "${name}"`)
 			}
 			if (name === 'authorization') {
 				authSource = 'headers.authorization'
@@ -438,24 +406,24 @@ function normalizeCredentials (raw) {
 	const query = {}
 	if (raw.query !== undefined) {
 		if (!isPlainObject(raw.query) || Object.keys(raw.query).length === 0) {
-			throw badRequest('credentials.query must be a non-empty object of parameter names to string values')
+			throw httpError(400, 'credentials.query must be a non-empty object of parameter names to string values')
 		}
 		const seenLower = new Set()
 		for (const [rawParam, val] of Object.entries(raw.query)) {
 			if (/[\x00-\x1f\x7f]/.test(rawParam)) {
-				throw badRequest('credentials.query parameter names must not contain control characters')
+				throw httpError(400, 'credentials.query parameter names must not contain control characters')
 			}
 			const param = rawParam.trim()
 			if (!param) {
-				throw badRequest('credentials.query parameter names must be non-empty strings')
+				throw httpError(400, 'credentials.query parameter names must be non-empty strings')
 			}
 			const lower = param.toLowerCase()
 			if (seenLower.has(lower)) {
-				throw badRequest(`Duplicate query parameter in credentials.query: "${param}"`)
+				throw httpError(400, `Duplicate query parameter in credentials.query: "${param}"`)
 			}
 			seenLower.add(lower)
 			if (typeof val !== 'string' || /[\x00-\x1f\x7f]/.test(val)) {
-				throw badRequest(`credentials.query["${rawParam}"] must be a valid string`)
+				throw httpError(400, `credentials.query["${rawParam}"] must be a valid string`)
 			}
 			query[param] = val
 		}
@@ -464,7 +432,7 @@ function normalizeCredentials (raw) {
 	const hasHeaders = Object.keys(headerMap).length > 0
 	const hasQuery = Object.keys(query).length > 0
 	if (!hasHeaders && !hasQuery) {
-		throw badRequest('credentials must specify at least one of bearer, basic, headers, or query')
+		throw httpError(400, 'credentials must specify at least one of bearer, basic, headers, or query')
 	}
 	return {
 		...(hasHeaders && { headers: headerMap }),
@@ -487,19 +455,13 @@ async function connectApp (token, opts = {}, appUrl) {
 		const existing = requireApp(session.userId, appId, { allowShare: false })
 		appId = existing.id
 		if (provider && provider !== existing.provider) {
-			const error = new Error(`App ${appId} belongs to provider "${existing.provider}", not "${provider}"`)
-			error.status = 400
-			throw error
+			throw httpError(400, `App ${appId} belongs to provider "${existing.provider}", not "${provider}"`)
 		}
 		if (existing.type !== 'oauth') {
-			const error = new Error(`Cannot re-authenticate ${existing.type} app via connect_app; use update_app instead`)
-			error.status = 400
-			throw error
+			throw httpError(400, `Cannot re-authenticate ${existing.type} app via connect_app; use update_app instead`)
 		}
 		if (credentials !== undefined || account !== undefined || baseUrl !== undefined) {
-			const error = new Error('Cannot pass credentials, account, or baseUrl with appId in connect_app; use update_app instead')
-			error.status = 400
-			throw error
+			throw httpError(400, 'Cannot pass credentials, account, or baseUrl with appId in connect_app; use update_app instead')
 		}
 		provider = existing.provider
 	}
@@ -509,9 +471,7 @@ async function connectApp (token, opts = {}, appUrl) {
 		const msg = RESERVED_PROVIDERS.has(provider)
 			? `provider cannot be "${provider}"`
 			: 'provider must contain only letters, digits, underscores, or hyphens'
-		const error = new Error(msg)
-		error.status = 400
-		throw error
+		throw httpError(400, msg)
 	}
 	const providerDef = getProvider(provider)
 	if (providerDef?.type === 'oauth' && !normalizedAuth) {
@@ -530,9 +490,7 @@ async function connectApp (token, opts = {}, appUrl) {
 		}
 	}
 	if (!normalizedAuth) {
-		const error = new Error('credentials is required for static apps')
-		error.status = 400
-		throw error
+		throw httpError(400, 'credentials is required for static apps')
 	}
 	const rawBase = baseUrl !== undefined ? baseUrl : (providerDef?.baseUrl || null)
 	const normalizedBaseUrl = requireValidBaseUrl(rawBase)
@@ -579,9 +537,7 @@ async function linkApp (token, opts = {}) {
 	const { sessionId, appId, policy = null } = opts || {}
 	const policyCheck = validatePolicy(policy)
 	if (!policyCheck.valid) {
-		const error = new Error(policyCheck.error)
-		error.status = 400
-		throw error
+		throw httpError(400, policyCheck.error)
 	}
 	const targetSession = requireTargetSession(session.userId, sessionId)
 	const targetApp = requireApp(session.userId, appId)
@@ -625,9 +581,7 @@ async function linkLogin (token, opts = {}, appUrl) {
 		assertSsoLink(existingLogins, providerDef.id)
 		resolvedProvider = providerDef.id
 	} else if (listAuthProviders().length === 0) {
-		const error = new Error('No OAuth sign-in providers are configured')
-		error.status = 400
-		throw error
+		throw httpError(400, 'No OAuth sign-in providers are configured')
 	}
 	const setupCode = db.tokens.createState({
 		mode: 'setup_link',
@@ -648,9 +602,7 @@ async function unlinkLogin (token, opts = {}) {
 	const { loginId = null, provider = null, account = null } = opts || {}
 	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
 	if (!loginId && !cleanProvider && !cleanAccount) {
-		const error = new Error('loginId, provider, or account is required to unlink a login key')
-		error.status = 400
-		throw error
+		throw httpError(400, 'loginId, provider, or account is required to unlink a login key')
 	}
 	const removed = db.logins.remove(session.userId, {
 		loginId,
@@ -671,12 +623,10 @@ async function updateApp (token, opts = {}) {
 	const { appId, name, account, baseUrl, credentials } = opts || {}
 	const targetApp = requireApp(session.userId, appId, { allowShare: false })
 	if (name === undefined && account === undefined && baseUrl === undefined && credentials === undefined) {
-		throw badRequest('At least one of name, account, baseUrl, or credentials is required')
+		throw httpError(400, 'At least one of name, account, baseUrl, or credentials is required')
 	}
 	if ((account !== undefined || baseUrl !== undefined || credentials !== undefined) && targetApp.type !== 'static') {
-		const error = new Error('account, baseUrl, and credentials can only be updated on static apps')
-		error.status = 400
-		throw error
+		throw httpError(400, 'account, baseUrl, and credentials can only be updated on static apps')
 	}
 	const cleanName = name !== undefined ? optionalString(name, 'name') : undefined
 	const cleanAccount = account !== undefined ? optionalString(account, 'account') : undefined
@@ -715,15 +665,11 @@ async function shareApp (token, opts = {}) {
 		return cleanProvider ? (l.provider === cleanProvider && acc === cleanAccount) : acc === cleanAccount
 	}) || (!selfLogins.length && !cleanProvider && cleanAccount === (session.account || '').toLowerCase())
 	if (isSelf) {
-		const error = new Error('Cannot share an app with yourself')
-		error.status = 400
-		throw error
+		throw httpError(400, 'Cannot share an app with yourself')
 	}
 	const policyCheck = validatePolicy(policy)
 	if (!policyCheck.valid) {
-		const error = new Error(policyCheck.error)
-		error.status = 400
-		throw error
+		throw httpError(400, policyCheck.error)
 	}
 	const effectiveProvider = resolveShareProvider(selfLogins, cleanAccount, cleanProvider)
 	if (effectiveProvider) {
@@ -731,14 +677,10 @@ async function shareApp (token, opts = {}) {
 	}
 	const recipient = db.logins.findUserByAccount(cleanAccount, effectiveProvider)
 	if (recipient && recipient.id === session.userId) {
-		const error = new Error('Cannot share an app with yourself')
-		error.status = 400
-		throw error
+		throw httpError(400, 'Cannot share an app with yourself')
 	}
 	if (!recipient && !effectiveProvider && !cleanAccount.includes('@')) {
-		const error = new Error(`Provider is required when sharing with bare account handle "${cleanAccount}" (e.g. provider: "github" or "github:${cleanAccount}")`)
-		error.status = 400
-		throw error
+		throw httpError(400, `Provider is required when sharing with bare account handle "${cleanAccount}" (e.g. provider: "github" or "github:${cleanAccount}")`)
 	}
 	const userId = recipient ? recipient.id : null
 	const share = db.tokens.upsertShare({
@@ -782,17 +724,13 @@ async function updateSession (token, opts = {}) {
 	if (sessionId !== undefined) requireNonEmptyString(sessionId, 'sessionId')
 	const targetId = sessionId || session.id
 	if (!session.admin && targetId !== session.id) {
-		const error = new Error('Access denied: session administration requires admin privileges')
-		error.status = 403
-		throw error
+		throw httpError(403, 'Access denied: session administration requires admin privileges')
 	}
 	if (admin !== undefined && !session.admin) {
-		const error = new Error('Access denied: changing admin privileges requires admin privileges')
-		error.status = 403
-		throw error
+		throw httpError(403, 'Access denied: changing admin privileges requires admin privileges')
 	}
 	if (name === undefined && admin === undefined && rotateToken === undefined) {
-		throw badRequest('At least one of name, admin, or rotateToken is required')
+		throw httpError(400, 'At least one of name, admin, or rotateToken is required')
 	}
 	const cleanName = name !== undefined ? optionalString(name, 'name') : undefined
 	const parsedAdmin = requireBoolean(admin, 'admin')
@@ -817,9 +755,7 @@ async function listLogs (token, opts = {}) {
 	assertKeys(opts, ['sessionId', 'appId', 'provider', 'allowed', 'limit'])
 	const { sessionId, appId, provider, allowed, limit } = opts || {}
 	if (!session.admin && sessionId && sessionId !== session.id) {
-		const error = new Error('Access denied: log administration requires admin privileges')
-		error.status = 403
-		throw error
+		throw httpError(403, 'Access denied: log administration requires admin privileges')
 	}
 	const effectiveSessionId = session.admin ? sessionId : session.id
 	const logs = db.logs.listByUserId(session.userId, {

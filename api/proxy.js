@@ -8,7 +8,7 @@ import zlib from 'node:zlib'
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy, hasBodyPolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, positiveNumberEnv, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
+import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, httpError, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, positiveNumberEnv, serializeFormBody, stripTrailingDot, validateBaseUrl } from '../util.js'
 
 export {
 	drainSilently,
@@ -59,15 +59,11 @@ function reqMethodAllowsBody (method) {
 function fileTooLargeError (totalBytes, maxBytes) {
 	const sizeMb = (totalBytes / (1024 * 1024)).toFixed(1)
 	const limitMb = (maxBytes / (1024 * 1024)).toFixed(0)
-	const err = new Error(`File too large: size (${sizeMb} MB) exceeds server limit of ${limitMb} MB. Consider exporting specific sheets, ranges, or text sections instead.`)
-	err.status = 413
-	return err
+	return httpError(413, `File too large: size (${sizeMb} MB) exceeds server limit of ${limitMb} MB. Consider exporting specific sheets, ranges, or text sections instead.`)
 }
 
 function timeoutError (timeoutMs) {
-	const err = new Error(`Upstream request timed out after ${timeoutMs}ms of inactivity`)
-	err.status = 504
-	return err
+	return httpError(504, `Upstream request timed out after ${timeoutMs}ms of inactivity`)
 }
 
 function normalizeUpstreamError (err) {
@@ -127,10 +123,8 @@ async function readResponseBody (source, maxBytes) {
 		.filter(s => s && s !== 'identity')
 	for (const coding of codings) {
 		if (!createDecompressor(coding)) {
-			const err = new Error(`Unsupported upstream Content-Encoding: ${coding}`)
-			err.status = 502
 			source.destroy()
-			throw err
+			throw httpError(502, `Unsupported upstream Content-Encoding: ${coding}`)
 		}
 	}
 	const chunks = []
@@ -194,9 +188,7 @@ function stripLocationAuth (rawLocation, baseUrl, queryEntries) {
 	try {
 		parsed = new URL(rawLocation, baseUrl)
 	} catch {
-		const err = new Error('Invalid upstream redirect Location')
-		err.status = 502
-		throw err
+		throw httpError(502, 'Invalid upstream redirect Location')
 	}
 	if (!stripQueryAuth(parsed, queryEntries)) return rawLocation
 	const trimmed = rawLocation.trim()
@@ -237,9 +229,7 @@ function isFormContentType (contentType) {
 function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeoutMs }) {
 	const parsed = new URL(targetUrl)
 	if (!isAllowedUpstreamProtocol(parsed)) {
-		const err = new Error(`Unsupported upstream protocol: ${parsed.protocol}`)
-		err.status = 400
-		return Promise.reject(err)
+		return Promise.reject(httpError(400, `Unsupported upstream protocol: ${parsed.protocol}`))
 	}
 	if (!isAllowedUpstreamHost(parsed.hostname)) {
 		return Promise.reject(blockedHostError(parsed.hostname))
@@ -292,9 +282,7 @@ function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeou
 			}
 			const onStreamClose = () => {
 				if (!bodyStream.readableEnded) {
-					const err = new Error('Client upload aborted')
-					err.status = 400
-					req.destroy(err)
+					req.destroy(httpError(400, 'Client upload aborted'))
 				}
 			}
 			bodyStream.on('error', onStreamErr)
@@ -364,22 +352,16 @@ async function executeBufferedUpstream ({ credentials, url, method, body, header
 		if (!location) break
 		res.destroy()
 		if (hop >= MAX_REDIRECT_HOPS) {
-			const err = new Error(`Too many upstream redirects (exceeded ${MAX_REDIRECT_HOPS})`)
-			err.status = 502
-			throw err
+			throw httpError(502, `Too many upstream redirects (exceeded ${MAX_REDIRECT_HOPS})`)
 		}
 		let nextParsed
 		try {
 			nextParsed = new URL(location, curUrl)
 		} catch {
-			const err = new Error('Invalid upstream redirect Location')
-			err.status = 502
-			throw err
+			throw httpError(502, 'Invalid upstream redirect Location')
 		}
 		if (nextParsed.username || nextParsed.password || !validateBaseUrl(nextParsed.origin)) {
-			const err = new Error(`Blocked unsafe upstream redirect target: ${nextParsed.origin}`)
-			err.status = 403
-			throw err
+			throw httpError(403, `Blocked unsafe upstream redirect target: ${nextParsed.origin}`)
 		}
 		if ((res.statusCode === 303 && curMethod !== 'HEAD') || ((res.statusCode === 301 || res.statusCode === 302) && curMethod === 'POST')) {
 			curMethod = 'GET'
@@ -437,10 +419,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, header
 		const msg = result?.binary ? `Binary error response (${contentType})`
 			: typeof result === 'object' ? JSON.stringify(result)
 			: result
-		const err = new Error(msg)
-		err.status = status
-		err.data = result
-		throw err
+		throw httpError(status, msg, { data: result })
 	}
 	return result
 }
@@ -480,14 +459,10 @@ function resolveTargetLink (providerLinks, rawApp, provider) {
 	if (rawApp === undefined || rawApp === null) {
 		if (providerLinks.length === 1) return providerLinks[0]
 		const labels = formatLinkedApps(providerLinks, provider).join(', ')
-		const err = new Error(`Multiple ${provider.name} apps linked to session (${labels}); specify app`)
-		err.status = 400
-		throw err
+		throw httpError(400, `Multiple ${provider.name} apps linked to session (${labels}); specify app`)
 	}
 	if (typeof rawApp !== 'string' || !rawApp.trim()) {
-		const err = new Error('app must be a non-empty string')
-		err.status = 400
-		throw err
+		throw httpError(400, 'app must be a non-empty string')
 	}
 	const trimmed = rawApp.trim()
 	const lower = trimmed.toLowerCase()
@@ -496,28 +471,20 @@ function resolveTargetLink (providerLinks, rawApp, provider) {
 	const byName = providerLinks.filter(l => (l.app?.name || '').toLowerCase() === lower)
 	if (byName.length === 1) return byName[0]
 	if (byName.length > 1) {
-		const err = new Error(`Ambiguous app "${trimmed}" matches multiple linked ${provider.name} apps; specify a unique app name, account, or ID`)
-		err.status = 400
-		throw err
+		throw httpError(400, `Ambiguous app "${trimmed}" matches multiple linked ${provider.name} apps; specify a unique app name, account, or ID`)
 	}
 	const byAccount = providerLinks.filter(l => (l.app?.credentials?.account || '').toLowerCase() === lower)
 	if (byAccount.length === 1) return byAccount[0]
 	if (byAccount.length > 1) {
-		const err = new Error(`Ambiguous app "${trimmed}" matches multiple linked ${provider.name} apps; specify a unique app name or ID`)
-		err.status = 400
-		throw err
+		throw httpError(400, `Ambiguous app "${trimmed}" matches multiple linked ${provider.name} apps; specify a unique app name or ID`)
 	}
-	const err = new Error(`App not linked to session or not found: ${trimmed}`)
-	err.status = 404
-	throw err
+	throw httpError(404, `App not linked to session or not found: ${trimmed}`)
 }
 
 function normalizeMethod (method) {
 	const upper = String(method || 'GET').trim().toUpperCase()
 	if (!ALLOWED_METHODS.has(upper)) {
-		const err = new Error(`Unsupported HTTP method: ${upper}`)
-		err.status = 400
-		throw err
+		throw httpError(400, `Unsupported HTTP method: ${upper}`)
 	}
 	return upper
 }
@@ -529,9 +496,7 @@ function resolveUpstreamContext (session, provider, rawApp, url, headers) {
 		const hint = session.admin
 			? 'Use connect_app or link_app to attach one.'
 			: 'Ask an admin to link one.'
-		const err = new Error(`No ${provider.name} app linked to session. ${hint}`)
-		err.status = 403
-		throw err
+		throw httpError(403, `No ${provider.name} app linked to session. ${hint}`)
 	}
 	const targetLink = resolveTargetLink(providerLinks, rawApp, provider)
 	let targetAppId = targetLink.app?.id || null
@@ -540,9 +505,7 @@ function resolveUpstreamContext (session, provider, rawApp, url, headers) {
 		targetAppId = upstreamApp.credentials?.appId || null
 		upstreamApp = db.tokens.get(targetAppId)
 		if (!db.tokens.isUpstreamApp(upstreamApp)) {
-			const err = new Error(`Shared upstream app not found: ${targetLink.app.id}`)
-			err.status = 404
-			throw err
+			throw httpError(404, `Shared upstream app not found: ${targetLink.app.id}`)
 		}
 	}
 	const resolvedUrl = provider.normalizeTargetUrl(url, upstreamApp)
@@ -565,9 +528,7 @@ function resolveUpstreamContext (session, provider, rawApp, url, headers) {
 	const checkTargetPolicy = (targetUrl, targetMethod, targetBody, targetContentType) => {
 		const urlCheck = provider.isAllowedUrl(targetUrl, upstreamApp)
 		if (!urlCheck.allowed) {
-			const err = new Error(urlCheck.reason)
-			err.status = 403
-			throw err
+			throw httpError(403, urlCheck.reason)
 		}
 		for (const [policy, fallbackMsg] of policies) {
 			if (!policy) continue
@@ -579,9 +540,7 @@ function resolveUpstreamContext (session, provider, rawApp, url, headers) {
 				contentType: targetContentType
 			})
 			if (!check.allowed) {
-				const err = new Error(`Policy violation: ${check.reason || fallbackMsg}`)
-				err.status = 403
-				throw err
+				throw httpError(403, `Policy violation: ${check.reason || fallbackMsg}`)
 			}
 		}
 	}
@@ -598,14 +557,10 @@ async function resolveUpstreamCredentials (session, provider, targetLink, upstre
 			: session.admin
 				? `Use connect_app with appId "${upstreamApp.id}" to re-authenticate.`
 				: 'Ask an admin to re-authenticate.'
-		const error = new Error(`Failed to refresh ${provider.name} access token: ${err.message}. ${hint}`)
-		error.status = 401
-		throw error
+		throw httpError(401, `Failed to refresh ${provider.name} access token: ${err.message}. ${hint}`)
 	}
 	if (!resolvedCreds?.headers && !resolvedCreds?.query) {
-		const err = new Error('Missing upstream credentials')
-		err.status = 401
-		throw err
+		throw httpError(401, 'Missing upstream credentials')
 	}
 	return resolvedCreds
 }
@@ -613,14 +568,10 @@ async function resolveUpstreamCredentials (session, provider, targetLink, upstre
 async function runProxyCall ({ auth, providerName = 'google', url, method, app, headers }, fn) {
 	const session = db.tokens.resolveSession(auth)
 	if (!session) {
-		const err = new Error('Authentication required')
-		err.status = 401
-		throw err
+		throw httpError(401, 'Authentication required')
 	}
 	if (!url) {
-		const err = new Error('URL is required')
-		err.status = 400
-		throw err
+		throw httpError(400, 'URL is required')
 	}
 	const start = Date.now()
 	const normalizedMethod = normalizeMethod(method)
@@ -693,9 +644,7 @@ async function stream (opts = {}, auth, req, res) {
 		if (allowsBody) {
 			if (ctx.inspectsBody) {
 				if (String(req.headers['content-encoding'] || '').trim()) {
-					const err = new Error('Content-Encoding is not supported when a policy inspects the request body')
-					err.status = 415
-					throw err
+					throw httpError(415, 'Content-Encoding is not supported when a policy inspects the request body')
 				}
 				const rawBuf = await getRawBody(req)
 				if (rawBuf.byteLength > 0) bufferedBody = rawBuf

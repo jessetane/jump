@@ -1,7 +1,7 @@
 import { sqlite } from './index.js'
 import * as users from './users.js'
 import * as tokens from './tokens.js'
-import { parseAccountSpec } from '../util.js'
+import { parseAccountSpec, httpError } from '../util.js'
 import { randomUUID } from 'node:crypto'
 
 export {
@@ -79,9 +79,7 @@ function findUserByAccount (account, provider = null) {
 	}
 	const rows = sqlite.prepare('SELECT DISTINCT user_id FROM logins WHERE account = ?').all(cleanAccount)
 	if (rows.length > 1) {
-		const err = new Error(`Ambiguous account "${cleanAccount}" matches multiple users across providers; specify provider`)
-		err.status = 400
-		throw err
+		throw httpError(400, `Ambiguous account "${cleanAccount}" matches multiple users across providers; specify provider`)
 	}
 	return rows.length === 1 ? users.get(rows[0].user_id) : null
 }
@@ -147,9 +145,7 @@ function upsert ({ id = randomUUID(), userId, provider, account, allowUnscoped =
 		if (existing) {
 			if (existing.user_id !== userId) {
 				if (!merge) {
-					const err = new Error(`Account ${cleanAccount} is already registered to another user. Re-run link_login with merge: true to merge both accounts`)
-					err.status = 409
-					throw err
+					throw httpError(409, `Account ${cleanAccount} is already registered to another user. Re-run link_login with merge: true to merge both accounts`)
 				}
 				const survivingId = mergeUsers(userId, existing.user_id)
 				tokens.claimPendingShares({ userId: survivingId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
@@ -184,19 +180,13 @@ function remove (userId, { loginId = null, provider = null, account = null } = {
 			matches = matches.filter(l => l.account === cleanAccount)
 		}
 		if (matches.length === 0) {
-			const err = new Error('Login key not found')
-			err.status = 404
-			throw err
+			throw httpError(404, 'Login key not found')
 		}
 		if (matches.length > 1) {
-			const err = new Error('Multiple login keys match; specify account')
-			err.status = 400
-			throw err
+			throw httpError(400, 'Multiple login keys match; specify account')
 		}
 		if (allLogins.length <= 1) {
-			const err = new Error('Cannot unlink your only login key')
-			err.status = 400
-			throw err
+			throw httpError(400, 'Cannot unlink your only login key')
 		}
 		const target = matches[0]
 		sqlite.prepare('DELETE FROM logins WHERE id = ? AND user_id = ?').run(target.id, userId)

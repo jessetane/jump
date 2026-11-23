@@ -1,6 +1,6 @@
 import { sqlite } from './index.js'
 import { userAccountSql } from './users.js'
-import { parseAccountSpec, isPlainObject } from '../util.js'
+import { parseAccountSpec, isPlainObject, httpError } from '../util.js'
 import { loadKeys, secretContext, encryptSecret, openSecret, decryptSecret } from '../crypto.js'
 import { createHash, randomUUID } from 'node:crypto'
 
@@ -601,9 +601,7 @@ function removeShare ({ account = null, provider = null, appId }) {
 	`).all(cleanAccount, appId)
 	if (matchingShares.length === 0) return false
 	if (matchingShares.length > 1) {
-		const err = new Error(`Ambiguous account "${cleanAccount}" matches multiple shared recipients on this app; specify provider`)
-		err.status = 400
-		throw err
+		throw httpError(400, `Ambiguous account "${cleanAccount}" matches multiple shared recipients on this app; specify provider`)
 	}
 	sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(matchingShares[0].id)
 	return true

@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import * as db from './db/index.js'
 import { getProvider, isValidProviderId, listAuthProviders, requireAuthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
-import { getBody, getBaseUrl, getClientIp, isPlainObject, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
+import { getBody, getBaseUrl, getClientIp, httpError, isPlainObject, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
 
 export {
 	handleOauth,
@@ -260,31 +260,19 @@ function validateAuthorizeParams (query) {
 	if (query.redirect_uri) {
 		if (!isAllowedRedirectUri(query.redirect_uri)) {
 			console.warn(`[oauth] Unauthorized redirect_uri: "${query.redirect_uri}". Add domain to ALLOWED_REDIRECT_DOMAINS to allow.`)
-			const err = new Error(`redirect_uri is not allowed: ${query.redirect_uri}`)
-			err.code = 'invalid_request'
-			err.status = 400
-			throw err
+			throw httpError(400, `redirect_uri is not allowed: ${query.redirect_uri}`, { code: 'invalid_request' })
 		}
 		if (!query.code_challenge) {
-			const err = new Error('code_challenge required when redirect_uri is provided')
-			err.code = 'invalid_request'
-			err.status = 400
-			throw err
+			throw httpError(400, 'code_challenge required when redirect_uri is provided', { code: 'invalid_request' })
 		}
 	}
 	if (query.code_challenge_method && !query.code_challenge) {
-		const err = new Error('code_challenge_method provided without code_challenge')
-		err.code = 'invalid_request'
-		err.status = 400
-		throw err
+		throw httpError(400, 'code_challenge_method provided without code_challenge', { code: 'invalid_request' })
 	}
 	const codeChallenge = query.code_challenge || null
 	const codeChallengeMethod = query.code_challenge_method || (codeChallenge ? 'S256' : null)
 	if (codeChallengeMethod && codeChallengeMethod !== 'S256') {
-		const err = new Error('unsupported code_challenge_method')
-		err.code = 'invalid_request'
-		err.status = 400
-		throw err
+		throw httpError(400, 'unsupported code_challenge_method', { code: 'invalid_request' })
 	}
 	return { codeChallenge, codeChallengeMethod }
 }
@@ -681,9 +669,7 @@ function getOwnedOauthApp (session, appId, providerId) {
 async function handleProviderConnect (req, res, query, providerName = 'google', url = null) {
 	const provider = getProvider(providerName)
 	if (!provider || provider.type !== 'oauth') {
-		const err = new Error('not found')
-		err.status = 404
-		throw err
+		throw httpError(404, 'not found')
 	}
 	if (!requireProviderEnv(res, provider)) return
 	const resolvedParams = { ...query }
@@ -743,9 +729,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	if (!checkFormOrigin(req, res)) return
 	const provider = getProvider(providerName)
 	if (!provider || provider.type !== 'oauth' || !provider.buildAuthUrl) {
-		const err = new Error('not found')
-		err.status = 404
-		throw err
+		throw httpError(404, 'not found')
 	}
 	if (!requireProviderEnv(res, provider)) return
 	const rawBody = await getBody(req)
@@ -981,14 +965,10 @@ function parseTokenParams (rawBody, req) {
 		try {
 			parsed = JSON.parse(trimmed)
 		} catch {
-			const err = new Error('Invalid JSON body')
-			err.status = 400
-			throw err
+			throw httpError(400, 'Invalid JSON body')
 		}
 		if (!isPlainObject(parsed)) {
-			const err = new Error('Invalid JSON body')
-			err.status = 400
-			throw err
+			throw httpError(400, 'Invalid JSON body')
 		}
 		return parsed
 	}
@@ -1181,7 +1161,5 @@ async function handleOauth (req, res, { pathname, url, query }) {
 			return
 		}
 	}
-	const err = new Error('not found')
-	err.status = 404
-	throw err
+	throw httpError(404, 'not found')
 }

@@ -3,7 +3,7 @@ import RpcEngine from 'rpc-engine'
 import * as api from './api/index.js'
 import * as db from './db/index.js'
 import { getProvider, parseProviderTool } from './providers/index.js'
-import { assertKeys, getBody, getBaseUrl, sendJson } from './util.js'
+import { assertKeys, getBody, getBaseUrl, httpError, sendJson } from './util.js'
 
 export {
 	executeTool,
@@ -243,9 +243,7 @@ async function executeTool (name, args = {}, token, appUrl) {
 			const handle = adminActions[action]
 			if (!handle) {
 				console.warn(`[mcp] admin action rejected: Unknown action "${action}"`)
-				const err = new Error(`Unknown action: ${action}`)
-				err.status = 400
-				throw err
+				throw httpError(400, `Unknown action: ${action}`)
 			}
 			const result = await handle(token, actionArgs, appUrl)
 			return { content: formatContent(result) }
@@ -345,9 +343,7 @@ async function handleMcp (req, res, token) {
 		return
 	}
 	if (req.method !== 'POST') {
-		const err = new Error('Method Not Allowed')
-		err.status = 405
-		throw err
+		throw httpError(405, 'Method Not Allowed')
 	}
 	const request = await getBody(req)
 	let parsed

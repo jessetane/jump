@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { validateBaseUrl, resolveTargetUrl, hasPathTraversal, positiveNumberEnv } from '../util.js'
+import { validateBaseUrl, resolveTargetUrl, hasPathTraversal, positiveNumberEnv, httpError } from '../util.js'
 import googleConfig from './google.js'
 import githubConfig from './github.js'
 
@@ -133,10 +133,7 @@ async function parseOAuthResponse (res, fallbackErrorMsg) {
 		const errorText = typeof data.error === 'string'
 			? data.error
 			: (data.error?.message || (data.error ? JSON.stringify(data) : ''))
-		const err = new Error(data.error_description || errorText || data.message || fallbackErrorMsg)
-		err.status = res.ok ? 401 : res.status
-		err.data = data
-		throw err
+		throw httpError(res.ok ? 401 : res.status, data.error_description || errorText || data.message || fallbackErrorMsg, { data })
 	}
 	return data
 }
@@ -144,15 +141,11 @@ async function parseOAuthResponse (res, fallbackErrorMsg) {
 function requireOauthEnv (envPrefix) {
 	const clientId = process.env[`${envPrefix}_CLIENT_ID`]
 	if (!clientId) {
-		const err = new Error(`${envPrefix}_CLIENT_ID environment variable is missing`)
-		err.status = 500
-		throw err
+		throw httpError(500, `${envPrefix}_CLIENT_ID environment variable is missing`)
 	}
 	const clientSecret = process.env[`${envPrefix}_CLIENT_SECRET`]
 	if (!clientSecret) {
-		const err = new Error(`${envPrefix}_CLIENT_SECRET environment variable is missing`)
-		err.status = 500
-		throw err
+		throw httpError(500, `${envPrefix}_CLIENT_SECRET environment variable is missing`)
 	}
 	return { clientId, clientSecret }
 }
@@ -261,9 +254,7 @@ function createProvider (config) {
 				const userInfo = await parseUpstream(userRes, 'Failed to fetch user info')
 				const account = oauth.extractAccount ? oauth.extractAccount(userInfo) : null
 				if (!account) {
-					const err = new Error(`Could not retrieve account identifier from ${label}.`)
-					err.status = 400
-					throw err
+					throw httpError(400, `Could not retrieve account identifier from ${label}.`)
 				}
 				return {
 					accessToken: tokenData.access_token,
@@ -434,9 +425,7 @@ function requireAuthProvider (rawName) {
 	const name = typeof rawName === 'string' ? rawName.trim().toLowerCase() : ''
 	const provider = name ? providers[name] : null
 	if (!provider || !listAuthProviders().some(p => p.id === provider.id)) {
-		const err = new Error(`Invalid or unsupported OAuth provider: ${rawName}`)
-		err.status = 400
-		throw err
+		throw httpError(400, `Invalid or unsupported OAuth provider: ${rawName}`)
 	}
 	return provider
 }

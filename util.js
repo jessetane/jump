@@ -26,6 +26,7 @@ export {
 	hasPathTraversal,
 	parseAccountSpec,
 	isPlainObject,
+	httpError,
 	assertKeys,
 	tightenFileMode,
 	requireBoolean
@@ -63,18 +64,18 @@ function isPlainObject (val) {
 	return proto === Object.prototype || proto === null
 }
 
+function httpError (status, message, props) {
+	return Object.assign(new Error(message), { status, ...props })
+}
+
 function assertKeys (opts, allowed) {
 	if (opts === undefined || opts === null) return
 	if (!isPlainObject(opts)) {
-		const err = new Error('Options must be a JSON object')
-		err.status = 400
-		throw err
+		throw httpError(400, 'Options must be a JSON object')
 	}
 	for (const key of Object.keys(opts)) {
 		if (opts[key] !== undefined && !allowed.includes(key)) {
-			const err = new Error(`Unknown parameter "${key}"`)
-			err.status = 400
-			throw err
+			throw httpError(400, `Unknown parameter "${key}"`)
 		}
 	}
 }
@@ -95,9 +96,7 @@ function requireBoolean (val, name, defaultValue = undefined) {
 		if (lower === 'true' || lower === '1') return true
 		if (lower === 'false' || lower === '0') return false
 	}
-	const err = new Error(`${name} must be a boolean`)
-	err.status = 400
-	throw err
+	throw httpError(400, `${name} must be a boolean`)
 }
 
 function parseAccountSpec (rawAccount, rawProvider = null) {
@@ -105,17 +104,13 @@ function parseAccountSpec (rawAccount, rawProvider = null) {
 	const hasProvider = rawProvider !== undefined && rawProvider !== null && String(rawProvider).trim() !== ''
 	let cleanProvider = hasProvider ? String(rawProvider).trim().toLowerCase() : null
 	if (cleanProvider && cleanProvider.includes(':')) {
-		const err = new Error(`Invalid provider identifier: ${rawProvider}`)
-		err.status = 400
-		throw err
+		throw httpError(400, `Invalid provider identifier: ${rawProvider}`)
 	}
 	if (!hasAccount) {
 		return { account: null, provider: cleanProvider }
 	}
 	if (typeof rawAccount !== 'string') {
-		const err = new Error('Account identifier must be a string')
-		err.status = 400
-		throw err
+		throw httpError(400, 'Account identifier must be a string')
 	}
 	const trimmed = rawAccount.trim().toLowerCase()
 	if (!trimmed.includes(':')) {
@@ -123,16 +118,12 @@ function parseAccountSpec (rawAccount, rawProvider = null) {
 	}
 	const parts = trimmed.split(':')
 	if (parts.length !== 2 || !parts[0].trim() || !parts[1].trim() || /\s/.test(parts[0]) || /\s/.test(parts[1])) {
-		const err = new Error(`Malformed account identifier "${rawAccount}"; expected "provider:account"`)
-		err.status = 400
-		throw err
+		throw httpError(400, `Malformed account identifier "${rawAccount}"; expected "provider:account"`)
 	}
 	const prefixProvider = parts[0]
 	const cleanAccount = parts[1]
 	if (cleanProvider && cleanProvider !== prefixProvider) {
-		const err = new Error(`Conflicting provider "${cleanProvider}" and account prefix "${prefixProvider}:${cleanAccount}"`)
-		err.status = 400
-		throw err
+		throw httpError(400, `Conflicting provider "${cleanProvider}" and account prefix "${prefixProvider}:${cleanAccount}"`)
 	}
 	return { account: cleanAccount, provider: prefixProvider }
 }
@@ -319,9 +310,7 @@ function isAllowedUpstreamHost (hostname) {
 }
 
 function blockedHostError (hostname) {
-	const err = new Error(`Blocked unsafe upstream host: ${hostname}`)
-	err.status = 403
-	return err
+	return httpError(403, `Blocked unsafe upstream host: ${hostname}`)
 }
 
 function deliverLookup (records, all, cb) {
@@ -345,9 +334,7 @@ async function resolveDnsRecords (hostname, host, options) {
 		throw err
 	}
 	if (!Array.isArray(records) || records.length === 0) {
-		const err = new Error(`Unable to resolve upstream host: ${hostname}`)
-		err.status = 502
-		throw err
+		throw httpError(502, `Unable to resolve upstream host: ${hostname}`)
 	}
 	for (const { address } of records) {
 		if (!isPublicIp(address)) {
@@ -442,9 +429,7 @@ function getRawBody (req, maxBytes = 1024 * 1024) {
 			size += chunk.length
 			if (size > maxBytes) {
 				req.pause()
-				const err = new Error('Payload Too Large')
-				err.status = 413
-				fail(err)
+				fail(httpError(413, 'Payload Too Large'))
 				return
 			}
 			buffers.push(chunk)
@@ -457,9 +442,7 @@ function getRawBody (req, maxBytes = 1024 * 1024) {
 		})
 		req.on('close', () => {
 			if (!settled && !req.readableEnded) {
-				const err = new Error('Request stream closed prematurely')
-				err.status = 400
-				fail(err)
+				fail(httpError(400, 'Request stream closed prematurely'))
 			}
 		})
 	})

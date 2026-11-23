@@ -8,7 +8,7 @@ import { handleMcp } from './mcp.js'
 import { handleRest } from './rest.js'
 import { listAuthProviders } from './providers/index.js'
 import * as db from './db/index.js'
-import { getBaseUrl, getClientIp, positiveNumberEnv, sendJson, sendHtml } from './util.js'
+import { getBaseUrl, getClientIp, httpError, positiveNumberEnv, sendJson, sendHtml } from './util.js'
 
 export { server, bootstrapLocalAdmin }
 
@@ -77,9 +77,7 @@ const server = http.createServer(async (req, res) => {
 		try {
 			url = new URL(req.url, 'http://localhost')
 		} catch {
-			const err = new Error('Invalid request URL')
-			err.status = 400
-			throw err
+			throw httpError(400, 'Invalid request URL')
 		}
 		pathname = url.pathname.replace(/\/+$/, '') || '/'
 		if (isCorsRoute(pathname, req.method)) {
@@ -104,9 +102,7 @@ const server = http.createServer(async (req, res) => {
 				sendHtml(res, INDEX_HTML.replaceAll('{{APP_URL}}', () => getBaseUrl(req)))
 				return
 			}
-			const err = new Error('Method Not Allowed')
-			err.status = 405
-			throw err
+			throw httpError(405, 'Method Not Allowed')
 		}
 		if (pathname === '/style.css' && (req.method === 'GET' || req.method === 'HEAD')) {
 			res.statusCode = 200
@@ -131,9 +127,7 @@ const server = http.createServer(async (req, res) => {
 			await handleOauth(req, res, { pathname, url, query })
 			return
 		}
-		const err = new Error('not found')
-		err.status = 404
-		throw err
+		throw httpError(404, 'not found')
 	} catch (err) {
 		const statusCode = err.status || 500
 		let message = err.message
