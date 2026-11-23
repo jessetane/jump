@@ -177,6 +177,14 @@ async function fetchOauthJson (url, opts, label, action, fallbackErrorMsg) {
 	return parseOAuthResponse(res, rawText, fallbackErrorMsg)
 }
 
+async function fetchOauthToken (url, form, label, action, fallbackErrorMsg) {
+	const data = await fetchOauthJson(url, { form }, label, action, fallbackErrorMsg)
+	if (typeof data.access_token !== 'string' || !data.access_token.trim()) {
+		throw httpError(502, `${fallbackErrorMsg}: missing access_token`, { data })
+	}
+	return data
+}
+
 function requireOauthEnv (envPrefix) {
 	const clientId = process.env[`${envPrefix}_CLIENT_ID`]
 	if (!clientId) {
@@ -256,26 +264,20 @@ function createProvider (config) {
 			},
 			async exchangeCode ({ code, callbackUrl }) {
 				const { clientId, clientSecret } = requireOauthEnv(envPrefix)
-				const fetchUpstreamJson = async (url, opts, action, msg) => {
-					try {
-						return await fetchOauthJson(url, opts, label, action, msg)
-					} catch (err) {
-						if (err.status !== 504) err.status = 502
-						throw err
-					}
-				}
-				const tokenData = await fetchUpstreamJson(oauth.tokenUrl, {
-					form: {
-						code,
-						client_id: clientId,
-						client_secret: clientSecret,
-						redirect_uri: callbackUrl,
-						grant_type: 'authorization_code'
-					}
-				}, 'exchanging authorization code', `Failed to exchange authorization code with ${label}`)
-				const userInfo = await fetchUpstreamJson(oauth.userInfoUrl, {
+				const asBadGateway = fn => fn().catch(err => {
+					if (err.status !== 504) err.status = 502
+					throw err
+				})
+				const tokenData = await asBadGateway(() => fetchOauthToken(oauth.tokenUrl, {
+					code,
+					client_id: clientId,
+					client_secret: clientSecret,
+					redirect_uri: callbackUrl,
+					grant_type: 'authorization_code'
+				}, label, 'exchanging authorization code', `Failed to exchange authorization code with ${label}`))
+				const userInfo = await asBadGateway(() => fetchOauthJson(oauth.userInfoUrl, {
 					headers: { authorization: `Bearer ${tokenData.access_token}` }
-				}, 'fetching user info', 'Failed to fetch user info')
+				}, label, 'fetching user info', 'Failed to fetch user info'))
 				const account = oauth.extractAccount ? oauth.extractAccount(userInfo) : null
 				if (!account) {
 					throw httpError(400, `Could not retrieve account identifier from ${label}.`)
@@ -326,13 +328,11 @@ function createProvider (config) {
 					const { clientId, clientSecret } = requireOauthEnv(envPrefix)
 					let data
 					try {
-						data = await fetchOauthJson(oauth.tokenUrl, {
-							form: {
-								client_id: clientId,
-								client_secret: clientSecret,
-								refresh_token: creds.refreshToken,
-								grant_type: 'refresh_token'
-							}
+						data = await fetchOauthToken(oauth.tokenUrl, {
+							client_id: clientId,
+							client_secret: clientSecret,
+							refresh_token: creds.refreshToken,
+							grant_type: 'refresh_token'
 						}, label, 'refreshing access token', `Failed to refresh ${label} token`)
 					} catch (err) {
 						if (err.status >= 500 || err.data?.error === 'invalid_client' || err.data?.error === 'unauthorized_client') {

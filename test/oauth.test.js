@@ -414,6 +414,7 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 500)
 		})
 		let refreshMode = 'slow'
+		let userInfoCalls = 0
 		await withMockFetch((input, init, origFetch) => {
 			const u = typeof input === 'string' ? input : input.url
 			if (u === 'https://oauth2.googleapis.com/token') {
@@ -422,6 +423,8 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 					if (refreshMode === 'invalid_client') return Response.json({ error: 'invalid_client' }, { status: 400 })
 					if (refreshMode === 'upstream_503') return Response.json({ error: 'temporarily_unavailable' }, { status: 503 })
 					if (refreshMode === 'invalid_grant') return Response.json({ error: 'invalid_grant', error_description: 'Token revoked' }, { status: 400 })
+					if (refreshMode === 'missing_token_json') return Response.json({ token_type: 'Bearer', expires_in: 3600 })
+					if (refreshMode === 'missing_token_text') return new Response('unexpected plain response', { status: 200 })
 					if (refreshMode === 'body_stall') {
 						return new Response(new ReadableStream({
 							start (c) {
@@ -430,6 +433,7 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 						}), { status: 200, headers: { 'content-type': 'application/json' } })
 					}
 				}
+				if (refreshMode === 'exchange_missing_token') return Response.json({ access_token: '' })
 				if (refreshMode === 'exchange_net_err') return Promise.reject(new Error('ECONNRESET'))
 				if (refreshMode === 'exchange_userinfo_slow' && form.get('code') === 'ui-slow') {
 					return Response.json({ access_token: 'ya29.ui-slow' })
@@ -442,13 +446,22 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 				})
 			}
 			if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') {
+				userInfoCalls++
 				return new Promise((_, reject) => {
 					init?.signal?.addEventListener('abort', () => reject(init.signal.reason), { once: true })
 				})
 			}
 			return origFetch(input, init)
 		}, async origFetch => {
+			const beforeCreds = db.tokens.get(expiredApp.id)
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 504)
+			refreshMode = 'missing_token_json'
+			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 502)
+			refreshMode = 'missing_token_text'
+			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 502)
+			const afterCreds = db.tokens.get(expiredApp.id)
+			assert.equal(afterCreds.credentials.accessToken, beforeCreds.credentials.accessToken, 'Missing access_token in 200 OK refresh response must not overwrite stored accessToken')
+			assert.equal(afterCreds.expiresAt, beforeCreds.expiresAt, 'Missing access_token in 200 OK refresh response must not overwrite expiresAt')
 			refreshMode = 'body_stall'
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 504)
 			refreshMode = 'invalid_client'
@@ -459,6 +472,11 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			const revokedRes = await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })
 			assert.equal(revokedRes.status, 401)
 			assert.match(revokedRes.data.error, /connect_app/)
+			refreshMode = 'exchange_missing_token'
+			await assert.rejects(() => providers.google.exchangeCode({ code: 'empty', callbackUrl: 'http://localhost/cb' }), { status: 502, message: /missing access_token/ })
+			assert.equal(userInfoCalls, 0, 'Missing access_token from token endpoint must fail before querying userinfo')
+			const emptyTokState = db.tokens.createState({ mode: 'login', provider: 'google' })
+			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=empty&state=${emptyTokState}`)).status, 502)
 			refreshMode = 'exchange'
 			await assert.rejects(() => providers.google.exchangeCode({ code: 'slow', callbackUrl: 'http://localhost/cb' }), { status: 504, message: /timed out/i })
 			const slowCbState = db.tokens.createState({ mode: 'login', provider: 'google' })
