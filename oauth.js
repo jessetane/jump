@@ -648,16 +648,6 @@ async function handleVerify (req, res, query) {
 	})
 }
 
-function requireProviderEnv (res, provider) {
-	try {
-		provider.requireEnv()
-		return true
-	} catch (err) {
-		sendText(res, err.message, err.status || 500)
-		return false
-	}
-}
-
 function getOwnedOauthApp (session, appId, providerId) {
 	if (!session?.admin || !appId) return null
 	const app = db.tokens.get(appId)
@@ -670,7 +660,7 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 	if (!provider || provider.type !== 'oauth') {
 		throw httpError(404, 'not found')
 	}
-	if (!requireProviderEnv(res, provider)) return
+	provider.requireEnv()
 	const resolvedParams = { ...query }
 	if (url?.searchParams) {
 		for (const key of ['services', 'write']) {
@@ -730,7 +720,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	if (!provider || provider.type !== 'oauth' || !provider.buildAuthUrl) {
 		throw httpError(404, 'not found')
 	}
-	if (!requireProviderEnv(res, provider)) return
+	provider.requireEnv()
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
 	const servicesList = []
@@ -809,8 +799,9 @@ async function handleCallback (req, res, query) {
 	try {
 		exchanged = await provider.exchangeCode({ code, callbackUrl })
 	} catch (err) {
+		if (!err.status || err.status === 500) throw err
 		console.error(`${provider.name} token exchange failed:`, err.data || err.message)
-		sendText(res, err.message, err.status || 502)
+		sendText(res, err.message, err.status)
 		return
 	}
 	const { accessToken, refreshToken, expiresAt, scopes, account } = exchanged

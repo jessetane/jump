@@ -136,7 +136,12 @@ test('PKCE authorize validation, CSRF Origin guard, single-use setup codes, and 
 			redirect: 'manual'
 		})
 		assert.equal(missingSecretRes.status, 500)
+		assert.doesNotMatch(missingSecretRes.text, /GITHUB_CLIENT_SECRET/)
 		assert.ok(db.tokens.getState(setupCode), 'Upfront missing CLIENT_SECRET check must not burn setupCode')
+		const cbMissingSecretState = db.tokens.createState({ mode: 'login', provider: 'github' })
+		const cbMissingSecretRes = await req('GET', `/oauth/callback?code=c&state=${cbMissingSecretState}`)
+		assert.equal(cbMissingSecretRes.status, 500)
+		assert.doesNotMatch(cbMissingSecretRes.text, /GITHUB_CLIENT_SECRET/)
 		process.env.GITHUB_CLIENT_SECRET = 'gh-secret'
 		const okConsent = await req('POST', '/providers/github/consent', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
