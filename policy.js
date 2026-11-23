@@ -296,19 +296,22 @@ function validatePolicy (policy) {
 			}
 			const stripped = rule.origin.trim().replace(/\/+$/, '')
 			const hostPart = stripped.slice('https://'.length)
-			if (!hostPart || hostPart.includes('/') || hostPart.includes('?')) {
-				return { valid: false, error: `Rule at index ${i} origin must not contain a path or query` }
+			if (!hostPart || hostPart.includes('/') || hostPart.includes('?') || hostPart.includes('#') || hostPart.includes('@')) {
+				return { valid: false, error: `Rule at index ${i} origin must not contain a path, query, fragment, or credentials` }
 			}
 		}
 		if (rule.path !== undefined) {
 			if (typeof rule.path !== 'string' || !rule.path.trim()) {
 				return { valid: false, error: `Rule at index ${i} path must be a non-empty string` }
 			}
-			if (rule.path.includes('?')) {
-				return { valid: false, error: `Rule at index ${i} path must not contain query parameters` }
+			if (rule.path.includes('?') || rule.path.includes('#')) {
+				return { valid: false, error: `Rule at index ${i} path must not contain query parameters or fragments` }
 			}
-			if (rule.path.startsWith('http://') || rule.path.startsWith('https://')) {
+			if (/^https?:\/+/i.test(rule.path.trim())) {
 				return { valid: false, error: `Rule at index ${i} path must be a pathname; use "origin" to specify hostnames` }
+			}
+			if (hasPathTraversal(rule.path)) {
+				return { valid: false, error: `Rule at index ${i} path must not contain path traversal` }
 			}
 		}
 		if (rule.query !== undefined) {
