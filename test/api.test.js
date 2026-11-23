@@ -141,6 +141,11 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	assert.equal((await req('DELETE', `/api/apps/${app.id}?revoke=invalid`, { token: session.token })).status, 400)
 	assert.equal((await req('GET', '/api/logs?allowed=invalid', { token: session.token })).status, 400)
 	assert.throws(() => db.logs.listByUserId(user.id, { allowed: 'invalid' }), /allowed must be a boolean/)
+	for (const badLimit of ['abc', '0', '-5', '1001', '1.5', '']) {
+		assert.equal((await req('GET', `/api/logs?limit=${encodeURIComponent(badLimit)}`, { token: session.token })).status, 400)
+		assert.throws(() => db.logs.listByUserId(user.id, { limit: badLimit }), /limit must be an integer between 1 and 1000/)
+	}
+	assert.equal((await req('GET', '/api/logs?limit=10', { token: session.token })).status, 200)
 	for (const bad of [
 		{ action: 'update_app', appId: app.id },
 		{ action: 'update_app', appId: app.id, name: 'X', apiKey: 'legacy' },

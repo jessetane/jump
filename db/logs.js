@@ -1,6 +1,6 @@
 import { sqlite } from './index.js'
 import { userAccountSql } from './users.js'
-import { requireBoolean } from '../util.js'
+import { httpError, requireBoolean } from '../util.js'
 import { randomUUID } from 'node:crypto'
 
 export {
@@ -13,6 +13,18 @@ export {
 const RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 const MAX_URL_LEN = 2048
 const MAX_ERROR_LEN = 2048
+
+function parseLimit (limit) {
+	if (limit === undefined) return 100
+	if (typeof limit === 'string' && !limit.trim()) {
+		throw httpError(400, 'limit must be an integer between 1 and 1000')
+	}
+	const n = typeof limit === 'number' || typeof limit === 'string' ? Number(limit) : NaN
+	if (!Number.isInteger(n) || n < 1 || n > 1000) {
+		throw httpError(400, 'limit must be an integer between 1 and 1000')
+	}
+	return n
+}
 
 function truncate (str, maxLen) {
 	if (typeof str !== 'string') return null
@@ -147,9 +159,9 @@ function listByUserId (userId, opts = {}) {
 		query += ' AND logs.allowed = ?'
 		params.push(parsedAllowed ? 1 : 0)
 	}
-	const clampedLimit = Math.max(1, Math.min(Number(limit) || 100, 1000))
+	const parsedLimit = parseLimit(limit)
 	query += ' ORDER BY logs.created DESC, logs.rowid DESC LIMIT ?'
-	params.push(clampedLimit)
+	params.push(parsedLimit)
 	const rows = sqlite.prepare(query).all(...params)
 	return rows.map(format)
 }
