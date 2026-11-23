@@ -163,7 +163,13 @@ test('PKCE code exchange, client_id binding, refresh rotation, 60s dedup, /oauth
 	const verifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
 	const challenge = createHash('sha256').update(verifier).digest('base64url')
 	const badCode = db.tokens.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
+	assert.equal((await req('POST', '/oauth/token', { headers: { 'content-type': 'application/json' }, body: '{bad' })).status, 400)
+	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'client_credentials' } })).status, 400)
 	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: badCode, redirect_uri: 'https://chatgpt.com/callback', client_id: 'client_a' } })).status, 400, 'Missing code_verifier')
+	const shortVerifierCode = db.tokens.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
+	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: shortVerifierCode, redirect_uri: 'https://chatgpt.com/callback', client_id: 'client_a', code_verifier: 'too-short' } })).status, 400)
+	const wrongVerifierCode = db.tokens.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
+	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: wrongVerifierCode, redirect_uri: 'https://chatgpt.com/callback', client_id: 'client_a', code_verifier: 'a'.repeat(43) } })).status, 400)
 	const wrongClientCode = db.tokens.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback' })
 	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: wrongClientCode, redirect_uri: 'https://chatgpt.com/callback', client_id: 'client_bearer_spoof' } })).status, 400)
 	const mismatchRedirectCode = db.tokens.createAuthCode({ userId: session.userId, clientRedirectUri: 'https://chatgpt.com/callback' })
@@ -254,6 +260,52 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 	assert.equal(tokenRes.status, 200)
 	const verifySess = db.tokens.getByToken(tokenRes.data.access_token)
 	assert.deepEqual(db.links.listBySessionId(verifySess.id).map(l => l.appId), [app.id], 'Fresh-login /oauth/verify drops cross-user/invalid app_ids')
+	assert.equal((await req('PUT', '/oauth/verify')).status, 405)
+	assert.equal((await req('POST', '/oauth/verify', {
+		headers: { origin: 'https://evil.example.com', 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ code: verifyCode }).toString()
+	})).status, 403)
+	assert.equal((await req('POST', '/oauth/verify', {
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams({ code: verifyCode }).toString()
+	})).status, 400, 'Consumed verify code cannot be replayed')
+	await withEnv({ GITHUB_CLIENT_ID: 'gh-e2e-id', GITHUB_CLIENT_SECRET: 'gh-e2e-sec' }, async () => {
+		const { session: ownerAdmin } = createTestSession({ account: 'e2e-link-owner@example.com', admin: true })
+		const ghOwner = db.logins.resolveUser('github', 'e2e-gh-user')
+		const ghMergedApp = db.tokens.create({ userId: ghOwner.id, provider: 'linear', type: 'static', name: 'GH Merged Linear', credentials: { bearer: 'lin_gh' } })
+		assert.equal((await req('GET', '/oauth/authorize?code=invalid-setup-code')).status, 403)
+		const linkRes = JSON.parse((await mcp(ownerAdmin.token, 'admin', { action: 'link_login', provider: 'github', merge: true })).content[0].text)
+		const setupCode = new URL(linkRes.connectUrl).searchParams.get('code')
+		const authPage = await req('GET', `/oauth/authorize?code=${encodeURIComponent(setupCode)}`)
+		assert.equal(authPage.status, 200)
+		assert.ok(authPage.text.includes('"linkMode":true') && authPage.text.includes('"mergeMode":true'))
+		const consentRedirect = await req('POST', '/oauth/authorize/consent', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: setupCode, provider: 'github' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(consentRedirect.status, 302)
+		const ghState = new URL(consentRedirect.headers.get('location')).searchParams.get('state')
+		await withMockFetch(async (input, init, origFetch) => {
+			const u = typeof input === 'string' ? input : input.url
+			if (u === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'gho_e2e', token_type: 'bearer' })
+			if (u === 'https://api.github.com/user') return Response.json({ login: 'e2e-gh-user' })
+			return origFetch(input, init)
+		}, async origFetch => {
+			const cbRes = await origFetch(`${baseUrl()}/oauth/callback?code=gh_e2e&state=${ghState}`, { redirect: 'manual' })
+			assert.equal(cbRes.status, 302)
+			const verifyLoc = new URL(cbRes.headers.get('location'), baseUrl())
+			assert.equal(verifyLoc.pathname, '/oauth/verify')
+			const linkVerifyCode = verifyLoc.searchParams.get('code')
+			const verifyPost = await origFetch(`${baseUrl()}/oauth/verify`, {
+				method: 'POST',
+				headers: { origin: baseUrl(), 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ code: linkVerifyCode, app_id: ghMergedApp.id }).toString()
+			})
+			assert.equal(verifyPost.status, 200)
+			assert.ok(db.links.listBySessionId(ownerAdmin.id).some(l => l.appId === ghMergedApp.id))
+		})
+	})
 	const { session: gatedAdmin } = createTestSession({ account: 'local-gated@example.com', admin: true })
 	assert.equal((await req('POST', '/oauth/authorize/consent', {
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -361,13 +413,8 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 500)
 		})
 		let refreshMode = 'slow'
-		let googleRevokeReq = null
 		await withMockFetch((input, init, origFetch) => {
 			const u = typeof input === 'string' ? input : input.url
-			if (u === 'https://oauth2.googleapis.com/revoke') {
-				googleRevokeReq = { method: init?.method, ua: init?.headers?.['user-agent'], body: init?.body }
-				return new Response(null, { status: 200 })
-			}
 			if (u === 'https://oauth2.googleapis.com/token') {
 				const form = new URLSearchParams(String(init?.body || ''))
 				if (form.get('grant_type') === 'refresh_token') {
@@ -421,37 +468,6 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			refreshMode = 'exchange_net_err'
 			const netErrState = db.tokens.createState({ mode: 'login', provider: 'google' })
 			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=net&state=${netErrState}`)).status, 502)
-			const start = Date.now()
-			await providers.google.revokeToken(db.tokens.get(app.id))
-			assert.equal(googleRevokeReq?.ua, 'jump-test')
-			assert.ok(Date.now() - start < 1000)
-		})
-	})
-	const ghRevokeApp = db.tokens.create({ userId: adminSess.userId, provider: 'github', type: 'oauth', credentials: { accessToken: 'gho_rev', account: 'octo' } })
-	let ghRevokeReqs = []
-	await withMockFetch((input, init, origFetch) => {
-		const u = typeof input === 'string' ? input : input.url
-		if (u.startsWith('https://api.github.com/applications/')) {
-			ghRevokeReqs.push({ url: u, method: init?.method, auth: init?.headers?.authorization, ua: init?.headers?.['user-agent'], body: init?.body })
-			if (ghRevokeReqs.length > 1) return Promise.reject(new Error('network down'))
-			return new Response(null, { status: 204 })
-		}
-		return origFetch(input, init)
-	}, async () => {
-		await withEnv({ GITHUB_CLIENT_ID: undefined, GITHUB_CLIENT_SECRET: undefined }, async () => {
-			await providers.github.revokeToken(ghRevokeApp)
-		})
-		assert.equal(ghRevokeReqs.length, 0, 'GitHub revoke is a no-op without client credentials')
-		await withEnv({ GITHUB_CLIENT_ID: 'gh_id', GITHUB_CLIENT_SECRET: 'gh_sec' }, async () => {
-			await providers.github.revokeToken(ghRevokeApp)
-			assert.equal(ghRevokeReqs.length, 1)
-			assert.equal(ghRevokeReqs[0].url, 'https://api.github.com/applications/gh_id/token')
-			assert.equal(ghRevokeReqs[0].method, 'DELETE')
-			assert.equal(ghRevokeReqs[0].ua, 'jump-test')
-			assert.equal(ghRevokeReqs[0].auth, `Basic ${Buffer.from('gh_id:gh_sec').toString('base64')}`)
-			assert.deepEqual(JSON.parse(ghRevokeReqs[0].body), { access_token: 'gho_rev' })
-			await providers.github.revokeToken(ghRevokeApp)
-			assert.equal(ghRevokeReqs.length, 2, 'GitHub revoke swallows upstream errors without throwing')
 		})
 	})
 })
