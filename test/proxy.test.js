@@ -150,8 +150,10 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 	const cdnReceived = []
 	let apiPort = 0
 	const qSecret = 'SUPER_SECRET_QUERY_KEY_998877'
-	await withUpstream({ host: 'cdn.example.test' }, (upReq, res) => {
-		cdnReceived.push({ method: upReq.method, url: upReq.url, headers: upReq.headers })
+	await withUpstream({ host: 'cdn.example.test' }, async (upReq, res) => {
+		const chunks = []
+		for await (const c of upReq) chunks.push(c)
+		cdnReceived.push({ method: upReq.method, url: upReq.url, headers: upReq.headers, body: Buffer.concat(chunks).toString('utf8') })
 		if (upReq.url === '/bounce-to-api') {
 			res.writeHead(302, { location: `https://api.example.test:${apiPort}/echo-auth` })
 			res.end()
@@ -165,7 +167,7 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 		res.writeHead(200, { 'content-type': 'application/octet-stream' })
 		res.end(Buffer.from('archive-bytes'))
 	}, async ({ url: cdnUrl }) => {
-		await withUpstream({ host: 'api.example.test' }, (upReq, res) => {
+		await withUpstream({ host: 'api.example.test' }, async (upReq, res) => {
 			if (upReq.url === '/repos/acme/tarball') {
 				res.writeHead(302, { location: `${cdnUrl}/dl/tarball.gz?sig=1` })
 				res.end()
@@ -194,6 +196,28 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 			if (upReq.url === '/post-303') {
 				res.writeHead(303, { location: `${cdnUrl}/after-post` })
 				res.end()
+				return
+			}
+			if (upReq.url === '/post-302') {
+				res.writeHead(302, { location: `${cdnUrl}/after-post-302` })
+				res.end()
+				return
+			}
+			if (upReq.url === '/post-307') {
+				res.writeHead(307, { location: '/guarded' })
+				res.end()
+				return
+			}
+			if (upReq.url === '/post-308-cdn') {
+				res.writeHead(308, { location: `${cdnUrl}/after-post-308` })
+				res.end()
+				return
+			}
+			if (upReq.url === '/guarded') {
+				const chunks = []
+				for await (const c of upReq) chunks.push(c)
+				res.writeHead(200, { 'content-type': 'application/json' })
+				res.end(JSON.stringify({ method: upReq.method, body: Buffer.concat(chunks).toString('utf8') }))
 				return
 			}
 			if (upReq.url === '/ssrf-meta') {
@@ -252,7 +276,15 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 				type: 'static',
 				credentials: { headers: { authorization: 'Bearer ghp_secret', 'x-tenant': 'acme' }, baseUrl: apiUrl }
 			})
-			db.links.create({ sessionId: session.id, appId: ghApp.id, policy: [{ action: 'deny', path: '/admin/**' }, { action: 'allow', path: '/**' }] })
+			db.links.create({
+				sessionId: session.id,
+				appId: ghApp.id,
+				policy: [
+					{ action: 'deny', path: '/admin/**' },
+					{ action: 'deny', methods: ['POST'], path: '/guarded', body: { forbidden: true } },
+					{ action: 'allow', path: '/**' }
+				]
+			})
 			const qApp = db.tokens.create({
 				userId: user.id,
 				provider: 'namecheap',
@@ -272,6 +304,21 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 			assert.equal((await mcp(session.token, 'github_api', { url: '/post-303', method: 'POST', body: { a: 1 } })).isError, undefined)
 			assert.equal(cdnReceived[0].method, 'GET')
 			assert.equal(cdnReceived[0].headers['content-type'], undefined)
+			assert.equal(cdnReceived[0].body, '')
+			cdnReceived.length = 0
+			assert.equal((await mcp(session.token, 'github_api', { url: '/post-302', method: 'POST', body: { a: 1 } })).isError, undefined)
+			assert.equal(cdnReceived[0].method, 'GET')
+			assert.equal(cdnReceived[0].headers['content-type'], undefined)
+			assert.equal(cdnReceived[0].body, '')
+			const ok307 = await mcp(session.token, 'github_api', { url: '/post-307', method: 'POST', body: { forbidden: false } })
+			assert.equal(ok307.isError, undefined)
+			assert.deepEqual(JSON.parse(ok307.content[0].text), { method: 'POST', body: '{"forbidden":false}' })
+			assert.equal((await mcp(session.token, 'github_api', { url: '/post-307', method: 'POST', body: { forbidden: true } })).isError, true, '307 same-origin redirect preserves POST body for policy re-check')
+			cdnReceived.length = 0
+			assert.equal((await mcp(session.token, 'github_api', { url: '/post-308-cdn', method: 'POST', body: { keep: 1 } })).isError, undefined)
+			assert.equal(cdnReceived[0].method, 'POST')
+			assert.equal(cdnReceived[0].body, '{"keep":1}')
+			assert.equal(cdnReceived[0].headers.authorization, undefined)
 			assert.equal((await mcp(session.token, 'github_api', { url: '/ssrf-meta' })).isError, true)
 			const userinfoRes = await mcp(session.token, 'github_api', { url: '/userinfo-hop' })
 			assert.equal(userinfoRes.isError, true)
@@ -308,6 +355,8 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 	const gzBr = zlib.brotliCompressSync(zlib.gzipSync(Buffer.from('stacked-ok')))
 	assert.equal((await proxy.readResponseBody(Object.assign(Readable.from([gzBr]), { headers: { 'content-encoding': 'gzip, br' } }), 1000)).toString('utf8'), 'stacked-ok')
 	await assert.rejects(() => proxy.readResponseBody(Object.assign(Readable.from([gzBr]), { headers: { 'content-encoding': 'gzip, bogus' } }), 1000), err => err.status === 502)
+	const truncGz = zlib.gzipSync(Buffer.from('truncated-gzip-payload')).subarray(0, -8)
+	await assert.rejects(() => proxy.readResponseBody(Object.assign(Readable.from([truncGz]), { headers: { 'content-encoding': 'gzip' } }), 1000), err => err.status === 502)
 	const bodilessErr = new PassThrough()
 	proxy.drainSilently(bodilessErr)
 	assert.doesNotThrow(() => bodilessErr.destroy(new Error('reset')))
