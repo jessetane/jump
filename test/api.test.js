@@ -187,10 +187,16 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	assert.equal(filteredLogs2.status, 200)
 	assert.deepEqual(filteredLogs2.data.logs.map(l => l.id), [l2.id])
 	db.sqlite.prepare('DELETE FROM logs WHERE id IN (?, ?)').run(l1.id, l2.id)
+	const staticStripe = db.tokens.create({ userId: user.id, provider: 'stripe', type: 'static', credentials: { headers: { authorization: 'Bearer sk_val' }, baseUrl: 'https://api.stripe.com' } })
 	for (const bad of [
 		{ action: 'update_app', appId: app.id },
 		{ action: 'update_app', appId: app.id, name: 'X', apiKey: 'legacy' },
 		{ action: 'connect_app', provider: 'google', appUrl: 'https://evil.com' },
+		{ action: 'connect_app', appId: app.id, provider: 'github' },
+		{ action: 'connect_app', appId: staticStripe.id },
+		{ action: 'connect_app', appId: app.id, credentials: 'x' },
+		{ action: 'connect_app', appId: app.id, account: 'x@example.com' },
+		{ action: 'connect_app', appId: app.id, baseUrl: 'https://www.googleapis.com' },
 		{ action: 'list_apps', provider: 'stripe' },
 		{ action: 'update_session' },
 		{ action: 'revoke_session', sessionId: '' },

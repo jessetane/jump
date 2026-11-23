@@ -168,6 +168,25 @@ test('SSO_DOMAINS pinning prevents wrong-IdP login/linking, claim hijacking, and
 			const corpUser = db.logins.findUserByAccount('alice@corp.com', 'google')
 			const corpAdmin = db.tokens.create({ userId: corpUser.id, provider: 'self', admin: 1 })
 			assert.equal((await mcp(corpAdmin.token, 'admin', { action: 'link_login', provider: 'github' })).isError, true)
+			const ssoBlockedSetup = db.tokens.createState({ mode: 'setup_link', sessionId: corpAdmin.id, provider: 'github' })
+			assert.equal((await origFetch(`${baseUrl()}/oauth/authorize?code=${ssoBlockedSetup}`)).status, 403)
+			const unconstrainedSetup = db.tokens.createState({ mode: 'setup_link', sessionId: corpAdmin.id })
+			const unconstrainedPage = await origFetch(`${baseUrl()}/oauth/authorize?code=${unconstrainedSetup}`)
+			assert.equal(unconstrainedPage.status, 200)
+			const unconstrainedData = JSON.parse((await unconstrainedPage.text()).match(/const initData = (\{[^\n]+\})/)[1])
+			assert.deepEqual(unconstrainedData.providers.map(p => p.id), ['google'], 'Unconstrained setup_link filters SSO-disallowed providers')
+			assert.equal((await origFetch(`${baseUrl()}/oauth/authorize/consent`, {
+				method: 'POST',
+				headers: { origin: baseUrl(), 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ code: unconstrainedSetup, provider: 'github' }).toString()
+			})).status, 403)
+			const pinnedSetup = db.tokens.createState({ mode: 'setup_link', sessionId: corpAdmin.id, provider: 'google' })
+			assert.equal((await origFetch(`${baseUrl()}/oauth/authorize/consent`, {
+				method: 'POST',
+				headers: { origin: baseUrl(), 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ code: pinnedSetup, provider: 'github' }).toString()
+			})).status, 403)
+			assert.ok(db.tokens.getState(pinnedSetup), 'Provider mismatch on consent does not consume setup code')
 			const badSsoCode = db.tokens.createState({ mode: 'setup_link', sessionId: corpAdmin.id })
 			await withEnv({ SSO_DOMAINS: 'invalid-entry' }, async () => {
 				assert.equal((await req('GET', `/oauth/authorize?code=${badSsoCode}`)).status, 500, 'authorize propagates invalid SSO_DOMAINS instead of swallowing')
