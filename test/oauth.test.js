@@ -933,6 +933,13 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	const blankStart = await req('POST', '/api/apps', { token: adminSess.token, body: { type: 'static' } })
 	assert.equal(blankStart.status, 201)
 	assert.equal(blankStart.data.actionRequired, 'browser_flow')
+	for (const emptyBase of ['', null]) {
+		const emptyBaseStart = await req('POST', '/api/apps', { token: adminSess.token, body: { type: 'static', baseUrl: emptyBase } })
+		assert.equal(emptyBaseStart.status, 201)
+		const emptyCode = new URL(emptyBaseStart.data.connectUrl).searchParams.get('code')
+		assert.equal(parseInit((await req('GET', `/apps/connect?code=${encodeURIComponent(emptyCode)}`)).text).baseUrl, '')
+	}
+	assert.equal((await req('POST', '/api/apps', { token: adminSess.token, body: { type: 'static', baseUrl: 'http://insecure.example' } })).status, 400)
 	const blankCode = new URL(blankStart.data.connectUrl).searchParams.get('code')
 	const blankInit = parseInit((await req('GET', `/apps/connect?code=${encodeURIComponent(blankCode)}`)).text)
 	assert.equal(blankInit.provider, '')

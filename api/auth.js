@@ -541,7 +541,8 @@ async function connectApp (token, opts = {}, appUrl) {
 		throw httpError(400, 'services is only supported for OAuth apps')
 	}
 	if (!normalizedAuth) {
-		const validatedBase = baseUrl !== undefined ? requireValidBaseUrl(baseUrl) : null
+		const cleanBaseUrl = optionalString(baseUrl, 'baseUrl')
+		const validatedBase = cleanBaseUrl ? requireValidBaseUrl(cleanBaseUrl) : null
 		const setupCode = db.tokens.createState({
 			mode: 'setup_static',
 			sessionId: session.id,
