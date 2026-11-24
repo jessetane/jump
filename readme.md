@@ -41,8 +41,8 @@ Point an OAuth-capable MCP client at `https://<host>/mcp` and sign in as an admi
 From an admin session, use the `admin` tool to connect upstream apps, create scoped sessions and attach policies:
 
 ```javascript
-// connect an OAuth provider (returns an interactive authorization URL)
-admin({ action: 'connect_app', provider: 'google', name: 'Work Google' })
+// connect an OAuth provider (returns an interactive authorization URL; optional services pre-check permissions)
+admin({ action: 'connect_app', provider: 'google', name: 'Work Google', services: ['gmail', 'calendar:read', 'calendar:write'] })
 
 // or connect any HTTP API with Bearer shorthand or structured { bearer?, basic?, headers?, query? } credentials
 admin({
@@ -114,7 +114,7 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 	* `update_session` - Rename a session, toggle `admin`, or rotate its token.
 	* `revoke_session` - Revoke the current session, a specific session, or `allOthers`.
 	* `list_apps` - List connected and shared apps.
-	* `connect_app` - Connect an OAuth or static-credential upstream app (or re-authenticate one).
+	* `connect_app` - Connect an OAuth or static-credential upstream app (or re-authenticate one, optionally pre-selecting `services` with `<service>` or `<service>:<mode>`).
 	* `update_app` - Update an app's name or static credentials.
 	* `disconnect_app` - Remove an app (and revoke its upstream OAuth token).
 	* `share_app` - Share an owned app with another user under an optional ceiling policy.
