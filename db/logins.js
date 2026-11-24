@@ -1,4 +1,4 @@
-import { sqlite } from './index.js'
+import { sqlite, transaction } from './index.js'
 import * as users from './users.js'
 import * as tokens from './tokens.js'
 import { parseAccountSpec, httpError } from '../util.js'
@@ -83,21 +83,6 @@ function findUserByAccount (account, provider = null) {
 	return rows.length === 1 ? users.get(rows[0].user_id) : null
 }
 
-function runInTransaction (fn) {
-	if (!sqlite.isTransaction) {
-		sqlite.exec('BEGIN IMMEDIATE;')
-		try {
-			const result = fn()
-			sqlite.exec('COMMIT;')
-			return result
-		} catch (err) {
-			sqlite.exec('ROLLBACK;')
-			throw err
-		}
-	}
-	return fn()
-}
-
 function mergeUsers (userIdA, userIdB) {
 	const uA = users.get(userIdA)
 	const uB = users.get(userIdB)
@@ -141,7 +126,7 @@ function mergeUsers (userIdA, userIdB) {
 function upsert ({ id = randomUUID(), userId, provider, account, allowUnscoped = false, merge = false }) {
 	const cleanProvider = String(provider).trim().toLowerCase()
 	const cleanAccount = String(account).trim().toLowerCase()
-	return runInTransaction(() => {
+	return transaction(() => {
 		const existing = sqlite.prepare('SELECT * FROM logins WHERE provider = ? AND account = ?').get(cleanProvider, cleanAccount)
 		if (existing) {
 			if (existing.user_id !== userId) {
@@ -168,7 +153,7 @@ function upsert ({ id = randomUUID(), userId, provider, account, allowUnscoped =
 function remove (userId, { loginId = null, provider = null, account = null } = {}) {
 	if (!userId) return null
 	const { account: cleanAccount, provider: cleanProvider } = parseAccountSpec(account, provider)
-	return runInTransaction(() => {
+	return transaction(() => {
 		const allLogins = listByUserId(userId)
 		let matches = allLogins
 		if (loginId) {
@@ -199,7 +184,7 @@ function resolveUser (provider, account, { createIfMissing = true, allowUnscoped
 	if (!provider || !account) return null
 	const cleanProvider = String(provider).trim().toLowerCase()
 	const cleanAccount = String(account).trim().toLowerCase()
-	return runInTransaction(() => {
+	return transaction(() => {
 		const row = sqlite.prepare('SELECT user_id FROM logins WHERE provider = ? AND account = ?').get(cleanProvider, cleanAccount)
 		if (row) {
 			tokens.claimPendingShares({ userId: row.user_id, provider: cleanProvider, account: cleanAccount, allowUnscoped })

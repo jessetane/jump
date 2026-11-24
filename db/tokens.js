@@ -1,4 +1,4 @@
-import { sqlite } from './index.js'
+import { sqlite, transaction } from './index.js'
 import { userAccountSql } from './users.js'
 import { parseAccountSpec, isPlainObject, httpError } from '../util.js'
 import { loadKeys, secretContext, encryptSecret, openSecret, decryptSecret } from '../crypto.js'
@@ -178,17 +178,12 @@ function initKeys (targetDb = sqlite) {
 		}
 	}
 	if (updates.length === 0) return
-	targetDb.exec('BEGIN IMMEDIATE;')
-	try {
+	transaction(() => {
 		const stmt = targetDb.prepare('UPDATE tokens SET credentials = ? WHERE id = ?')
 		for (const u of updates) {
 			stmt.run(u.credentials, u.id)
 		}
-		targetDb.exec('COMMIT;')
-	} catch (err) {
-		targetDb.exec('ROLLBACK;')
-		throw err
-	}
+	}, targetDb)
 	vacuumDatabase(targetDb)
 }
 
@@ -780,11 +775,21 @@ function getState (state) {
 	return formatState(row, state)
 }
 
-function consumeState (state) {
+function consumeState (state, validate = null) {
 	const tokenHash = hashSecret(state)
 	if (!tokenHash) return null
-	const row = sqlite.prepare("DELETE FROM tokens WHERE token = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?) RETURNING *").get(tokenHash, Date.now())
-	return formatState(row, state)
+	if (!validate) {
+		const row = sqlite.prepare("DELETE FROM tokens WHERE token = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?) RETURNING *").get(tokenHash, Date.now())
+		return formatState(row, state)
+	}
+	return transaction(() => {
+		const found = getState(state)
+		if (!found) return null
+		const result = validate(found)
+		if (!result) return null
+		sqlite.prepare("DELETE FROM tokens WHERE token = ? AND type = 'oauth_state'").run(tokenHash)
+		return result === true ? found : result
+	})
 }
 
 function createAuthCode (opts = {}) {

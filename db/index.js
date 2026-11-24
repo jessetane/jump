@@ -14,6 +14,21 @@ function prune () {
 	logs.prune()
 }
 
+function transaction (fn, targetDb = sqlite) {
+	if (targetDb.isTransaction) return fn()
+	targetDb.exec('BEGIN IMMEDIATE;')
+	try {
+		const result = fn()
+		targetDb.exec('COMMIT;')
+		return result
+	} catch (err) {
+		try {
+			targetDb.exec('ROLLBACK;')
+		} catch {}
+		throw err
+	}
+}
+
 function init () {
 	users.init()
 	logins.init()
@@ -49,6 +64,7 @@ export {
 	sqlite,
 	init,
 	prune,
+	transaction,
 	users,
 	logins,
 	tokens,
