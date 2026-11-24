@@ -397,14 +397,13 @@ function normalizeCredentials (raw) {
 		if (/[\x00-\x1f\x7f]/.test(raw.basic)) {
 			throw httpError(400, 'credentials.basic must not contain control characters')
 		}
-		const cleanBasic = raw.basic.trim()
-		if (!cleanBasic.includes(':') || cleanBasic === ':') {
+		if (!raw.basic.includes(':') || raw.basic.trim() === ':') {
 			throw httpError(400, 'credentials.basic must be in "user:pass" format')
 		}
 		if (authSource) {
 			throw httpError(400, 'Conflicting Authorization credentials: specify only one of bearer, basic, or headers.authorization')
 		}
-		headers.set('authorization', `Basic ${Buffer.from(cleanBasic).toString('base64')}`)
+		headers.set('authorization', `Basic ${Buffer.from(raw.basic).toString('base64')}`)
 		authSource = 'basic'
 	}
 	if (raw.headers !== undefined) {
