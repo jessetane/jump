@@ -290,12 +290,18 @@ function validatePolicy (policy) {
 			}
 		}
 		if (rule.origin !== undefined) {
-			if (typeof rule.origin !== 'string' || !rule.origin.startsWith('https://')) {
+			if (typeof rule.origin !== 'string' || !rule.origin.trim().toLowerCase().startsWith('https://')) {
 				return { valid: false, error: `Rule at index ${i} origin must be an HTTPS origin (e.g. "https://api.stripe.com" or "https://*.googleapis.com")` }
 			}
-			const stripped = rule.origin.trim().replace(/\/+$/, '')
-			const hostPart = stripped.slice('https://'.length)
-			if (!hostPart || hostPart.includes('/') || hostPart.includes('?') || hostPart.includes('#') || hostPart.includes('@')) {
+			const rawOrigin = rule.origin.trim()
+			const stripped = rawOrigin.replace(/\/+$/, '')
+			let parsedOrigin
+			try {
+				parsedOrigin = new URL(stripped)
+			} catch {
+				return { valid: false, error: `Rule at index ${i} origin is not a valid HTTPS origin` }
+			}
+			if (parsedOrigin.protocol !== 'https:' || parsedOrigin.username || parsedOrigin.password || parsedOrigin.pathname !== '/' || rawOrigin.includes('?') || rawOrigin.includes('#') || parsedOrigin.search || parsedOrigin.hash) {
 				return { valid: false, error: `Rule at index ${i} origin must not contain a path, query, fragment, or credentials` }
 			}
 		}
