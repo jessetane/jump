@@ -42,7 +42,7 @@ function formatApp (app, { sharesByAppId } = {}) {
 		provider: app.provider,
 		type: app.type,
 		name: app.name,
-		account: app.credentials?.account || null,
+		...(app.type !== 'static' ? { account: app.credentials?.account || null } : {}),
 		...(app.credentials?.baseUrl ? { baseUrl: app.credentials.baseUrl } : {}),
 		scopes: app.scopes,
 		expiresAt: app.expiresAt,
@@ -327,15 +327,13 @@ function requireValidBaseUrl (rawBase) {
 	return normalized
 }
 
-function buildStaticCredentials ({ credentials, auth, baseUrl, account, providerDef, existingCreds = null }) {
+function buildStaticCredentials ({ credentials, auth, baseUrl, providerDef, existingCreds = null }) {
 	const normalizedAuth = auth !== undefined ? auth : normalizeCredentials(credentials)
 	const rawBase = baseUrl !== undefined ? baseUrl : (existingCreds?.baseUrl || providerDef?.baseUrl || null)
 	const normalizedBaseUrl = requireValidBaseUrl(rawBase)
-	const cleanAccount = optionalString(account, 'account')
 	return {
 		...normalizedAuth,
-		baseUrl: normalizedBaseUrl,
-		...(cleanAccount && { account: cleanAccount })
+		baseUrl: normalizedBaseUrl
 	}
 }
 
@@ -476,12 +474,11 @@ function normalizeCredentials (raw) {
 
 async function connectApp (token, opts = {}, appUrl) {
 	const session = requireAdmin(token)
-	assertKeys(opts, ['provider', 'type', 'name', 'credentials', 'account', 'baseUrl', 'appId', 'services'])
-	let { provider, type, name, credentials, account, baseUrl, appId, services } = opts || {}
+	assertKeys(opts, ['provider', 'type', 'name', 'credentials', 'baseUrl', 'appId', 'services'])
+	let { provider, type, name, credentials, baseUrl, appId, services } = opts || {}
 	provider = provider === undefined || provider === null ? null : requireValidProviderId(provider)
 	let appType = requireAppType(type)
 	const cleanName = optionalString(name, 'name')
-	const cleanAccount = optionalString(account, 'account')
 	let existingApp = null
 	if (appId !== undefined) {
 		existingApp = requireApp(session.userId, appId, { allowShare: false })
@@ -492,8 +489,8 @@ async function connectApp (token, opts = {}, appUrl) {
 		if (appType && appType !== existingApp.type) {
 			throw httpError(400, `App ${appId} has type "${existingApp.type}", not "${appType}"`)
 		}
-		if (name !== undefined || credentials !== undefined || account !== undefined || baseUrl !== undefined) {
-			throw httpError(400, 'Cannot pass name, credentials, account, or baseUrl with appId in connect_app; use update_app instead')
+		if (name !== undefined || credentials !== undefined || baseUrl !== undefined) {
+			throw httpError(400, 'Cannot pass name, credentials, or baseUrl with appId in connect_app; use update_app instead')
 		}
 		provider = existingApp.provider
 		appType = existingApp.type
@@ -513,8 +510,8 @@ async function connectApp (token, opts = {}, appUrl) {
 		if (normalizedAuth) {
 			throw httpError(400, 'credentials cannot be used with OAuth apps')
 		}
-		if (baseUrl !== undefined || account !== undefined) {
-			throw httpError(400, 'baseUrl and account are only supported for static apps')
+		if (baseUrl !== undefined) {
+			throw httpError(400, 'baseUrl is only supported for static apps')
 		}
 		provider = provider || 'google'
 		const providerDef = requireOauthProvider(provider, 'app')
@@ -554,7 +551,6 @@ async function connectApp (token, opts = {}, appUrl) {
 			reauthAppId: appId || null,
 			name: existingApp ? existingApp.name : cleanName,
 			baseUrl: existingApp ? (existingApp.credentials?.baseUrl || null) : validatedBase,
-			account: existingApp ? (existingApp.credentials?.account || null) : cleanAccount,
 			ttl: 10 * 60 * 1000
 		})
 		return {
@@ -569,7 +565,6 @@ async function connectApp (token, opts = {}, appUrl) {
 	const creds = buildStaticCredentials({
 		auth: normalizedAuth,
 		baseUrl,
-		account: cleanAccount,
 		providerDef
 	})
 	const app = db.tokens.create({
@@ -692,32 +687,28 @@ async function unlinkLogin (token, opts = {}) {
 
 async function updateApp (token, opts = {}) {
 	const session = requireAdmin(token)
-	assertKeys(opts, ['appId', 'name', 'account', 'baseUrl', 'credentials'])
-	const { appId, name, account, baseUrl, credentials } = opts || {}
+	assertKeys(opts, ['appId', 'name', 'baseUrl', 'credentials'])
+	const { appId, name, baseUrl, credentials } = opts || {}
 	const targetApp = requireApp(session.userId, appId, { allowShare: false })
-	if (name === undefined && account === undefined && baseUrl === undefined && credentials === undefined) {
-		throw httpError(400, 'At least one of name, account, baseUrl, or credentials is required')
+	if (name === undefined && baseUrl === undefined && credentials === undefined) {
+		throw httpError(400, 'At least one of name, baseUrl, or credentials is required')
 	}
-	if ((account !== undefined || baseUrl !== undefined || credentials !== undefined) && targetApp.type !== 'static') {
-		throw httpError(400, 'account, baseUrl, and credentials can only be updated on static apps')
+	if ((baseUrl !== undefined || credentials !== undefined) && targetApp.type !== 'static') {
+		throw httpError(400, 'baseUrl and credentials can only be updated on static apps')
 	}
 	const cleanName = name !== undefined ? optionalString(name, 'name') : undefined
-	const cleanAccount = account !== undefined ? optionalString(account, 'account') : undefined
 	const normalizedAuth = credentials !== undefined ? normalizeCredentials(credentials) : undefined
 	const normalizedBaseUrl = baseUrl !== undefined ? requireValidBaseUrl(baseUrl) : undefined
-	const hasCredChanges = cleanAccount !== undefined || normalizedBaseUrl !== undefined || normalizedAuth !== undefined
+	const hasCredChanges = normalizedBaseUrl !== undefined || normalizedAuth !== undefined
 	let updatedCreds = undefined
 	if (hasCredChanges) {
 		const existingCreds = targetApp.credentials || {}
-		const { headers: _h, query: _q, ...metaCreds } = existingCreds
+		const { headers: _h, query: _q, account: _a, ...metaCreds } = existingCreds
 		updatedCreds = {
 			...(normalizedAuth !== undefined ? { ...metaCreds, ...normalizedAuth } : existingCreds),
 			...(normalizedBaseUrl !== undefined && { baseUrl: normalizedBaseUrl })
 		}
-		if (cleanAccount !== undefined) {
-			if (cleanAccount) updatedCreds.account = cleanAccount
-			else delete updatedCreds.account
-		}
+		delete updatedCreds.account
 	}
 	const updated = db.tokens.updateCredentials(targetApp.id, {
 		...(cleanName !== undefined ? { name: cleanName } : {}),

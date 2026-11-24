@@ -718,7 +718,6 @@ function formatState (row, rawState = null) {
 		reauthAppId: meta.reauthAppId || null,
 		services: Array.isArray(meta.services) ? meta.services : null,
 		baseUrl: meta.baseUrl || null,
-		account: meta.account || null,
 		sessionId: meta.sessionId || null,
 		provider: tok.provider === 'self' ? null : tok.provider,
 		ip: tok.ip,
@@ -742,7 +741,6 @@ function createState (opts = {}) {
 		reauthAppId = null,
 		services = null,
 		baseUrl = null,
-		account = null,
 		sessionId = null,
 		provider = null,
 		ip = null,
@@ -766,7 +764,6 @@ function createState (opts = {}) {
 			reauthAppId,
 			...(Array.isArray(services) && { services }),
 			...(baseUrl && { baseUrl }),
-			...(account && { account }),
 			sessionId
 		},
 		expiresAt,

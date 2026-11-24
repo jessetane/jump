@@ -69,7 +69,7 @@ function buildAdminTool () {
 				},
 				loginId: { type: 'string', description: 'Target login key ID (optional for unlink_login).' },
 				name: { type: 'string', description: 'Human-readable label for a session or upstream app.' },
-				account: { type: 'string', description: 'Upstream account, login key account, or recipient user account identifier (e.g. email, username, or "provider:account").' },
+				account: { type: 'string', description: 'Login key account or recipient user account identifier (e.g. email, username, or "provider:account").' },
 				baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or static-credential providers (e.g. "https://api.stripe.com").' },
 				credentials: {
 					type: ['string', 'object'],

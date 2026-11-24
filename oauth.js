@@ -705,7 +705,6 @@ function parseStaticFormBody (rawBody, req) {
 		provider: params.get('provider') ?? undefined,
 		name: params.get('name') ?? undefined,
 		baseUrl: params.get('baseUrl') ?? params.get('base_url') ?? undefined,
-		account: params.get('account') ?? undefined,
 		credentials
 	}
 }
@@ -733,13 +732,15 @@ function handleStaticConnectGet (res, query) {
 		provider: providerId,
 		providerBaseUrl: providerDef?.baseUrl || '',
 		name: existingApp ? (existingApp.name || '') : (setup.name || ''),
-		baseUrl: existingApp ? (existingApp.credentials?.baseUrl || providerDef?.baseUrl || '') : (setup.baseUrl || providerDef?.baseUrl || ''),
-		account: existingApp ? (existingApp.credentials?.account || '') : (setup.account || '')
+		baseUrl: existingApp ? (existingApp.credentials?.baseUrl || providerDef?.baseUrl || '') : (setup.baseUrl || providerDef?.baseUrl || '')
 	}
 	sendHtml(res, STATIC_CONNECT_HTML.replace('{{INIT_DATA}}', () => JSON.stringify(initData).replace(/</g, '\\u003c')))
 }
 
 function validateStaticSubmission (body, setup, existingApp) {
+	if (body.account !== undefined) {
+		throw httpError(400, 'account is not supported for static apps')
+	}
 	let provider
 	if (existingApp) {
 		if (body.provider !== undefined && body.provider !== null && String(body.provider).trim()) {
@@ -754,14 +755,14 @@ function validateStaticSubmission (body, setup, existingApp) {
 		provider = requireValidProviderId(rawProvider)
 	}
 	const providerDef = getProvider(provider)
-	const cleanName = optionalString(body.name, 'name')
-	const rawBaseUrl = body.baseUrl !== undefined && body.baseUrl !== null
-		? (String(body.baseUrl).trim() ? body.baseUrl : (providerDef?.baseUrl || null))
+	const cleanName = body.name !== undefined ? optionalString(body.name, 'name') : undefined
+	const cleanBaseUrl = body.baseUrl !== undefined ? optionalString(body.baseUrl, 'baseUrl') : undefined
+	const rawBaseUrl = cleanBaseUrl !== undefined
+		? (cleanBaseUrl || providerDef?.baseUrl || null)
 		: (existingApp?.credentials?.baseUrl || setup.baseUrl || providerDef?.baseUrl || null)
 	const creds = buildStaticCredentials({
 		credentials: body.credentials,
 		baseUrl: rawBaseUrl,
-		account: body.account,
 		providerDef
 	})
 	return { providerDef, cleanName, creds }
@@ -823,11 +824,11 @@ async function handleStaticConnectPost (req, res) {
 			respondError(403, 'Access denied: unauthorized update request.')
 			return
 		}
-		appName = cleanName || target.name || providerDef.name
+		appName = cleanName !== undefined ? (cleanName || providerDef.name) : (target.name || providerDef.name)
 		db.tokens.updateCredentials(target.id, { name: appName, credentials: creds })
 		appId = target.id
 	} else {
-		appName = cleanName || providerDef.name
+		appName = (cleanName !== undefined ? cleanName : setup.name) || providerDef.name
 		const created = db.tokens.create({
 			userId: activeSession.userId,
 			provider: providerDef.id,
