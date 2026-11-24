@@ -82,10 +82,6 @@
 					<input type="url" id="base-url" name="baseUrl" placeholder="https://api.example.com" required>
 				</div>
 				<div class="form-group">
-					<label for="account">Account (optional)</label>
-					<input type="text" id="account" name="account" placeholder="e.g. acct_..., team-slug, user@example.com">
-				</div>
-				<div class="form-group">
 					<label for="auth-type">Authentication</label>
 					<select id="auth-type" name="authType">
 						<option value="bearer">Bearer token</option>
@@ -245,7 +241,6 @@
 							provider: document.getElementById('provider').value,
 							name: document.getElementById('app-name').value,
 							baseUrl: document.getElementById('base-url').value,
-							account: document.getElementById('account').value,
 							credentials
 						})
 					})
@@ -270,7 +265,6 @@
 				const providerEl = document.getElementById('provider')
 				const nameEl = document.getElementById('app-name')
 				const baseUrlEl = document.getElementById('base-url')
-				const accountEl = document.getElementById('account')
 				const subtitleEl = document.getElementById('page-subtitle')
 				const submitEl = document.getElementById('submit-btn')
 				const authTypeEl = document.getElementById('auth-type')
@@ -279,7 +273,6 @@
 				if (providerEl && initData.provider) providerEl.value = initData.provider
 				if (nameEl && initData.name) nameEl.value = initData.name
 				if (baseUrlEl && initData.baseUrl) baseUrlEl.value = initData.baseUrl
-				if (accountEl && initData.account) accountEl.value = initData.account
 				if (initData.updateMode) {
 					if (providerEl) providerEl.readOnly = true
 					if (subtitleEl) subtitleEl.textContent = 'Update ' + (initData.name || initData.provider || 'app') + ' credentials'
