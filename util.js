@@ -6,7 +6,10 @@ export {
 	HOP_BY_HOP_HEADERS,
 	getRawBody,
 	getBody,
+	parseMimeType,
+	isJsonMime,
 	parseJsonObject,
+	searchParamsToObject,
 	parseAppUrl,
 	positiveNumberEnv,
 	getUserAgent,
@@ -491,6 +494,23 @@ function getRawBody (req, maxBytes = 1024 * 1024) {
 
 async function getBody (req, maxBytes = 1024 * 1024) {
 	return (await getRawBody(req, maxBytes)).toString('utf8')
+}
+
+function parseMimeType (contentType) {
+	return typeof contentType === 'string' ? contentType.split(';')[0].trim().toLowerCase() : ''
+}
+
+function isJsonMime (contentType) {
+	const mime = parseMimeType(contentType)
+	return mime === 'application/json' || mime.endsWith('+json')
+}
+
+function searchParamsToObject (searchParams) {
+	const out = Object.create(null)
+	for (const [k, v] of searchParams.entries()) {
+		out[k] = v
+	}
+	return out
 }
 
 function parseJsonObject (rawBody, { allowedKeys = null, objectError = 'JSON body must be an object' } = {}) {

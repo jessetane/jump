@@ -1,4 +1,4 @@
-import { hasUrlScheme, resolveTargetUrl, hasPathTraversal, serializeFormBody, isPlainObject } from './util.js'
+import { hasUrlScheme, resolveTargetUrl, hasPathTraversal, parseMimeType, isJsonMime, serializeFormBody, isPlainObject } from './util.js'
 
 export {
 	evaluatePolicy,
@@ -78,10 +78,9 @@ function hasDuplicateJsonKeys (str) {
 }
 
 function isCompatibleContentType (contentType, bodyType) {
-	if (!contentType || typeof contentType !== 'string') return true
-	const mime = contentType.split(';')[0].trim().toLowerCase()
+	const mime = parseMimeType(contentType)
 	if (!mime) return true
-	if (bodyType === 'json') return mime === 'application/json' || mime.endsWith('+json')
+	if (bodyType === 'json') return isJsonMime(mime)
 	if (bodyType === 'form') return mime === 'application/x-www-form-urlencoded'
 	return false
 }

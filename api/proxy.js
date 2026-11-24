@@ -8,7 +8,7 @@ import zlib from 'node:zlib'
 import * as db from '../db/index.js'
 import { getProvider } from '../providers/index.js'
 import { evaluatePolicy, hasBodyPolicy } from '../policy.js'
-import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, getUserAgent, httpError, isAllowedUpstreamHost, isAllowedUpstreamProtocol, lookupUpstreamHost, positiveNumberEnv, serializeFormBody, streamAbortError, stripTrailingDot, validateBaseUrl } from '../util.js'
+import { HOP_BY_HOP_HEADERS, assertKeys, blockedHostError, getRawBody, getUserAgent, httpError, isAllowedUpstreamHost, isAllowedUpstreamProtocol, isJsonMime, lookupUpstreamHost, parseMimeType, positiveNumberEnv, serializeFormBody, streamAbortError, stripTrailingDot, validateBaseUrl } from '../util.js'
 
 export {
 	drainSilently,
@@ -223,7 +223,7 @@ function attachAuth (hopUrl, baseHeaders, authHeaders, queryEntries) {
 }
 
 function isFormContentType (contentType) {
-	return String(contentType || '').split(';')[0].trim().toLowerCase() === 'application/x-www-form-urlencoded'
+	return parseMimeType(contentType) === 'application/x-www-form-urlencoded'
 }
 
 function sendUpstreamHop (targetUrl, { method, headers, body, bodyStream, timeoutMs }) {
@@ -390,11 +390,11 @@ async function executeBufferedUpstream ({ credentials, url, method, body, baseHe
 	}
 	const rawContentType = res.headers['content-type'] || ''
 	const buf = skipBody ? (drainSilently(res), Buffer.alloc(0)) : await readResponseBody(res, maxFileSizeBytes)
-	const contentType = rawContentType.split(';')[0].trim().toLowerCase()
+	const contentType = parseMimeType(rawContentType)
 	const charsetMatch = rawContentType.match(/charset=([^;]+)/i)
 	const charset = charsetMatch ? charsetMatch[1].trim().replace(/^["']|["']$/g, '') : undefined
 	let result
-	if (contentType === 'application/json' || contentType.endsWith('+json')) {
+	if (isJsonMime(contentType)) {
 		const str = buf.toString('utf8')
 		try {
 			result = str ? JSON.parse(str) : {}
