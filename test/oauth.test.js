@@ -768,6 +768,23 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	assert.equal((await req('PUT', `/apps/connect?code=${encodeURIComponent(setupCode)}`)).status, 405)
 	const oauthSetupCode = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSess.id, provider: 'google' })
 	assert.equal((await req('GET', `/apps/connect?code=${encodeURIComponent(oauthSetupCode)}`)).status, 403)
+	assert.equal((await req('POST', '/apps/connect', {
+		headers: { 'content-type': 'application/json', origin: baseUrl() },
+		body: { code: oauthSetupCode, provider: 'stripe', baseUrl: 'https://api.stripe.com', credentials: 'sk_wrong_mode' }
+	})).status, 403)
+	assert.ok(db.tokens.getState(oauthSetupCode), 'POST /apps/connect must not consume wrong-mode setup code')
+	const foreignUser = db.users.create()
+	const foreignStatic = db.tokens.create({ userId: foreignUser.id, provider: 'stripe', type: 'static', credentials: { headers: { authorization: 'Bearer sk_foreign' }, baseUrl: 'https://api.stripe.com' } })
+	const ownOauth = db.tokens.create({ userId: adminSess.userId, provider: 'google', type: 'oauth', credentials: { accessToken: 'ya29.own', account: 'own@example.com' } })
+	for (const badReauth of [foreignStatic, ownOauth]) {
+		const badReauthCode = db.tokens.createState({ mode: 'setup_static', sessionId: adminSess.id, provider: badReauth.provider, reauthAppId: badReauth.id })
+		assert.equal((await req('GET', `/apps/connect?code=${encodeURIComponent(badReauthCode)}`)).status, 403)
+		assert.equal((await req('POST', '/apps/connect', {
+			headers: { 'content-type': 'application/json', origin: baseUrl() },
+			body: { code: badReauthCode, baseUrl: 'https://api.stripe.com', credentials: 'sk_hijack' }
+		})).status, 403)
+	}
+	assert.equal(db.tokens.get(foreignStatic.id).credentials.headers.authorization, 'Bearer sk_foreign')
 	assert.equal((await req('GET', `/providers/google/connect?code=${encodeURIComponent(setupCode)}`)).status, 403)
 	const wrongConsentRes = await req('POST', '/providers/google/consent', {
 		headers: { 'content-type': 'application/x-www-form-urlencoded', origin: baseUrl() },
@@ -940,4 +957,35 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		assert.equal(createdGhStatic.credentials.baseUrl, 'https://api.github.com')
 		assert.equal(createdGhStatic.credentials.headers.authorization, 'Bearer ghp_form_secret')
 	})
+	for (const modeCase of [
+		{
+			form: { authType: 'basic', basicUser: 'key_id', basicPass: 'sec ' },
+			verify: creds => assert.equal(creds.headers.authorization, `Basic ${Buffer.from('key_id:sec ').toString('base64')}`)
+		},
+		{
+			form: { authType: 'headers', headerName: 'X-Api-Key', headerValue: 'hdr_secret' },
+			verify: creds => assert.equal(creds.headers['x-api-key'], 'hdr_secret')
+		},
+		{
+			form: { authType: 'query', queryName: 'api_key', queryValue: 'q_secret' },
+			verify: creds => assert.equal(creds.query.api_key, 'q_secret')
+		},
+		{
+			form: { authType: 'json', credentialsJson: JSON.stringify({ headers: { authorization: 'Bearer j_tok' }, query: { v: '2' } }) },
+			verify: creds => {
+				assert.equal(creds.headers.authorization, 'Bearer j_tok')
+				assert.equal(creds.query.v, '2')
+			}
+		}
+	]) {
+		const modeProv = `custom_${modeCase.form.authType}`
+		const modeCode = db.tokens.createState({ mode: 'setup_static', sessionId: adminSess.id, provider: modeProv, baseUrl: 'https://api.example.com' })
+		const modeRes = await req('POST', '/apps/connect', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded', origin: baseUrl() },
+			body: new URLSearchParams({ code: modeCode, provider: modeProv, baseUrl: 'https://api.example.com', ...modeCase.form }).toString()
+		})
+		assert.equal(modeRes.status, 200)
+		const stored = db.tokens.listByUserId(adminSess.userId).find(t => t.provider === modeProv)
+		modeCase.verify(stored.credentials)
+	}
 })
