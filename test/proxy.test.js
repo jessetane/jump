@@ -767,6 +767,10 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		assert.equal(restSelName.status, 200)
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer sk_3')
 		assert.equal(captured.at(-1).url, '/b/1?other=2')
+		const restOpts = await req('OPTIONS', '/api/stripe/b/1', { token: session.token, headers: { 'x-upstream-app': 'billing' } })
+		assert.equal(restOpts.status, 200)
+		assert.equal(captured.at(-1).method, 'OPTIONS')
+		assert.equal(captured.at(-1).headers.authorization, 'Bearer sk_3')
 		assert.equal((await mcp(session.token, 'stripe_api', { url: '/b/1', app: 'billing' })).isError, undefined)
 		assert.equal(captured.at(-1).headers['user-agent'], 'jump-test')
 		await withEnv({ USER_AGENT: 'custom-agent/2.0' }, async () => {

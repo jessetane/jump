@@ -30,6 +30,10 @@ test('HTTP security headers, malformed URL 400, OPTIONS CORS, and 404 routing', 
 	}
 	assert.equal((await req('PUT', '/')).status, 405)
 	assert.equal((await req('OPTIONS', '/oauth/token')).status, 204)
+	assert.equal((await req('OPTIONS', '/api/sessions')).status, 204)
+	const { session: corsSess } = createTestSession({ account: 'cors-opt@example.com', withApp: false })
+	assert.equal((await req('OPTIONS', '/api/sessions', { token: corsSess.token })).status, 405)
+	assert.equal((await req('OPTIONS', '/api/sessions', { token: corsSess.token, headers: { 'access-control-request-method': 'GET' } })).status, 204)
 	assert.equal((await req('GET', '/unknown-route')).status, 404)
 	const badRawUrl = await new Promise((resolve, reject) => {
 		const sock = net.createConnection({ host: '127.0.0.1', port: new URL(baseUrl()).port }, () => {

@@ -83,19 +83,20 @@ const server = http.createServer(async (req, res) => {
 		}
 		rawPathname = url.pathname
 		const pathname = rawPathname.replace(/\/+$/, '') || '/'
+		const query = searchParamsToObject(url.searchParams)
+		const token = resolveToken(req)
+		const isProxyOptions = req.method === 'OPTIONS' && pathname.startsWith('/api/') && Boolean(token) && !req.headers['access-control-request-method']
 		if (isCorsRoute(pathname, req.method)) {
 			res.setHeader('access-control-allow-origin', corsOrigin)
 			res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
 			res.setHeader('access-control-allow-headers', 'authorization, content-type, mcp-session-id, mcp-protocol-version, last-event-id, x-api-key, x-upstream-app, accept')
 			res.setHeader('access-control-expose-headers', 'WWW-Authenticate, Mcp-Session-Id, MCP-Protocol-Version')
-			if (req.method === 'OPTIONS') {
+			if (req.method === 'OPTIONS' && !isProxyOptions) {
 				res.statusCode = 204
 				res.end()
 				return
 			}
 		}
-		const query = searchParamsToObject(url.searchParams)
-		const token = resolveToken(req)
 		if (pathname === '/') {
 			if (req.method === 'POST') {
 				await handleMcp(req, res, token)
