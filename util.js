@@ -6,6 +6,7 @@ export {
 	HOP_BY_HOP_HEADERS,
 	getRawBody,
 	getBody,
+	parseJsonObject,
 	parseAppUrl,
 	positiveNumberEnv,
 	getUserAgent,
@@ -490,4 +491,21 @@ function getRawBody (req, maxBytes = 1024 * 1024) {
 
 async function getBody (req, maxBytes = 1024 * 1024) {
 	return (await getRawBody(req, maxBytes)).toString('utf8')
+}
+
+function parseJsonObject (rawBody, { allowedKeys = null, objectError = 'JSON body must be an object' } = {}) {
+	if (!rawBody || !rawBody.trim()) return {}
+	let parsed
+	try {
+		parsed = JSON.parse(rawBody)
+	} catch {
+		throw httpError(400, 'Invalid JSON body')
+	}
+	if (!isPlainObject(parsed)) {
+		throw httpError(400, objectError)
+	}
+	if (allowedKeys) {
+		assertKeys(parsed, allowedKeys)
+	}
+	return parsed
 }

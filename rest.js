@@ -1,6 +1,6 @@
 import * as api from './api/index.js'
 import { isValidProviderId, RESERVED_PROVIDERS } from './providers/index.js'
-import { assertKeys, getBody, getBaseUrl, httpError, isPlainObject, requireBoolean, sendJson, sendText } from './util.js'
+import { assertKeys, getBody, getBaseUrl, httpError, parseJsonObject, requireBoolean, sendJson, sendText } from './util.js'
 
 export {
 	handleRest
@@ -14,18 +14,7 @@ function assertNoBody (req) {
 }
 
 async function parseJsonBody (req) {
-	const rawBody = await getBody(req)
-	if (!rawBody || !rawBody.trim()) return {}
-	let parsed
-	try {
-		parsed = JSON.parse(rawBody)
-	} catch {
-		throw httpError(400, 'Invalid JSON body')
-	}
-	if (!isPlainObject(parsed)) {
-		throw httpError(400, 'JSON body must be an object')
-	}
-	return parsed
+	return parseJsonObject(await getBody(req))
 }
 
 function decodePathParam (raw) {
