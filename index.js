@@ -126,7 +126,7 @@ const server = http.createServer(async (req, res) => {
 			await handleMcp(req, res, token)
 			return
 		}
-		if (pathname.startsWith('/oauth/') || pathname.startsWith('/providers/')) {
+		if (pathname.startsWith('/oauth/') || pathname.startsWith('/providers/') || pathname === '/apps/connect') {
 			if (!checkOauthRateLimit(req, res)) return
 			await handleOauth(req, res, { pathname, url, query })
 			return

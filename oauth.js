@@ -1,9 +1,10 @@
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
+import { buildStaticCredentials, normalizeCredentials, requireValidProviderId } from './api/auth.js'
 import * as db from './db/index.js'
 import { getProvider, isValidProviderId, isOauthProviderAllowed, listOauthProviders, requireOauthProvider, parseGrantedServices, summarizeScopes, normalizeServiceSelections } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
-import { getBody, getBaseUrl, getClientIp, httpError, isPlainObject, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
+import { getBody, getBaseUrl, getClientIp, httpError, isPlainObject, optionalString, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
 
 export {
 	handleOauth,
@@ -13,6 +14,7 @@ export {
 
 const AUTHORIZE_HTML = fs.readFileSync(new URL('./public/authorize.html', import.meta.url), 'utf8')
 const CONNECT_HTML = fs.readFileSync(new URL('./public/connect.html', import.meta.url), 'utf8')
+const STATIC_CONNECT_HTML = fs.readFileSync(new URL('./public/connect-static.html', import.meta.url), 'utf8')
 
 const KNOWN_CLIENT_NAMES = {
 	'antigravity.google': 'Google Antigravity',
@@ -649,11 +651,221 @@ async function handleVerify (req, res, query) {
 	})
 }
 
-function getOwnedOauthApp (session, appId, providerId) {
+function getOwnedApp (session, appId, { providerId = null, type = null } = {}) {
 	if (!session?.admin || !appId) return null
 	const app = db.tokens.get(appId)
-	if (!app || app.userId !== session.userId || app.provider !== providerId || app.type !== 'oauth') return null
+	if (!app || app.userId !== session.userId) return null
+	if (providerId && app.provider !== providerId) return null
+	if (type && app.type !== type) return null
 	return app
+}
+
+function parseStaticFormBody (rawBody, req) {
+	const contentType = String(req?.headers?.['content-type'] || '').split(';')[0].trim().toLowerCase()
+	if (contentType === 'application/json' || contentType.endsWith('+json')) {
+		let parsed
+		try {
+			parsed = rawBody ? JSON.parse(rawBody) : {}
+		} catch {
+			throw httpError(400, 'Invalid JSON body')
+		}
+		if (!isPlainObject(parsed)) {
+			throw httpError(400, 'JSON body must be an object')
+		}
+		return parsed
+	}
+	const params = new URLSearchParams(rawBody)
+	const authType = params.get('authType') || params.get('auth_type') || 'bearer'
+	let credentials
+	if (params.has('credentials') && !params.has('bearer')) {
+		const rawCreds = params.get('credentials')
+		try {
+			credentials = JSON.parse(rawCreds)
+		} catch {
+			credentials = rawCreds
+		}
+	} else if (authType === 'json') {
+		const rawJson = params.get('credentialsJson') || params.get('credentials_json') || ''
+		try {
+			credentials = JSON.parse(rawJson)
+		} catch {
+			throw httpError(400, 'Credentials JSON must be valid JSON')
+		}
+	} else if (authType === 'basic') {
+		credentials = { basic: `${params.get('basicUser') || ''}:${params.get('basicPass') || ''}` }
+	} else if (authType === 'headers') {
+		credentials = { headers: { [params.get('headerName') || '']: params.get('headerValue') || '' } }
+	} else if (authType === 'query') {
+		credentials = { query: { [params.get('queryName') || '']: params.get('queryValue') || '' } }
+	} else {
+		credentials = params.get('bearer') ?? ''
+	}
+	return {
+		code: params.get('code') || '',
+		provider: params.get('provider') ?? undefined,
+		name: params.get('name') ?? undefined,
+		baseUrl: params.get('baseUrl') ?? params.get('base_url') ?? undefined,
+		account: params.get('account') ?? undefined,
+		credentials
+	}
+}
+
+function handleStaticConnectGet (res, query) {
+	const code = query.code || ''
+	const setup = code ? db.tokens.getState(code) : null
+	const session = resolveSetupState(setup, 'setup_static')
+	if (!session) {
+		sendText(res, 'Access denied: invalid or expired setup code.', 403)
+		return
+	}
+	const existingApp = setup.reauthAppId
+		? getOwnedApp(session, setup.reauthAppId, { providerId: setup.provider, type: 'static' })
+		: null
+	if (setup.reauthAppId && !existingApp) {
+		sendText(res, 'Access denied: unauthorized update request.', 403)
+		return
+	}
+	const providerId = existingApp ? existingApp.provider : (setup.provider || '')
+	const providerDef = providerId ? getProvider(providerId) : null
+	const initData = {
+		code,
+		updateMode: Boolean(existingApp),
+		provider: providerId,
+		providerBaseUrl: providerDef?.baseUrl || '',
+		name: existingApp ? (existingApp.name || '') : (setup.name || ''),
+		baseUrl: existingApp ? (existingApp.credentials?.baseUrl || providerDef?.baseUrl || '') : (setup.baseUrl || providerDef?.baseUrl || ''),
+		account: existingApp ? (existingApp.credentials?.account || '') : (setup.account || '')
+	}
+	sendHtml(res, STATIC_CONNECT_HTML.replace('{{INIT_DATA}}', () => JSON.stringify(initData).replace(/</g, '\\u003c')))
+}
+
+function validateStaticSubmission (body, setup, existingApp) {
+	let provider
+	if (existingApp) {
+		if (body.provider !== undefined && body.provider !== null && String(body.provider).trim()) {
+			const submitted = requireValidProviderId(body.provider)
+			if (submitted !== existingApp.provider) {
+				throw httpError(400, `Provider cannot be changed on an existing app (expected "${existingApp.provider}")`)
+			}
+		}
+		provider = existingApp.provider
+	} else {
+		const rawProvider = body.provider !== undefined && body.provider !== null ? body.provider : setup.provider
+		provider = requireValidProviderId(rawProvider)
+	}
+	const providerDef = getProvider(provider)
+	const cleanName = optionalString(body.name, 'name')
+	const rawBaseUrl = body.baseUrl !== undefined && body.baseUrl !== null
+		? (String(body.baseUrl).trim() ? body.baseUrl : (providerDef?.baseUrl || null))
+		: (existingApp?.credentials?.baseUrl || setup.baseUrl || providerDef?.baseUrl || null)
+	const creds = buildStaticCredentials({
+		credentials: body.credentials,
+		baseUrl: rawBaseUrl,
+		account: body.account,
+		providerDef
+	})
+	return { providerDef, cleanName, creds }
+}
+
+async function handleStaticConnectPost (req, res) {
+	if (!checkFormOrigin(req, res)) return
+	res.setHeader('cache-control', 'no-store')
+	const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
+	const wantsJson = contentType === 'application/json' || contentType.endsWith('+json') || String(req.headers.accept || '').includes('application/json')
+	const respondError = (status, message) => {
+		if (wantsJson) {
+			sendJson(res, { error: message }, status, { 'cache-control': 'no-store' })
+		} else {
+			sendText(res, message, status)
+		}
+	}
+	let body
+	try {
+		body = parseStaticFormBody(await getBody(req), req)
+	} catch (err) {
+		respondError(err.status || 400, err.message)
+		return
+	}
+	const code = typeof body.code === 'string' ? body.code.trim() : ''
+	const setup = code ? db.tokens.getState(code) : null
+	const session = resolveSetupState(setup, 'setup_static')
+	if (!session) {
+		respondError(403, 'Access denied: invalid or expired setup code.')
+		return
+	}
+	const existingApp = setup.reauthAppId
+		? getOwnedApp(session, setup.reauthAppId, { providerId: setup.provider, type: 'static' })
+		: null
+	if (setup.reauthAppId && !existingApp) {
+		respondError(403, 'Access denied: unauthorized update request.')
+		return
+	}
+	let validated
+	try {
+		validated = validateStaticSubmission(body, setup, existingApp)
+	} catch (err) {
+		respondError(err.status || 400, err.message)
+		return
+	}
+	const consumed = db.tokens.consumeState(code)
+	const activeSession = resolveSetupState(consumed, 'setup_static')
+	if (!activeSession) {
+		respondError(403, 'Access denied: invalid or expired setup code.')
+		return
+	}
+	const { providerDef, cleanName, creds } = validated
+	const isUpdate = Boolean(existingApp)
+	let appId
+	let appName
+	if (isUpdate) {
+		const target = getOwnedApp(activeSession, consumed.reauthAppId, { providerId: consumed.provider, type: 'static' })
+		if (!target) {
+			respondError(403, 'Access denied: unauthorized update request.')
+			return
+		}
+		appName = cleanName || target.name || providerDef.name
+		db.tokens.updateCredentials(target.id, { name: appName, credentials: creds })
+		appId = target.id
+	} else {
+		appName = cleanName || providerDef.name
+		const created = db.tokens.create({
+			userId: activeSession.userId,
+			provider: providerDef.id,
+			type: 'static',
+			name: appName,
+			credentials: creds
+		})
+		db.links.create({ sessionId: activeSession.id, appId: created.id })
+		appId = created.id
+	}
+	const result = {
+		connected: true,
+		updated: isUpdate,
+		appId,
+		provider: providerDef.id,
+		title: isUpdate ? `${providerDef.name} Updated` : `${providerDef.name} Connected`,
+		subtitle: isUpdate ? `${appName} credentials updated` : `Connected ${appName}`,
+		detail: isUpdate
+			? 'Linked sessions will use the updated credentials automatically.'
+			: 'You can close this window and return to your agent.'
+	}
+	if (wantsJson) {
+		sendJson(res, result, 200, { 'cache-control': 'no-store' })
+		return
+	}
+	sendHtml(res, renderCardPage(result.title, escapeHtml(result.subtitle), `<p class="subtitle">${escapeHtml(result.detail)}</p>`))
+}
+
+async function handleStaticConnect (req, res, query) {
+	if (req.method === 'GET') {
+		handleStaticConnectGet(res, query)
+		return
+	}
+	if (req.method !== 'POST') {
+		sendText(res, 'Method Not Allowed', 405)
+		return
+	}
+	await handleStaticConnectPost(req, res)
 }
 
 async function handleProviderConnect (req, res, query, providerName = 'google', url = null) {
@@ -674,7 +886,7 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 			return
 		}
 		if (setup.reauthAppId) {
-			existingApp = getOwnedOauthApp(session, setup.reauthAppId, provider.id)
+			existingApp = getOwnedApp(session, setup.reauthAppId, { providerId: provider.id, type: 'oauth' })
 			if (!existingApp) {
 				sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
 				return
@@ -738,7 +950,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	}
 	let existingApp = null
 	if (reauthAppId) {
-		existingApp = getOwnedOauthApp(session, reauthAppId, provider.id)
+		existingApp = getOwnedApp(session, reauthAppId, { providerId: provider.id, type: 'oauth' })
 		if (!existingApp) {
 			sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
 			return
@@ -884,7 +1096,7 @@ async function handleCallback (req, res, query) {
 		return
 	}
 	if (oauthState.reauthAppId) {
-		const existingApp = getOwnedOauthApp(session, oauthState.reauthAppId, provider.id)
+		const existingApp = getOwnedApp(session, oauthState.reauthAppId, { providerId: provider.id, type: 'oauth' })
 		if (!existingApp) {
 			sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
 			return
@@ -1101,6 +1313,7 @@ async function handleRevoke (req, res) {
 }
 
 const routes = Object.assign(Object.create(null), {
+	'/apps/connect': (req, res, { query }) => handleStaticConnect(req, res, query),
 	'/oauth/register': (req, res) => handleRegister(req, res),
 	'/oauth/authorize': (req, res, { query }) => handleAuthorize(req, res, query),
 	'/oauth/authorize/consent': (req, res) => handleAuthorizeConsent(req, res),

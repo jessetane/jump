@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset=utf-8>
+		<meta name="viewport" content="width=device-width,initial-scale=1">
+		<title>jump connect</title>
+		<link rel="stylesheet" href="/style.css">
+		<style>
+			.hint {
+				font-size: 0.78rem;
+				color: #666;
+				margin-top: 0.3rem;
+				line-height: 1.35;
+			}
+
+			.form-group input[type=url],
+			.form-group select,
+			.form-group textarea {
+				width: 100%;
+				padding: 10px 12px;
+				font-size: 0.95rem;
+				border: 1px solid #ccc;
+				border-radius: 6px;
+				background: #fff;
+				font-family: inherit;
+			}
+
+			.form-group input[readonly] {
+				background: #f5f5f5;
+				color: #555;
+			}
+
+			.form-group textarea {
+				font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+				font-size: 0.85rem;
+				resize: vertical;
+			}
+
+			.mode-panel {
+				display: none;
+			}
+
+			.mode-panel.active {
+				display: block;
+			}
+
+			.error-msg {
+				display: none;
+				margin-bottom: 1rem;
+				padding: 10px 12px;
+				border-radius: 6px;
+				background: #fdf2f2;
+				border: 1px solid #f5c2c2;
+				color: #9b1c1c;
+				font-size: 0.88rem;
+				line-height: 1.4;
+			}
+
+			.error-msg.visible {
+				display: block;
+			}
+		</style>
+	</head>
+	<body class=column>
+		<div class="view column" id="connect-view">
+			<h1>jump</h1>
+			<p class="subtitle" id="page-subtitle">Connect static API credentials</p>
+			<div class="error-msg" id="error-msg" role="alert"></div>
+			<form id="static-form" method="POST" action="/apps/connect">
+				<input type="hidden" name="code" id="code">
+				<div class="form-group">
+					<label for="provider">Provider</label>
+					<input type="text" id="provider" name="provider" placeholder="e.g. stripe, openai, anthropic" pattern="[a-zA-Z0-9_-]+" required>
+					<div class="hint" id="provider-hint">Sets the MCP tool name (&lt;provider&gt;_api)</div>
+				</div>
+				<div class="form-group">
+					<label for="app-name">App Name (optional)</label>
+					<input type="text" id="app-name" name="name" placeholder="e.g. Stripe Production">
+				</div>
+				<div class="form-group">
+					<label for="base-url">Base URL</label>
+					<input type="url" id="base-url" name="baseUrl" placeholder="https://api.example.com" required>
+				</div>
+				<div class="form-group">
+					<label for="account">Account (optional)</label>
+					<input type="text" id="account" name="account" placeholder="e.g. acct_..., team-slug, user@example.com">
+				</div>
+				<div class="form-group">
+					<label for="auth-type">Authentication</label>
+					<select id="auth-type" name="authType">
+						<option value="bearer">Bearer token</option>
+						<option value="basic">HTTP Basic</option>
+						<option value="headers">Header</option>
+						<option value="query">Query parameter</option>
+						<option value="json">Custom JSON</option>
+					</select>
+				</div>
+				<div class="mode-panel active" data-mode="bearer">
+					<div class="form-group">
+						<label for="bearer-token">Bearer Token</label>
+						<input type="password" id="bearer-token" name="bearer" autocomplete="off" placeholder="Paste API key or bearer token" required>
+					</div>
+				</div>
+				<div class="mode-panel" data-mode="basic">
+					<div class="form-group">
+						<label for="basic-user">Username</label>
+						<input type="text" id="basic-user" name="basicUser" autocomplete="off" placeholder="Username or API key ID" disabled>
+					</div>
+					<div class="form-group">
+						<label for="basic-pass">Password</label>
+						<input type="password" id="basic-pass" name="basicPass" data-optional="true" autocomplete="off" placeholder="Password or secret (optional if key is in username)" disabled>
+					</div>
+				</div>
+				<div class="mode-panel" data-mode="headers">
+					<div class="form-group">
+						<label for="header-name">Header Name</label>
+						<input type="text" id="header-name" name="headerName" autocomplete="off" placeholder="e.g. x-api-key" disabled>
+					</div>
+					<div class="form-group">
+						<label for="header-value">Header Value</label>
+						<input type="password" id="header-value" name="headerValue" autocomplete="off" placeholder="Secret header value" disabled>
+					</div>
+				</div>
+				<div class="mode-panel" data-mode="query">
+					<div class="form-group">
+						<label for="query-name">Parameter Name</label>
+						<input type="text" id="query-name" name="queryName" autocomplete="off" placeholder="e.g. api_key" disabled>
+					</div>
+					<div class="form-group">
+						<label for="query-value">Parameter Value</label>
+						<input type="password" id="query-value" name="queryValue" autocomplete="off" placeholder="Secret query value" disabled>
+					</div>
+				</div>
+				<div class="mode-panel" data-mode="json">
+					<div class="form-group">
+						<label for="credentials-json">Credentials JSON</label>
+						<textarea id="credentials-json" name="credentialsJson" rows="5" placeholder='{"headers": {"x-api-key": "...", "anthropic-version": "2023-06-01"}}' disabled></textarea>
+						<div class="hint">Supports a bearer string or object with bearer, basic, headers, and query.</div>
+					</div>
+				</div>
+				<button type="submit" id="submit-btn">Connect App</button>
+			</form>
+		</div>
+		<script>
+			const initData = {{INIT_DATA}}
+
+			function updateProviderHint () {
+				const input = document.getElementById('provider')
+				const hint = document.getElementById('provider-hint')
+				if (!input || !hint) return
+				const slug = input.value.trim().toLowerCase()
+				hint.textContent = slug
+					? 'Exposes tool "' + slug + '_api" and route "/api/' + slug + '/*"'
+					: 'Sets the MCP tool name (<provider>_api)'
+			}
+
+			function setAuthMode (mode) {
+				const panels = document.querySelectorAll('.mode-panel')
+				for (const panel of panels) {
+					const active = panel.dataset.mode === mode
+					panel.classList.toggle('active', active)
+					for (const field of panel.querySelectorAll('input, textarea')) {
+						field.disabled = !active
+						field.required = active && field.dataset.optional !== 'true'
+					}
+				}
+			}
+
+			function showError (msg) {
+				const errEl = document.getElementById('error-msg')
+				if (!errEl) return
+				errEl.textContent = msg || ''
+				errEl.classList.toggle('visible', Boolean(msg))
+			}
+
+			function buildCredentials (mode) {
+				if (mode === 'bearer') {
+					return document.getElementById('bearer-token').value
+				}
+				if (mode === 'basic') {
+					const user = document.getElementById('basic-user').value
+					const pass = document.getElementById('basic-pass').value
+					return { basic: user + ':' + pass }
+				}
+				if (mode === 'headers') {
+					const name = document.getElementById('header-name').value
+					const val = document.getElementById('header-value').value
+					return { headers: { [name]: val } }
+				}
+				if (mode === 'query') {
+					const name = document.getElementById('query-name').value
+					const val = document.getElementById('query-value').value
+					return { query: { [name]: val } }
+				}
+				const raw = document.getElementById('credentials-json').value.trim()
+				if (!raw) throw new Error('Credentials JSON is required')
+				try {
+					return JSON.parse(raw)
+				} catch {
+					throw new Error('Credentials JSON must be valid JSON')
+				}
+			}
+
+			function showSuccess (title, subtitle, detail) {
+				document.title = title
+				const viewEl = document.getElementById('connect-view')
+				viewEl.replaceChildren()
+				const h1 = document.createElement('h1')
+				h1.textContent = 'jump'
+				const sub = document.createElement('p')
+				sub.className = 'subtitle'
+				sub.textContent = subtitle
+				const note = document.createElement('p')
+				note.className = 'subtitle'
+				note.textContent = detail
+				viewEl.appendChild(h1)
+				viewEl.appendChild(sub)
+				viewEl.appendChild(note)
+			}
+
+			async function handleSubmit (evt) {
+				evt.preventDefault()
+				showError('')
+				const mode = document.getElementById('auth-type').value
+				let credentials
+				try {
+					credentials = buildCredentials(mode)
+				} catch (err) {
+					showError(err.message)
+					return
+				}
+				const submitBtn = document.getElementById('submit-btn')
+				const origText = submitBtn.textContent
+				submitBtn.disabled = true
+				submitBtn.textContent = 'Saving...'
+				try {
+					const res = await fetch('/apps/connect', {
+						method: 'POST',
+						headers: {
+							'content-type': 'application/json',
+							accept: 'application/json'
+						},
+						body: JSON.stringify({
+							code: document.getElementById('code').value,
+							provider: document.getElementById('provider').value,
+							name: document.getElementById('app-name').value,
+							baseUrl: document.getElementById('base-url').value,
+							account: document.getElementById('account').value,
+							credentials
+						})
+					})
+					const data = await res.json().catch(() => ({}))
+					if (!res.ok) {
+						showError(data.error || ('Request failed (' + res.status + ')'))
+						return
+					}
+					showSuccess(data.title, data.subtitle, data.detail)
+				} catch {
+					showError('Network error submitting credentials. Please try again.')
+				} finally {
+					if (submitBtn.isConnected) {
+						submitBtn.disabled = false
+						submitBtn.textContent = origText
+					}
+				}
+			}
+
+			function init () {
+				const codeEl = document.getElementById('code')
+				const providerEl = document.getElementById('provider')
+				const nameEl = document.getElementById('app-name')
+				const baseUrlEl = document.getElementById('base-url')
+				const accountEl = document.getElementById('account')
+				const subtitleEl = document.getElementById('page-subtitle')
+				const submitEl = document.getElementById('submit-btn')
+				const authTypeEl = document.getElementById('auth-type')
+				const formEl = document.getElementById('static-form')
+				if (codeEl) codeEl.value = initData.code || ''
+				if (providerEl && initData.provider) providerEl.value = initData.provider
+				if (nameEl && initData.name) nameEl.value = initData.name
+				if (baseUrlEl && initData.baseUrl) baseUrlEl.value = initData.baseUrl
+				if (accountEl && initData.account) accountEl.value = initData.account
+				if (initData.updateMode) {
+					if (providerEl) providerEl.readOnly = true
+					if (subtitleEl) subtitleEl.textContent = 'Update ' + (initData.name || initData.provider || 'app') + ' credentials'
+					if (submitEl) submitEl.textContent = 'Update Credentials'
+				} else if (initData.provider && subtitleEl) {
+					subtitleEl.textContent = 'Connect ' + (initData.name || initData.provider) + ' credentials'
+				}
+				updateProviderHint()
+				setAuthMode(authTypeEl.value)
+				providerEl.addEventListener('input', updateProviderHint)
+				authTypeEl.addEventListener('change', function () {
+					showError('')
+					setAuthMode(authTypeEl.value)
+				})
+				formEl.addEventListener('submit', handleSubmit)
+			}
+
+			init()
+		</script>
+	</body>
+</html>
