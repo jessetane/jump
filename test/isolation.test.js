@@ -60,10 +60,10 @@ test('shared apps: pending shares without stub users, ceiling policy intersectio
 			action: 'connect_app',
 			provider: 'stripe',
 			name: 'Acme Stripe',
-			account: 'acct_acme',
 			credentials: 'sk_live_sarah_secret',
 			baseUrl: upstreamUrl
 		})).content[0].text).app
+		assert.equal('account' in sarahApp, false)
 		const usersBefore = db.sqlite.prepare('SELECT COUNT(*) AS n FROM users').get().n
 		const shareRes = JSON.parse((await mcp(sarah.session.token, 'admin', {
 			action: 'share_app',

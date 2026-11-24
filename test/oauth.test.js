@@ -758,8 +758,7 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		action: 'connect_app',
 		provider: 'stripe',
 		name: 'Billing Prod',
-		baseUrl: 'https://api.stripe.com',
-		account: 'acct_prod'
+		baseUrl: 'https://api.stripe.com'
 	})).content[0].text)
 	assert.equal(startRes.actionRequired, 'browser_flow')
 	assert.match(startRes.connectUrl, /^https?:\/\/[^/]+\/apps\/connect\?code=/)
@@ -776,6 +775,7 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	assert.equal(pageRes.status, 200)
 	assert.equal(pageRes.headers.get('cache-control'), 'no-store')
 	assert.equal(pageRes.headers.get('x-frame-options'), 'DENY')
+	assert.equal(pageRes.text.includes('name="account"'), false, 'Static connect UI must not render an account input')
 	const initData = parseInit(pageRes.text)
 	assert.deepEqual(initData, {
 		code: setupCode,
@@ -783,14 +783,18 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		provider: 'stripe',
 		providerBaseUrl: '',
 		name: 'Billing Prod',
-		baseUrl: 'https://api.stripe.com',
-		account: 'acct_prod'
+		baseUrl: 'https://api.stripe.com'
 	})
 	const crossOriginRes = await req('POST', '/apps/connect', {
 		headers: { 'content-type': 'application/json', origin: 'https://evil.example' },
 		body: { code: setupCode, provider: 'stripe', baseUrl: 'https://api.stripe.com', credentials: 'sk_live_secret' }
 	})
 	assert.equal(crossOriginRes.status, 403)
+	const accountErr = await req('POST', '/apps/connect', {
+		headers: { 'content-type': 'application/json', origin: baseUrl() },
+		body: { code: setupCode, provider: 'stripe', baseUrl: 'https://api.stripe.com', account: 'acct_prod', credentials: 'sk_live_secret' }
+	})
+	assert.equal(accountErr.status, 400)
 	const badSubmit = await req('POST', '/apps/connect', {
 		headers: { 'content-type': 'application/json', origin: baseUrl() },
 		body: { code: setupCode, provider: 'stripe', baseUrl: 'http://insecure.example.com', credentials: 'sk_live_secret' }
@@ -804,7 +808,6 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 			provider: 'stripe',
 			name: 'Billing Prod',
 			baseUrl: 'https://api.stripe.com',
-			account: 'acct_prod',
 			credentials: 'sk_live_browser_secret'
 		}
 	})
@@ -817,7 +820,7 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	assert.equal(createdStripe.provider, 'stripe')
 	assert.equal(createdStripe.name, 'Billing Prod')
 	assert.equal(createdStripe.credentials.baseUrl, 'https://api.stripe.com')
-	assert.equal(createdStripe.credentials.account, 'acct_prod')
+	assert.equal(createdStripe.credentials.account, undefined)
 	assert.equal(createdStripe.credentials.headers.authorization, 'Bearer sk_live_browser_secret')
 	assert.ok(db.links.listBySessionId(adminSess.id).some(l => l.appId === createdStripe.id), 'static browser connect auto-links new app to requesting session')
 	assert.equal((await req('POST', '/apps/connect', {
@@ -837,22 +840,31 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		provider: 'stripe',
 		providerBaseUrl: '',
 		name: 'Billing Prod',
-		baseUrl: 'https://api.stripe.com',
-		account: 'acct_prod'
+		baseUrl: 'https://api.stripe.com'
 	})
 	const changeProviderErr = await req('POST', '/apps/connect', {
 		headers: { 'content-type': 'application/json', origin: baseUrl() },
 		body: { code: rotateCode, provider: 'anthropic', baseUrl: 'https://api.anthropic.com', credentials: 'sk_new' }
 	})
 	assert.equal(changeProviderErr.status, 400)
+	const rotatePreserve = await req('POST', '/apps/connect', {
+		headers: { 'content-type': 'application/json', origin: baseUrl() },
+		body: { code: rotateCode, credentials: 'sk_rotated_preserve' }
+	})
+	assert.equal(rotatePreserve.status, 200)
+	assert.equal(rotatePreserve.data.updated, true)
+	assert.equal(rotatePreserve.data.appId, createdStripe.id)
+	assert.equal(db.tokens.get(createdStripe.id).name, 'Billing Prod', 'Omitting name on rotation preserves existing app name')
+	assert.equal(db.tokens.get(createdStripe.id).credentials.baseUrl, 'https://api.stripe.com', 'Omitting baseUrl on rotation preserves existing baseUrl')
+	const rotateClearStart = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', appId: createdStripe.id })).content[0].text)
+	const rotateClearCode = new URL(rotateClearStart.connectUrl).searchParams.get('code')
 	const rotateSubmit = await req('POST', '/apps/connect', {
 		headers: { 'content-type': 'application/json', origin: baseUrl() },
 		body: {
-			code: rotateCode,
+			code: rotateClearCode,
 			provider: 'stripe',
-			name: 'Billing Rotated',
+			name: '',
 			baseUrl: 'https://api.stripe.com/v2',
-			account: 'acct_v2',
 			credentials: { headers: { 'x-api-key': 'sk_rotated' }, query: { api_version: '2026-01-01' } }
 		}
 	})
@@ -860,12 +872,15 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	assert.equal(rotateSubmit.data.updated, true)
 	assert.equal(rotateSubmit.data.appId, createdStripe.id)
 	const updatedStripe = db.tokens.get(createdStripe.id)
-	assert.equal(updatedStripe.name, 'Billing Rotated')
+	assert.equal(updatedStripe.name, 'Stripe', 'Explicit empty name resets app name to provider default')
 	assert.equal(updatedStripe.credentials.baseUrl, 'https://api.stripe.com/v2')
-	assert.equal(updatedStripe.credentials.account, 'acct_v2')
+	assert.equal(updatedStripe.credentials.account, undefined)
 	assert.equal(updatedStripe.credentials.headers['x-api-key'], 'sk_rotated')
 	assert.equal(updatedStripe.credentials.headers.authorization, undefined)
 	assert.equal(updatedStripe.credentials.query.api_version, '2026-01-01')
+	const listedApps = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'list_apps' })).content[0].text).apps
+	const listedStripe = listedApps.find(a => a.id === createdStripe.id)
+	assert.equal('account' in listedStripe, false, 'list_apps must omit account on static apps')
 	const blankStart = await req('POST', '/api/apps', { token: adminSess.token, body: { type: 'static' } })
 	assert.equal(blankStart.status, 201)
 	assert.equal(blankStart.data.actionRequired, 'browser_flow')

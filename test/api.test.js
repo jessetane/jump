@@ -151,12 +151,15 @@ test('canonical REST contract rejects method/payload smuggling, trailing slashes
 	assert.equal((await req('POST', '/api/apps', { token: session.token, body: { provider: 'constructor', credentials: 'sk' } })).status, 400)
 	assert.equal((await req('DELETE', '/api/apps/%E0%A4%A', { token: session.token })).status, 400)
 	const specialApp = db.tokens.create({ id: 'app:sp/id%1', userId: session.userId, provider: 'stripe', type: 'static', credentials: { headers: { authorization: 'Bearer sk' }, baseUrl: 'https://api.stripe.com' } })
-	assert.equal((await req('PATCH', `/api/apps/${encodeURIComponent(specialApp.id)}`, { token: session.token, body: { name: 'Renamed', credentials: 'sk_new', baseUrl: 'https://api.stripe.com/v1', account: 'biz@stripe.test' } })).status, 200)
+	const patchStatic = await req('PATCH', `/api/apps/${encodeURIComponent(specialApp.id)}`, { token: session.token, body: { name: 'Renamed', credentials: 'sk_new', baseUrl: 'https://api.stripe.com/v1' } })
+	assert.equal(patchStatic.status, 200)
+	assert.equal('account' in patchStatic.data.app, false, 'Static app responses must omit account')
 	const updatedSpecial = db.tokens.get(specialApp.id)
 	assert.equal(updatedSpecial.name, 'Renamed')
 	assert.equal(updatedSpecial.credentials.headers.authorization, 'Bearer sk_new')
 	assert.equal(updatedSpecial.credentials.baseUrl, 'https://api.stripe.com/v1')
-	assert.equal(updatedSpecial.credentials.account, 'biz@stripe.test')
+	assert.equal(updatedSpecial.credentials.account, undefined)
+	assert.equal((await req('PATCH', `/api/apps/${encodeURIComponent(specialApp.id)}`, { token: session.token, body: { account: 'biz@stripe.test' } })).status, 400)
 	for (const forbiddenOauthPatch of [{ credentials: 'bad' }, { baseUrl: 'https://www.googleapis.com' }, { account: 'x' }]) {
 		assert.equal((await req('PATCH', `/api/apps/${app.id}`, { token: session.token, body: forbiddenOauthPatch })).status, 400)
 	}
@@ -233,6 +236,7 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 		{ action: 'connect_app', provider: 'google', account: 'x@example.com' },
 		{ action: 'connect_app', provider: 'github', type: 'static', services: ['repo'] },
 		{ action: 'connect_app', provider: 'stripe', baseUrl: 'http://insecure.example.com' },
+		{ action: 'connect_app', provider: 'stripe', credentials: 'sk_test', baseUrl: 'https://api.stripe.com', account: 'acct_123' },
 		{ action: 'connect_app', credentials: 'sk_test', baseUrl: 'https://api.stripe.com' },
 		{ action: 'list_apps', provider: 'stripe' },
 		{ action: 'update_session' },
