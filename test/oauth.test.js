@@ -746,3 +746,169 @@ test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login,
 		assert.ok(bootstrapped?.admin)
 	})
 })
+
+test('static app browser connect flow supports pre-filled metadata, custom providers, OAuth-provider static tokens, JSON credentials, and credential rotation without exposing keys to agents', async () => {
+	const parseInit = html => JSON.parse(html.match(/const initData = (\{[^\n]+\})/)[1])
+	const { session: adminSess } = createTestSession({ account: 'static-ui@example.com', admin: true })
+	const nonAdmin = db.tokens.create({ userId: adminSess.userId, provider: 'self', admin: 0 })
+	const toolsRes = await req('POST', '/mcp', { token: adminSess.token, body: { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} } })
+	const adminSchema = toolsRes.data.result.tools.find(t => t.name === 'admin').inputSchema
+	assert.deepEqual(adminSchema.properties.type.enum, ['oauth', 'static'])
+	const startRes = JSON.parse((await mcp(adminSess.token, 'admin', {
+		action: 'connect_app',
+		provider: 'stripe',
+		name: 'Billing Prod',
+		baseUrl: 'https://api.stripe.com',
+		account: 'acct_prod'
+	})).content[0].text)
+	assert.equal(startRes.actionRequired, 'browser_flow')
+	assert.match(startRes.connectUrl, /^https?:\/\/[^/]+\/apps\/connect\?code=/)
+	const setupCode = new URL(startRes.connectUrl).searchParams.get('code')
+	assert.equal((await req('GET', '/apps/connect')).status, 403)
+	assert.equal((await req('GET', '/apps/connect?code=bogus')).status, 403)
+	assert.equal((await req('PUT', `/apps/connect?code=${encodeURIComponent(setupCode)}`)).status, 405)
+	const oauthSetupCode = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSess.id, provider: 'google' })
+	assert.equal((await req('GET', `/apps/connect?code=${encodeURIComponent(oauthSetupCode)}`)).status, 403)
+	assert.equal((await req('GET', `/providers/google/connect?code=${encodeURIComponent(setupCode)}`)).status, 403)
+	const nonAdminStatic = db.tokens.createState({ mode: 'setup_static', sessionId: nonAdmin.id, provider: 'stripe' })
+	assert.equal((await req('GET', `/apps/connect?code=${encodeURIComponent(nonAdminStatic)}`)).status, 403)
+	const pageRes = await req('GET', `/apps/connect?code=${encodeURIComponent(setupCode)}`)
+	assert.equal(pageRes.status, 200)
+	assert.equal(pageRes.headers.get('cache-control'), 'no-store')
+	assert.equal(pageRes.headers.get('x-frame-options'), 'DENY')
+	const initData = parseInit(pageRes.text)
+	assert.deepEqual(initData, {
+		code: setupCode,
+		updateMode: false,
+		provider: 'stripe',
+		providerBaseUrl: '',
+		name: 'Billing Prod',
+		baseUrl: 'https://api.stripe.com',
+		account: 'acct_prod'
+	})
+	const crossOriginRes = await req('POST', '/apps/connect', {
+		headers: { 'content-type': 'application/json', origin: 'https://evil.example' },
+		body: { code: setupCode, provider: 'stripe', baseUrl: 'https://api.stripe.com', credentials: 'sk_live_secret' }
+	})
+	assert.equal(crossOriginRes.status, 403)
+	const badSubmit = await req('POST', '/apps/connect', {
+		headers: { 'content-type': 'application/json', origin: baseUrl() },
+		body: { code: setupCode, provider: 'stripe', baseUrl: 'http://insecure.example.com', credentials: 'sk_live_secret' }
+	})
+	assert.equal(badSubmit.status, 400)
+	assert.match(badSubmit.data.error, /Valid https:\/\/ baseUrl/)
+	const okSubmit = await req('POST', '/apps/connect', {
+		headers: { 'content-type': 'application/json', origin: baseUrl() },
+		body: {
+			code: setupCode,
+			provider: 'stripe',
+			name: 'Billing Prod',
+			baseUrl: 'https://api.stripe.com',
+			account: 'acct_prod',
+			credentials: 'sk_live_browser_secret'
+		}
+	})
+	assert.equal(okSubmit.status, 200)
+	assert.equal(okSubmit.data.connected, true)
+	assert.equal(okSubmit.data.updated, false)
+	assert.equal(JSON.stringify(okSubmit.data).includes('sk_live_browser_secret'), false)
+	const createdStripe = db.tokens.get(okSubmit.data.appId)
+	assert.equal(createdStripe.type, 'static')
+	assert.equal(createdStripe.provider, 'stripe')
+	assert.equal(createdStripe.name, 'Billing Prod')
+	assert.equal(createdStripe.credentials.baseUrl, 'https://api.stripe.com')
+	assert.equal(createdStripe.credentials.account, 'acct_prod')
+	assert.equal(createdStripe.credentials.headers.authorization, 'Bearer sk_live_browser_secret')
+	assert.ok(db.links.listBySessionId(adminSess.id).some(l => l.appId === createdStripe.id), 'static browser connect auto-links new app to requesting session')
+	assert.equal((await req('POST', '/apps/connect', {
+		headers: { 'content-type': 'application/json', origin: baseUrl() },
+		body: { code: setupCode, provider: 'stripe', baseUrl: 'https://api.stripe.com', credentials: 'sk_replay' }
+	})).status, 403)
+	const rotateStart = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', appId: createdStripe.id })).content[0].text)
+	assert.equal(rotateStart.actionRequired, 'browser_flow')
+	const rotateCode = new URL(rotateStart.connectUrl).searchParams.get('code')
+	const rotatePage = await req('GET', `/apps/connect?code=${encodeURIComponent(rotateCode)}`)
+	assert.equal(rotatePage.status, 200)
+	assert.equal(rotatePage.text.includes('sk_live_browser_secret'), false, 'existing static secrets must never be sent to browser UI')
+	const rotateInit = parseInit(rotatePage.text)
+	assert.deepEqual(rotateInit, {
+		code: rotateCode,
+		updateMode: true,
+		provider: 'stripe',
+		providerBaseUrl: '',
+		name: 'Billing Prod',
+		baseUrl: 'https://api.stripe.com',
+		account: 'acct_prod'
+	})
+	const changeProviderErr = await req('POST', '/apps/connect', {
+		headers: { 'content-type': 'application/json', origin: baseUrl() },
+		body: { code: rotateCode, provider: 'anthropic', baseUrl: 'https://api.anthropic.com', credentials: 'sk_new' }
+	})
+	assert.equal(changeProviderErr.status, 400)
+	const rotateSubmit = await req('POST', '/apps/connect', {
+		headers: { 'content-type': 'application/json', origin: baseUrl() },
+		body: {
+			code: rotateCode,
+			provider: 'stripe',
+			name: 'Billing Rotated',
+			baseUrl: 'https://api.stripe.com/v2',
+			account: 'acct_v2',
+			credentials: { headers: { 'x-api-key': 'sk_rotated' }, query: { api_version: '2026-01-01' } }
+		}
+	})
+	assert.equal(rotateSubmit.status, 200)
+	assert.equal(rotateSubmit.data.updated, true)
+	assert.equal(rotateSubmit.data.appId, createdStripe.id)
+	const updatedStripe = db.tokens.get(createdStripe.id)
+	assert.equal(updatedStripe.name, 'Billing Rotated')
+	assert.equal(updatedStripe.credentials.baseUrl, 'https://api.stripe.com/v2')
+	assert.equal(updatedStripe.credentials.account, 'acct_v2')
+	assert.equal(updatedStripe.credentials.headers['x-api-key'], 'sk_rotated')
+	assert.equal(updatedStripe.credentials.headers.authorization, undefined)
+	assert.equal(updatedStripe.credentials.query.api_version, '2026-01-01')
+	const blankStart = await req('POST', '/api/apps', { token: adminSess.token, body: { type: 'static' } })
+	assert.equal(blankStart.status, 201)
+	assert.equal(blankStart.data.actionRequired, 'browser_flow')
+	const blankCode = new URL(blankStart.data.connectUrl).searchParams.get('code')
+	const blankInit = parseInit((await req('GET', `/apps/connect?code=${encodeURIComponent(blankCode)}`)).text)
+	assert.equal(blankInit.provider, '')
+	const blankSubmit = await req('POST', '/apps/connect', {
+		headers: { 'content-type': 'application/json', origin: baseUrl() },
+		body: {
+			code: blankCode,
+			provider: 'anthropic',
+			baseUrl: 'https://api.anthropic.com',
+			credentials: { headers: { 'x-api-key': 'sk-ant-123', 'anthropic-version': '2023-06-01' } }
+		}
+	})
+	assert.equal(blankSubmit.status, 200)
+	const createdAnthropic = db.tokens.get(blankSubmit.data.appId)
+	assert.equal(createdAnthropic.provider, 'anthropic')
+	assert.equal(createdAnthropic.credentials.headers['anthropic-version'], '2023-06-01')
+	await withEnv({ GITHUB_CLIENT_ID: 'gh-id', GITHUB_CLIENT_SECRET: 'gh-sec' }, async () => {
+		const ghStaticStart = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'github', type: 'static', name: 'GitHub PAT' })).content[0].text)
+		assert.equal(ghStaticStart.actionRequired, 'browser_flow')
+		const ghStaticCode = new URL(ghStaticStart.connectUrl).searchParams.get('code')
+		const ghInit = parseInit((await req('GET', `/apps/connect?code=${encodeURIComponent(ghStaticCode)}`)).text)
+		assert.equal(ghInit.provider, 'github')
+		assert.equal(ghInit.baseUrl, 'https://api.github.com')
+		const ghFormSubmit = await req('POST', '/apps/connect', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded', origin: baseUrl() },
+			body: new URLSearchParams({
+				code: ghStaticCode,
+				provider: 'github',
+				name: 'GitHub PAT',
+				baseUrl: '',
+				authType: 'bearer',
+				bearer: 'ghp_form_secret'
+			}).toString()
+		})
+		assert.equal(ghFormSubmit.status, 200)
+		assert.match(ghFormSubmit.text, /GitHub Connected/)
+		assert.match(ghFormSubmit.text, /Connected GitHub PAT/)
+		assert.equal(ghFormSubmit.text.includes('ghp_form_secret'), false)
+		const createdGhStatic = db.tokens.listByUserId(adminSess.userId).find(t => t.provider === 'github' && t.type === 'static' && t.name === 'GitHub PAT')
+		assert.equal(createdGhStatic.credentials.baseUrl, 'https://api.github.com')
+		assert.equal(createdGhStatic.credentials.headers.authorization, 'Bearer ghp_form_secret')
+	})
+})
