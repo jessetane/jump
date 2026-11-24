@@ -148,19 +148,18 @@ function buildAdminTool () {
 function buildProviderTool (providerName, providerLinks = []) {
 	const provider = getProvider(providerName)
 	const id = provider.id
-	const linkedApps = api.proxy.formatLinkedApps(providerLinks, provider)
+	const linkedApps = api.proxy.formatLinkedApps(providerLinks, provider, { includeBaseUrl: true })
 	const appsHint = linkedApps.length > 0 ? ` Linked apps: ${linkedApps.join(', ')}.` : ''
-	const baseHint = providerLinks.find(l => l.app?.credentials?.baseUrl)?.app?.credentials?.baseUrl || provider.baseUrl
 	const multi = providerLinks.length > 1
 	return {
 		name: `${id}_api`,
-		description: `${provider.toolDescription(baseHint)}${appsHint}`,
+		description: `${provider.toolDescription()}${appsHint}`,
 		inputSchema: {
 			type: 'object',
 			properties: {
 				url: {
 					type: 'string',
-					description: provider.urlParamDescription(baseHint)
+					description: provider.urlParamDescription()
 				},
 				method: {
 					type: 'string',

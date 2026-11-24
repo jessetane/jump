@@ -436,7 +436,7 @@ function countValues (items, getKey) {
 	return counts
 }
 
-function formatLinkedApps (providerLinks, provider) {
+function formatLinkedApps (providerLinks, provider, { includeBaseUrl = false } = {}) {
 	const nameCounts = countValues(providerLinks, l => (l.app?.name || '').toLowerCase())
 	const accCounts = countValues(providerLinks, l => (l.app?.credentials?.account || '').toLowerCase())
 	const defaultName = provider.name.toLowerCase()
@@ -446,12 +446,18 @@ function formatLinkedApps (providerLinks, provider) {
 		const id = l.app?.id || ''
 		const nameDup = nameCounts.get(name.toLowerCase()) > 1
 		const accDup = accCounts.get(acc.toLowerCase()) > 1
+		let label
 		if (name && (name.toLowerCase() !== defaultName || accDup || (nameDup && !acc))) {
-			if (!nameDup) return acc ? `${name} (${acc})` : name
-			return acc && !accDup ? `${name} (${acc})` : `${name} (${acc ? `${acc}, ` : ''}${id})`
+			if (!nameDup) label = acc ? `${name} (${acc})` : name
+			else label = acc && !accDup ? `${name} (${acc})` : `${name} (${acc ? `${acc}, ` : ''}${id})`
+		} else if (acc) {
+			label = accDup ? `${acc} (${id})` : acc
+		} else {
+			label = name || id
 		}
-		if (acc) return accDup ? `${acc} (${id})` : acc
-		return name || id
+		if (!label) return ''
+		const base = includeBaseUrl ? (l.app?.credentials?.baseUrl || provider.baseUrl) : null
+		return base ? `${label} [${base}]` : label
 	}).filter(Boolean)
 }
 

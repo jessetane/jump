@@ -306,19 +306,15 @@ function createProvider (config) {
 		supportsAuth,
 		supportsApp,
 		...(services && { services }),
-		toolDescription (baseHint) {
+		toolDescription () {
 			if (typeof rawConfig.toolDescription === 'string') return rawConfig.toolDescription
-			if (typeof rawConfig.toolDescription === 'function') return rawConfig.toolDescription(baseHint)
-			const effectiveHint = baseHint || baseUrl
-			return `Make HTTP requests to ${label} REST APIs${effectiveHint ? ` (${effectiveHint})` : ''}. Automatically attaches the configured ${label} credentials.`
+			if (typeof rawConfig.toolDescription === 'function') return rawConfig.toolDescription()
+			return `Make HTTP requests to ${label} REST APIs. Automatically attaches the configured ${label} credentials.`
 		},
-		urlParamDescription (baseHint) {
+		urlParamDescription () {
 			if (typeof rawConfig.urlParamDescription === 'string') return rawConfig.urlParamDescription
-			if (typeof rawConfig.urlParamDescription === 'function') return rawConfig.urlParamDescription(baseHint)
-			const effectiveHint = baseHint || baseUrl
-			return effectiveHint
-				? `Full URL or relative path against ${effectiveHint} (e.g. "/v1/customers").`
-				: 'Target HTTPS URL (or relative path if baseUrl is configured on the app).'
+			if (typeof rawConfig.urlParamDescription === 'function') return rawConfig.urlParamDescription()
+			return "Target HTTPS URL or relative path against the linked app's base URL."
 		},
 		...(oauth && {
 			requireEnv () {
