@@ -184,7 +184,7 @@ For `ALL /api/:provider/*`, authenticate with your session `Authorization: Beare
 Jump-issued tokens and codes are stored as `SHA-256` digests, and upstream credentials are encrypted with `AES-256-GCM` + per-write `HKDF-SHA256` ([`crypto.js`](crypto.js), [`db/tokens.js`](db/tokens.js)). Keys load from systemd `$CREDENTIALS_DIRECTORY/jump.key`, `ENCRYPTION_KEY`, or `<DB_PATH>.key` (`0600`), with rotation via `.old` or `<new>,<old>`.
 
 ### Authentication & sessions
-Client sign-in uses OAuth 2.1 with `S256` PKCE, `ALLOWED_REDIRECT_DOMAINS` and optional `SSO_DOMAINS` IdP pinning ([`oauth.js`](oauth.js), [`sso.js`](sso.js)). Non-admin sessions only see their linked `<provider>_api` tools and cannot inspect apps, policies, or other sessions ([`api/auth.js`](api/auth.js)).
+Client sign-in uses OAuth 2.1 with `S256` PKCE, `ALLOWED_REDIRECT_DOMAINS`, optional `OAUTH_PROVIDERS` role filtering (`auth` / `app`), and optional `SSO_DOMAINS` IdP pinning ([`oauth.js`](oauth.js), [`sso.js`](sso.js)). Non-admin sessions only see their linked `<provider>_api` tools and cannot inspect apps, policies, or other sessions ([`api/auth.js`](api/auth.js)).
 
 ### Upstream isolation & policies
 Secrets never appear in tool schemas, API responses, or logs, and are stripped across cross-origin redirects ([`api/proxy.js`](api/proxy.js), [`mcp.js`](mcp.js)). Every hop resolves DNS against a private/metadata IP blocklist ([`util.js`](util.js)) and evaluates ordered `allow`/`deny` rules, with owner share policies enforced as an immutable ceiling ([`policy.js`](policy.js)).
