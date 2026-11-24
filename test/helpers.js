@@ -19,7 +19,7 @@ process.env.ALLOWED_REDIRECT_DOMAINS = 'chatgpt.com,*.antigravity.google,antigra
 process.env.OAUTH_RATE_LIMIT = '10000'
 process.env.USER_AGENT = 'jump-test'
 
-const { server, bootstrapLocalAdmin } = await import('../index.js')
+const { server, bootstrapLocalAdmin } = await import('../server.js')
 const db = await import('../db/index.js')
 const providers = await import('../providers/index.js')
 const api = await import('../api/index.js')
