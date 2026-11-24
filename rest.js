@@ -158,8 +158,7 @@ async function dispatchRest (req, res, handlerTable, { token, query, id, idKey }
 }
 
 async function handleRest (req, res, { pathname, url, query, token }) {
-	const rawPathname = url?.pathname || pathname
-	const match = rawPathname.match(/^\/api\/([^/]+)(?:\/([^/]+))?$/)
+	const match = pathname.match(/^\/api\/([^/]+)(?:\/([^/]+))?$/)
 	if (match) {
 		const [, resourceName, encodedId] = match
 		const resource = resources[resourceName]
@@ -179,7 +178,7 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 			throw httpError(404, 'not found')
 		}
 	}
-	const restMatch = rawPathname.match(/^\/api\/([^/]+)\/(.+)$/)
+	const restMatch = pathname.match(/^\/api\/([^/]+)\/(.+)$/)
 	if (restMatch) {
 		const provider = restMatch[1].toLowerCase()
 		if (!isValidProviderId(provider)) {

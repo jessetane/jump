@@ -1,10 +1,10 @@
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
-import { buildStaticCredentials, requireValidProviderId } from './api/auth.js'
+import * as api from './api/index.js'
 import * as db from './db/index.js'
 import { getProvider, isValidProviderId, isOauthProviderAllowed, listOauthProviders, requireOauthProvider, parseGrantedServices, summarizeScopes, normalizeServiceSelections } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
-import { getBody, getBaseUrl, getClientIp, httpError, parseJsonObject, optionalString, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
+import { getBody, getBaseUrl, getClientIp, httpError, isJsonMime, optionalString, parseJsonObject, redirect, searchParamsToObject, sendHtml, sendJson, sendText, isLoopbackHost } from './util.js'
 
 export {
 	handleOauth,
@@ -49,6 +49,15 @@ function checkFormOrigin (req, res) {
 		return false
 	}
 	return true
+}
+
+async function readFormParams (req, res) {
+	if (req.method !== 'POST') {
+		sendText(res, 'Method Not Allowed', 405)
+		return null
+	}
+	if (!checkFormOrigin(req, res)) return null
+	return new URLSearchParams(await getBody(req))
 }
 
 function enforceSso (res, fn) {
@@ -438,14 +447,9 @@ function redirectToVerifyOrComplete (req, res, base, opts) {
 }
 
 async function handleAuthorizeConsent (req, res) {
-	if (req.method !== 'POST') {
-		sendText(res, 'Method Not Allowed', 405)
-		return
-	}
-	if (!checkFormOrigin(req, res)) return
-	const rawBody = await getBody(req)
-	const params = new URLSearchParams(rawBody)
-	const query = {}
+	const params = await readFormParams(req, res)
+	if (!params) return
+	const query = Object.create(null)
 	let providerName = null
 	let localToken = null
 	let sessionName = null
@@ -639,13 +643,8 @@ async function handleVerify (req, res, query) {
 		))
 		return
 	}
-	if (req.method !== 'POST') {
-		sendText(res, 'Method Not Allowed', 405)
-		return
-	}
-	if (!checkFormOrigin(req, res)) return
-	const rawBody = await getBody(req)
-	const params = new URLSearchParams(rawBody)
+	const params = await readFormParams(req, res)
+	if (!params) return
 	const code = params.get('code') || query.code
 	if (!code) {
 		sendText(res, 'Missing verification code.', 400)
@@ -726,7 +725,7 @@ function validateStaticSubmission (body, setup, existingApp) {
 	let provider
 	if (existingApp) {
 		if (body.provider !== undefined && body.provider !== null && String(body.provider).trim()) {
-			const submitted = requireValidProviderId(body.provider)
+			const submitted = api.auth.requireValidProviderId(body.provider)
 			if (submitted !== existingApp.provider) {
 				throw httpError(400, `Provider cannot be changed on an existing app (expected "${existingApp.provider}")`)
 			}
@@ -734,7 +733,7 @@ function validateStaticSubmission (body, setup, existingApp) {
 		provider = existingApp.provider
 	} else {
 		const rawProvider = body.provider !== undefined && body.provider !== null ? body.provider : setup.provider
-		provider = requireValidProviderId(rawProvider)
+		provider = api.auth.requireValidProviderId(rawProvider)
 	}
 	const providerDef = getProvider(provider)
 	const cleanName = body.name !== undefined ? optionalString(body.name, 'name') : undefined
@@ -742,7 +741,7 @@ function validateStaticSubmission (body, setup, existingApp) {
 	const rawBaseUrl = cleanBaseUrl !== undefined
 		? (cleanBaseUrl || providerDef?.baseUrl || null)
 		: (existingApp?.credentials?.baseUrl || setup.baseUrl || providerDef?.baseUrl || null)
-	const creds = buildStaticCredentials({
+	const creds = api.auth.buildStaticCredentials({
 		credentials: body.credentials,
 		baseUrl: rawBaseUrl,
 		providerDef
@@ -754,8 +753,7 @@ async function handleStaticConnectPost (req, res) {
 	if (!checkFormOrigin(req, res)) return
 	res.setHeader('cache-control', 'no-store')
 	const respondError = (status, message) => sendJson(res, { error: message }, status, { 'cache-control': 'no-store' })
-	const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
-	if (contentType !== 'application/json' && !contentType.endsWith('+json')) {
+	if (!isJsonMime(req.headers['content-type'])) {
 		respondError(415, 'Content-Type must be application/json')
 		return
 	}
@@ -879,17 +877,12 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 }
 
 async function handleProviderConsent (req, res, providerName = 'google') {
-	if (req.method !== 'POST') {
-		sendText(res, 'Method Not Allowed', 405)
-		return
-	}
-	if (!checkFormOrigin(req, res)) return
+	const params = await readFormParams(req, res)
+	if (!params) return
 	const provider = getProvider(providerName)
 	if (!isOauthProviderAllowed(provider, 'app')) {
 		throw httpError(404, 'not found')
 	}
-	const rawBody = await getBody(req)
-	const params = new URLSearchParams(rawBody)
 	const servicesList = params.getAll('services').flatMap(v => v.split(','))
 	const setupCode = params.get('code') || null
 	let consumed
@@ -1116,12 +1109,11 @@ async function handleCallback (req, res, query) {
 
 function parseTokenParams (rawBody, req) {
 	if (!rawBody || !rawBody.trim()) return {}
-	const contentType = String(req?.headers?.['content-type'] || '').split(';')[0].trim().toLowerCase()
 	const trimmed = rawBody.trim()
-	if (contentType === 'application/json' || contentType.endsWith('+json') || trimmed.startsWith('{')) {
+	if (isJsonMime(req?.headers?.['content-type']) || trimmed.startsWith('{')) {
 		return parseJsonObject(trimmed, { objectError: 'Invalid JSON body' })
 	}
-	return Object.fromEntries(new URLSearchParams(rawBody))
+	return searchParamsToObject(new URLSearchParams(rawBody))
 }
 
 async function handleToken (req, res) {

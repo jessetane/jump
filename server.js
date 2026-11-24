@@ -6,7 +6,7 @@ import { handleRest } from './rest.js'
 import { listOauthProviders, parseOauthProviders } from './providers/index.js'
 import * as db from './db/index.js'
 import { parseSsoDomains } from './sso.js'
-import { getBaseUrl, getClientIp, getUserAgent, httpError, positiveNumberEnv, sendJson, sendHtml } from './util.js'
+import { getBaseUrl, getClientIp, getUserAgent, httpError, positiveNumberEnv, searchParamsToObject, sendJson, sendHtml } from './util.js'
 
 export { server, bootstrapLocalAdmin }
 
@@ -68,11 +68,11 @@ function resolveToken (req) {
 
 const server = http.createServer(async (req, res) => {
 	const start = Date.now()
-	let pathname = '(invalid)'
+	let rawPathname = '(invalid)'
 	res.setHeader('x-content-type-options', 'nosniff')
 	res.on('finish', () => {
 		const duration = Date.now() - start
-		console.log(`[${res.statusCode}] ${req.method} ${pathname} (${duration}ms)`)
+		console.log(`[${res.statusCode}] ${req.method} ${rawPathname} (${duration}ms)`)
 	})
 	try {
 		let url
@@ -81,7 +81,8 @@ const server = http.createServer(async (req, res) => {
 		} catch {
 			throw httpError(400, 'Invalid request URL')
 		}
-		pathname = url.pathname.replace(/\/+$/, '') || '/'
+		rawPathname = url.pathname
+		const pathname = rawPathname.replace(/\/+$/, '') || '/'
 		if (isCorsRoute(pathname, req.method)) {
 			res.setHeader('access-control-allow-origin', corsOrigin)
 			res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
@@ -93,7 +94,7 @@ const server = http.createServer(async (req, res) => {
 				return
 			}
 		}
-		const query = Object.fromEntries(url.searchParams)
+		const query = searchParamsToObject(url.searchParams)
 		const token = resolveToken(req)
 		if (pathname === '/') {
 			if (req.method === 'POST') {
@@ -113,7 +114,7 @@ const server = http.createServer(async (req, res) => {
 			return
 		}
 		if (pathname.startsWith('/api/')) {
-			await handleRest(req, res, { pathname, url, query, token })
+			await handleRest(req, res, { pathname: rawPathname, url, query, token })
 			return
 		}
 		if (pathname === '/mcp' || pathname.startsWith('/mcp/')) {
