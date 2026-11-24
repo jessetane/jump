@@ -44,7 +44,10 @@ From an admin session, use the `admin` tool to connect upstream apps, create sco
 // connect an OAuth provider (returns an interactive authorization URL; optional services pre-check permissions)
 admin({ action: 'connect_app', provider: 'google', name: 'Work Google', services: ['gmail', 'calendar:read', 'calendar:write'] })
 
-// or connect any HTTP API with Bearer shorthand or structured { bearer?, basic?, headers?, query? } credentials
+// or connect a static HTTP API via browser form (keeps API keys out of agent context)
+admin({ action: 'connect_app', provider: 'stripe', name: 'Stripe', baseUrl: 'https://api.stripe.com' })
+
+// or inline with Bearer shorthand or structured { bearer?, basic?, headers?, query? } credentials
 admin({
 	action: 'connect_app',
 	provider: 'stripe',
@@ -114,7 +117,7 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 	* `update_session` - Rename a session, toggle `admin`, or rotate its token.
 	* `revoke_session` - Revoke the current session, a specific session, or `allOthers`.
 	* `list_apps` - List connected and shared apps.
-	* `connect_app` - Connect an OAuth or static-credential upstream app (or re-authenticate one, optionally pre-selecting `services` with `<service>` or `<service>:<mode>`).
+	* `connect_app` - Connect an OAuth or static-credential upstream app (returns a browser setup URL when `credentials` are omitted, or re-authenticates / rotates credentials for `appId`).
 	* `update_app` - Update an app's name or static credentials.
 	* `disconnect_app` - Remove an app (and revoke its upstream OAuth token).
 	* `share_app` - Share an owned app with another user under an optional ceiling policy.
@@ -144,6 +147,8 @@ POST   /oauth/verify                            # session activation & app linki
 POST   /oauth/token                             # oauth 2.0 pkce token exchange
 POST   /oauth/revoke                            # rfc 7009 token revocation
 GET    /oauth/callback                          # upstream oauth callback
+GET    /apps/connect                            # static app credential form
+POST   /apps/connect                            # static app credential submission
 GET    /providers/:provider/connect             # upstream oauth scope selection
 POST   /providers/:provider/consent             # upstream oauth redirect
 
