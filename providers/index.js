@@ -9,8 +9,10 @@ export {
 	parseProviderTool,
 	createProvider,
 	getProvider,
-	listAuthProviders,
-	requireAuthProvider,
+	parseOauthProviders,
+	isOauthProviderAllowed,
+	listOauthProviders,
+	requireOauthProvider,
 	parseGrantedServices,
 	summarizeScopes,
 	fetchOauth,
@@ -218,12 +220,16 @@ function createProvider (config) {
 	}
 	const envPrefix = id.toUpperCase()
 	const verifiedEmail = Boolean(rawConfig.verifiedEmail || oauth?.verifiedEmail)
+	const supportsAuth = Boolean(oauth && oauth.userInfoUrl && oauth.extractAccount)
+	const supportsApp = !oauth || Boolean(baseUrl || allowedHosts.length > 0 || services)
 	return {
 		id,
 		name: label,
 		type,
 		baseUrl,
 		verifiedEmail,
+		supportsAuth,
+		supportsApp,
 		...(services && { services }),
 		toolDescription (baseHint) {
 			if (typeof rawConfig.toolDescription === 'string') return rawConfig.toolDescription
@@ -445,18 +451,74 @@ function getProvider (name) {
 	return providers[key] || createProvider(key)
 }
 
-function listAuthProviders () {
+function parseOauthProviders (raw = process.env.OAUTH_PROVIDERS, registry = providers) {
+	if (raw === undefined || raw === null) return null
+	if (typeof raw !== 'string') {
+		throw httpError(500, 'Invalid OAUTH_PROVIDERS value')
+	}
+	if (!raw.trim()) return null
+	const configured = new Map()
+	for (const item of raw.split(',')) {
+		const entry = item.trim()
+		if (!entry) {
+			throw httpError(500, `Invalid OAUTH_PROVIDERS entry "${raw}"`)
+		}
+		const parts = entry.split(':')
+		if (parts.length > 2) {
+			throw httpError(500, `Invalid OAUTH_PROVIDERS entry "${entry}"; expected "provider" or "provider:auth|app"`)
+		}
+		const id = parts[0].trim().toLowerCase()
+		const role = parts.length === 2 ? parts[1].trim().toLowerCase() : null
+		const provider = id ? registry[id] : null
+		if (!provider || provider.type !== 'oauth') {
+			throw httpError(500, `Invalid OAUTH_PROVIDERS provider "${parts[0].trim()}"`)
+		}
+		if (role !== null && role !== 'auth' && role !== 'app') {
+			throw httpError(500, `Invalid OAUTH_PROVIDERS role "${parts[1].trim()}" in "${entry}"; expected "auth" or "app"`)
+		}
+		if (configured.has(id)) {
+			throw httpError(500, `Duplicate provider "${id}" in OAUTH_PROVIDERS`)
+		}
+		if ((role === 'auth' && !provider.supportsAuth) || (role === 'app' && !provider.supportsApp)) {
+			throw httpError(500, `Provider "${id}" does not support "${role}"`)
+		}
+		configured.set(id, {
+			auth: role ? role === 'auth' : provider.supportsAuth,
+			app: role ? role === 'app' : provider.supportsApp
+		})
+	}
+	return configured
+}
+
+function hasOauthRole (provider, role, configured) {
+	if (!provider || provider.type !== 'oauth') return false
+	if (role === 'auth' ? !provider.supportsAuth : !provider.supportsApp) return false
+	return !configured || Boolean(configured.get(provider.id)?.[role])
+}
+
+function isOauthProviderAllowed (provider, role) {
+	if (role !== 'auth' && role !== 'app') {
+		throw httpError(500, `Invalid OAuth role "${role}"`)
+	}
+	return hasOauthRole(provider, role, parseOauthProviders())
+}
+
+function listOauthProviders (role = 'auth') {
+	if (role !== 'auth' && role !== 'app') {
+		throw httpError(500, `Invalid OAuth role "${role}"`)
+	}
+	const configured = parseOauthProviders()
 	return Object.values(providers).filter(p => {
-		if (p.type !== 'oauth') return false
+		if (!hasOauthRole(p, role, configured)) return false
 		const prefix = p.id.toUpperCase()
 		return Boolean(process.env[`${prefix}_CLIENT_ID`] && process.env[`${prefix}_CLIENT_SECRET`])
 	})
 }
 
-function requireAuthProvider (rawName) {
+function requireOauthProvider (rawName, role = 'auth') {
 	const name = typeof rawName === 'string' ? rawName.trim().toLowerCase() : ''
 	const provider = name ? providers[name] : null
-	if (!provider || !listAuthProviders().some(p => p.id === provider.id)) {
+	if (!provider || !listOauthProviders(role).some(p => p.id === provider.id)) {
 		throw httpError(400, `Invalid or unsupported OAuth provider: ${rawName}`)
 	}
 	return provider

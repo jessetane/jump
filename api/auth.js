@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { RESERVED_PROVIDERS, isValidProviderId, getProvider, listAuthProviders, requireAuthProvider } from '../providers/index.js'
+import { RESERVED_PROVIDERS, isValidProviderId, getProvider, listOauthProviders, requireOauthProvider } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
 import { HOP_BY_HOP_HEADERS, assertKeys, getBaseUrl, httpError, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean, optionalString } from '../util.js'
@@ -470,7 +470,7 @@ async function connectApp (token, opts = {}, appUrl) {
 	}
 	const providerDef = getProvider(provider)
 	if (providerDef?.type === 'oauth' && !normalizedAuth) {
-		requireAuthProvider(providerDef.id)
+		requireOauthProvider(providerDef.id, 'app')
 		const setupCode = db.tokens.createState({
 			mode: 'setup_connect',
 			sessionId: session.id,
@@ -572,10 +572,10 @@ async function linkLogin (token, opts = {}, appUrl) {
 	const existingLogins = db.logins.listByUserId(session.userId)
 	let resolvedProvider = null
 	if (cleanProvider) {
-		const providerDef = requireAuthProvider(cleanProvider)
+		const providerDef = requireOauthProvider(cleanProvider, 'auth')
 		assertSsoLink(existingLogins, providerDef.id)
 		resolvedProvider = providerDef.id
-	} else if (listAuthProviders().length === 0) {
+	} else if (listOauthProviders('auth').length === 0) {
 		throw httpError(400, 'No OAuth sign-in providers are configured')
 	}
 	const setupCode = db.tokens.createState({
@@ -668,7 +668,7 @@ async function shareApp (token, opts = {}) {
 	}
 	const effectiveProvider = resolveShareProvider(selfLogins, cleanAccount, cleanProvider)
 	if (effectiveProvider) {
-		requireAuthProvider(effectiveProvider)
+		requireOauthProvider(effectiveProvider, 'auth')
 	}
 	const recipient = db.logins.findUserByAccount(cleanAccount, effectiveProvider)
 	if (recipient && recipient.id === session.userId) {

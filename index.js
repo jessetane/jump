@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { handleOauth } from './oauth.js'
 import { handleMcp } from './mcp.js'
 import { handleRest } from './rest.js'
-import { listAuthProviders } from './providers/index.js'
+import { listOauthProviders, parseOauthProviders } from './providers/index.js'
 import * as db from './db/index.js'
 import { parseSsoDomains } from './sso.js'
 import { getBaseUrl, getClientIp, getUserAgent, httpError, positiveNumberEnv, sendJson, sendHtml } from './util.js'
@@ -159,6 +159,7 @@ positiveNumberEnv('OAUTH_TIMEOUT_MS', 30000)
 positiveNumberEnv('MAX_FILE_SIZE_MB', 10)
 parseOauthRateLimit()
 parseSsoDomains()
+parseOauthProviders()
 getUserAgent()
 server.headersTimeout = 15000
 server.requestTimeout = 0
@@ -166,7 +167,7 @@ server.timeout = Math.max(60000, upstreamTimeoutMs + 15000)
 server.keepAliveTimeout = 125000
 
 function bootstrapLocalAdmin () {
-	if (listAuthProviders().length > 0) return null
+	if (listOauthProviders('auth').length > 0) return null
 	if (db.tokens.hasActiveAdmin()) return null
 	const user = db.users.create()
 	const session = db.tokens.create({

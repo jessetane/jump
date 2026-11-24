@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import * as db from './db/index.js'
-import { getProvider, isValidProviderId, listAuthProviders, requireAuthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
+import { getProvider, isValidProviderId, isOauthProviderAllowed, listOauthProviders, requireOauthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
 import { getBody, getBaseUrl, getClientIp, httpError, isPlainObject, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
 
@@ -310,7 +310,7 @@ async function handleAuthorize (req, res, query) {
 		resolvedParams = { ...query, ...(setup.provider && { provider: setup.provider }) }
 	}
 	const clientName = deriveClientName(query.client_id, query.client_name)
-	let authProviders = listAuthProviders().map(p => ({ id: p.id, name: p.name }))
+	let authProviders = listOauthProviders('auth').map(p => ({ id: p.id, name: p.name }))
 	if (linkMode && !resolvedParams.provider && linkLogins) {
 		authProviders = authProviders.filter(p => {
 			try {
@@ -456,7 +456,7 @@ async function handleAuthorizeConsent (req, res) {
 	const ip = getClientIp(req)
 	const base = getBaseUrl(req)
 	if (!setupCode && localToken && !providerName) {
-		if (listAuthProviders().length > 0) {
+		if (listOauthProviders('auth').length > 0) {
 			sendText(res, 'Access denied: local token sign-in is disabled when OAuth providers are configured.', 403)
 			return
 		}
@@ -503,9 +503,10 @@ async function handleAuthorizeConsent (req, res) {
 	}
 	let provider
 	try {
-		provider = requireAuthProvider(providerName)
+		provider = requireOauthProvider(providerName, 'auth')
 	} catch (err) {
-		sendJson(res, { error: 'invalid_request', error_description: err.message }, err.status || 400)
+		if (err.status !== 400) throw err
+		sendJson(res, { error: 'invalid_request', error_description: err.message }, 400)
 		return
 	}
 	if (linkSession && !enforceSso(res, () => assertSsoLink(db.logins.listByUserId(linkSession.userId), provider.id))) return
@@ -657,7 +658,7 @@ function getOwnedOauthApp (session, appId, providerId) {
 
 async function handleProviderConnect (req, res, query, providerName = 'google', url = null) {
 	const provider = getProvider(providerName)
-	if (!provider || provider.type !== 'oauth') {
+	if (!isOauthProviderAllowed(provider, 'app')) {
 		throw httpError(404, 'not found')
 	}
 	provider.requireEnv()
@@ -717,7 +718,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	}
 	if (!checkFormOrigin(req, res)) return
 	const provider = getProvider(providerName)
-	if (!provider || provider.type !== 'oauth' || !provider.buildAuthUrl) {
+	if (!isOauthProviderAllowed(provider, 'app')) {
 		throw httpError(404, 'not found')
 	}
 	provider.requireEnv()
@@ -793,6 +794,11 @@ async function handleCallback (req, res, query) {
 		return
 	}
 	const provider = getProvider(oauthState.provider || 'google')
+	const callbackRole = (oauthState.mode === 'login' || oauthState.mode === 'auth') ? 'auth' : 'app'
+	if (!isOauthProviderAllowed(provider, callbackRole)) {
+		sendText(res, `Access denied: OAuth provider "${provider.id}" is disabled for ${callbackRole}.`, 403)
+		return
+	}
 	const base = getBaseUrl(req)
 	const callbackUrl = `${base}/oauth/callback`
 	let exchanged
