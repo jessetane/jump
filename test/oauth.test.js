@@ -775,6 +775,12 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	})
 	assert.equal(wrongConsentRes.status, 403)
 	assert.ok(db.tokens.getState(setupCode), 'POST /providers/:provider/consent must not consume wrong-mode setup code')
+	const wrongVerifyRes = await req('POST', '/oauth/verify', {
+		headers: { 'content-type': 'application/x-www-form-urlencoded', origin: baseUrl() },
+		body: new URLSearchParams({ code: setupCode }).toString()
+	})
+	assert.equal(wrongVerifyRes.status, 400)
+	assert.ok(db.tokens.getState(setupCode), 'POST /oauth/verify must not consume wrong-mode setup code')
 	const nonAdminStatic = db.tokens.createState({ mode: 'setup_static', sessionId: nonAdmin.id, provider: 'stripe' })
 	assert.equal((await req('GET', `/apps/connect?code=${encodeURIComponent(nonAdminStatic)}`)).status, 403)
 	const pageRes = await req('GET', `/apps/connect?code=${encodeURIComponent(setupCode)}`)
@@ -787,7 +793,6 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		code: setupCode,
 		updateMode: false,
 		provider: 'stripe',
-		providerBaseUrl: '',
 		name: 'Billing Prod',
 		baseUrl: 'https://api.stripe.com'
 	})
@@ -796,11 +801,15 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		body: { code: setupCode, provider: 'stripe', baseUrl: 'https://api.stripe.com', credentials: 'sk_live_secret' }
 	})
 	assert.equal(crossOriginRes.status, 403)
-	const accountErr = await req('POST', '/apps/connect', {
-		headers: { 'content-type': 'application/json', origin: baseUrl() },
-		body: { code: setupCode, provider: 'stripe', baseUrl: 'https://api.stripe.com', account: 'acct_prod', credentials: 'sk_live_secret' }
-	})
-	assert.equal(accountErr.status, 400)
+	for (const extraBody of [
+		{ code: setupCode, provider: 'stripe', baseUrl: 'https://api.stripe.com', account: 'acct_prod', credentials: 'sk_live_secret' },
+		{ code: setupCode, provider: 'stripe', base_url: 'https://api.stripe.com', credentials: 'sk_live_secret' }
+	]) {
+		assert.equal((await req('POST', '/apps/connect', {
+			headers: { 'content-type': 'application/json', origin: baseUrl() },
+			body: extraBody
+		})).status, 400)
+	}
 	const badSubmit = await req('POST', '/apps/connect', {
 		headers: { 'content-type': 'application/json', origin: baseUrl() },
 		body: { code: setupCode, provider: 'stripe', baseUrl: 'http://insecure.example.com', credentials: 'sk_live_secret' }
@@ -844,7 +853,6 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		code: rotateCode,
 		updateMode: true,
 		provider: 'stripe',
-		providerBaseUrl: '',
 		name: 'Billing Prod',
 		baseUrl: 'https://api.stripe.com'
 	})
