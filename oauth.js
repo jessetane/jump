@@ -938,7 +938,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	const params = new URLSearchParams(rawBody)
 	const servicesList = params.getAll('services').flatMap(v => v.split(','))
 	const setupCode = params.get('code') || null
-	const setup = db.tokens.consumeState(setupCode)
+	const setup = setupCode ? db.tokens.getState(setupCode) : null
 	const session = resolveSetupState(setup, 'setup_connect', provider.id)
 	if (!session) {
 		sendText(res, 'Access denied: admin session required.', 403)
@@ -961,10 +961,23 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	const name = rawAppName ? String(rawAppName).trim() : null
 	const base = getBaseUrl(req)
 	const callbackUrl = `${base}/oauth/callback`
+	const loginHint = existingApp?.credentials?.account || null
+	provider.buildAuthUrl({
+		state: 'pending',
+		callbackUrl,
+		services: servicesList,
+		loginHint
+	})
+	const consumed = db.tokens.consumeState(setupCode)
+	const activeSession = resolveSetupState(consumed, 'setup_connect', provider.id)
+	if (!activeSession || (reauthAppId && !getOwnedApp(activeSession, reauthAppId, { providerId: provider.id, type: 'oauth' }))) {
+		sendText(res, 'Access denied: admin session required.', 403)
+		return
+	}
 	const ip = getClientIp(req)
 	const stateToken = db.tokens.createState({
 		mode: 'connect',
-		sessionId: session.id,
+		sessionId: activeSession.id,
 		reauthAppId,
 		name,
 		provider: provider.id,
@@ -974,7 +987,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		state: stateToken,
 		callbackUrl,
 		services: servicesList,
-		loginHint: existingApp?.credentials?.account || null
+		loginHint
 	})
 	redirect(res, authUrl)
 }

@@ -769,6 +769,12 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	const oauthSetupCode = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSess.id, provider: 'google' })
 	assert.equal((await req('GET', `/apps/connect?code=${encodeURIComponent(oauthSetupCode)}`)).status, 403)
 	assert.equal((await req('GET', `/providers/google/connect?code=${encodeURIComponent(setupCode)}`)).status, 403)
+	const wrongConsentRes = await req('POST', '/providers/google/consent', {
+		headers: { 'content-type': 'application/x-www-form-urlencoded', origin: baseUrl() },
+		body: new URLSearchParams({ code: setupCode }).toString()
+	})
+	assert.equal(wrongConsentRes.status, 403)
+	assert.ok(db.tokens.getState(setupCode), 'POST /providers/:provider/consent must not consume wrong-mode setup code')
 	const nonAdminStatic = db.tokens.createState({ mode: 'setup_static', sessionId: nonAdmin.id, provider: 'stripe' })
 	assert.equal((await req('GET', `/apps/connect?code=${encodeURIComponent(nonAdminStatic)}`)).status, 403)
 	const pageRes = await req('GET', `/apps/connect?code=${encodeURIComponent(setupCode)}`)
