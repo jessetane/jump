@@ -5,17 +5,18 @@ import { useServer, createTestSession, withMockFetch, withEnv, db, providers } f
 useServer()
 
 test('provider-specific hooks: google and github buildAuthUrl, extractAccount, and revokeToken', async () => {
-	const googleConnectUrl = new URL(providers.google.buildAuthUrl({ state: 'st-g', callbackUrl: 'https://jump.test/oauth/callback', services: ['gmail'], write: [], loginHint: 'Alice@Example.com' }))
+	const googleConnectUrl = new URL(providers.google.buildAuthUrl({ state: 'st-g', callbackUrl: 'https://jump.test/oauth/callback', services: ['gmail'], loginHint: 'Alice@Example.com' }))
 	assert.equal(googleConnectUrl.searchParams.get('access_type'), 'offline')
 	assert.equal(googleConnectUrl.searchParams.get('prompt'), 'consent')
 	assert.equal(googleConnectUrl.searchParams.get('login_hint'), 'Alice@Example.com')
+	assert.deepEqual(googleConnectUrl.searchParams.get('scope').split(' '), ['https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile', 'https://www.googleapis.com/auth/gmail.readonly'])
 	const googleLoginUrl = new URL(providers.google.buildAuthUrl({ state: 'st-g2', callbackUrl: 'https://jump.test/oauth/callback', login: true }))
 	assert.equal(googleLoginUrl.searchParams.get('access_type'), null)
 	assert.equal(googleLoginUrl.searchParams.get('prompt'), null)
 	await withEnv({ GITHUB_CLIENT_ID: 'gh_id', GITHUB_CLIENT_SECRET: 'gh_sec' }, async () => {
-		const ghAuthUrl = new URL(providers.github.buildAuthUrl({ state: 'st-gh', callbackUrl: 'https://jump.test/oauth/callback', services: ['repo'], write: ['repo'], loginHint: 'octocat' }))
+		const ghAuthUrl = new URL(providers.github.buildAuthUrl({ state: 'st-gh', callbackUrl: 'https://jump.test/oauth/callback', services: ['repo:write', 'org:admin', 'workflow'], loginHint: 'octocat' }))
 		assert.equal(ghAuthUrl.searchParams.get('login'), 'octocat')
-		assert.deepEqual(ghAuthUrl.searchParams.get('scope').split(' '), ['read:user', 'repo'])
+		assert.deepEqual(ghAuthUrl.searchParams.get('scope').split(' '), ['read:user', 'repo', 'admin:org', 'workflow'])
 	})
 	const { session } = createTestSession({ account: 'provider-hooks@example.com', admin: true })
 	const googleApp = db.tokens.create({ userId: session.userId, provider: 'google', type: 'oauth', credentials: { accessToken: 'ya29.rev', refreshToken: '1//rev', account: 'provider-hooks@example.com' } })
@@ -136,4 +137,27 @@ test('provider capability inference and parseOauthProviders validation', () => {
 	assert.throws(() => providers.isOauthProviderAllowed(providers.google, 'bogus'), /Invalid OAuth role/)
 	assert.throws(() => providers.listOauthProviders('bogus'), /Invalid OAuth role/)
 	assert.throws(() => providers.requireOauthProvider('google', 'bogus'), /Invalid OAuth role/)
+	assert.deepEqual(providers.normalizeServiceSelections(providers.google.services, ['  GMAIL:Write  ', 'calendar:write', 'books', 'gmail:read']), ['gmail:write', 'calendar:write', 'books:write', 'gmail:read'])
+	assert.deepEqual(providers.normalizeServiceSelections(providers.google.services, null), [])
+	assert.deepEqual(providers.normalizeServiceSelections(providers.google.services, [123, 'gmail:', ':read']), [])
+	const ambiguousSvc = { chat: { name: 'Chat', scopes: { history: ['channels:history'], post: ['chat:write'] } } }
+	assert.throws(() => providers.normalizeServiceSelections(ambiguousSvc, ['chat'], { strict: true }), /requires an explicit mode/)
+	assert.throws(() => providers.normalizeServiceSelections(providers.google.services, null, { strict: true }), /services must be an array/)
+	assert.throws(() => providers.normalizeServiceSelections(providers.google.services, [123], { strict: true }), /services entries must be strings/)
+	assert.throws(() => providers.normalizeServiceSelections(providers.google.services, ['gmail:'], { strict: true }), /Invalid service specification/)
+	assert.throws(() => providers.normalizeServiceSelections(providers.google.services, [':read'], { strict: true }), /Invalid service specification/)
+	assert.throws(() => providers.normalizeServiceSelections(providers.github.services, ['notifications:write'], { strict: true, providerId: 'github' }), /Unknown mode "write"/)
+	assert.throws(() => providers.normalizeServiceSelections(providers.google.services, ['bad:read:extra'], { strict: true, providerId: 'google' }), /Invalid service specification/)
+	assert.throws(() => providers.normalizeServiceSelections(providers.google.services, ['bogus'], { strict: true, providerId: 'google' }), /Unknown service "bogus"/)
+	assert.throws(() => providers.createProvider({
+		id: 'bad-empty',
+		name: 'Bad Empty',
+		oauth: {
+			authUrl: 'https://bad.example/auth',
+			tokenUrl: 'https://bad.example/tok',
+			userInfoUrl: 'https://bad.example/me',
+			extractAccount: u => u.id,
+			services: { broken: { name: 'Broken', scopes: { read: [] } } }
+		}
+	}), /must define at least one non-empty mode/)
 })

@@ -204,8 +204,20 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	for (const bad of [
 		{ action: 'update_app', appId: app.id },
 		{ action: 'update_app', appId: app.id, name: 'X', apiKey: 'legacy' },
+		{ action: 'connect_app', provider: 'google', services: 'gmail' },
+		{ action: 'connect_app', provider: 'google', services: null },
+		{ action: 'connect_app', provider: 'google', services: [] },
+		{ action: 'connect_app', provider: 'google', services: [123] },
+		{ action: 'connect_app', provider: 'google', services: [''] },
+		{ action: 'connect_app', provider: 'google', services: ['gmail:'] },
+		{ action: 'connect_app', provider: 'google', services: [':read'] },
+		{ action: 'connect_app', provider: 'google', services: ['bogus'] },
+		{ action: 'connect_app', provider: 'github', services: ['notifications:write'] },
+		{ action: 'connect_app', provider: 'stripe', credentials: 'sk_test', baseUrl: 'https://api.stripe.com', services: ['read'] },
+		{ action: 'connect_app', provider: 'stripe', services: ['read'] },
 		{ action: 'connect_app', provider: 'google', appUrl: 'https://evil.com' },
 		{ action: 'connect_app', appId: app.id, provider: 'github' },
+		{ action: 'connect_app', appId: app.id, name: 'X' },
 		{ action: 'connect_app', appId: staticStripe.id },
 		{ action: 'connect_app', appId: app.id, credentials: 'x' },
 		{ action: 'connect_app', appId: app.id, account: 'x@example.com' },
@@ -222,6 +234,10 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	assert.equal((await req('POST', '/api/links', { token: session.token, body: { sessionId: session.id } })).status, 400)
 	assert.equal((await req('POST', '/api/links', { token: session.token, body: { appId: app.id } })).status, 400)
 	assert.equal((await req('DELETE', '/api/links', { token: session.token, body: { appId: app.id } })).status, 400)
+	const restServicesConnect = await req('POST', '/api/apps', { token: session.token, body: { provider: 'google', services: ['gmail', 'calendar:write'] } })
+	assert.equal(restServicesConnect.status, 201)
+	assert.match(restServicesConnect.data.connectUrl, /^https?:\/\/[^/]+\/providers\/google\/connect\?code=/)
+	assert.equal((await req('POST', '/api/apps', { token: session.token, body: { provider: 'google', services: ['bogus'] } })).status, 400)
 	for (const badProv of ['self', 'sessions', 'my.api']) {
 		assert.equal((await mcp(session.token, 'admin', { action: 'connect_app', provider: badProv, credentials: 'sk', baseUrl: 'https://api.stripe.com' })).isError, true)
 	}

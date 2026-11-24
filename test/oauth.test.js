@@ -211,7 +211,7 @@ test('PKCE code exchange, client_id binding, refresh rotation, 60s dedup, /oauth
 	assert.ok(db.tokens.get(app.id), 'Upstream app exempt from dormancy pruning')
 })
 
-test('parseGrantedServices and summarizeScopes handle delimiters, mixed modes, counts, and rwDiff fallback', () => {
+test('parseGrantedServices and summarizeScopes handle delimiters, mixed modes, counts, and subset fallback', () => {
 	const { parseGrantedServices, summarizeScopes } = providers
 	const gServices = providers.google.services
 	assert.deepEqual(parseGrantedServices('', gServices), [])
@@ -220,30 +220,48 @@ test('parseGrantedServices and summarizeScopes handle delimiters, mixed modes, c
 	assert.equal(summarizeScopes('https://www.googleapis.com/auth/userinfo.email', gServices), '')
 	assert.deepEqual(
 		parseGrantedServices('https://mail.google.com/,https://www.googleapis.com/auth/calendar.readonly', gServices),
-		[{ id: 'calendar', mode: 'ro' }, { id: 'gmail', mode: 'rw' }]
+		[{ id: 'calendar', modes: ['read'] }, { id: 'gmail', modes: ['write'] }]
 	)
-	assert.equal(summarizeScopes('https://www.googleapis.com/auth/gmail.readonly', gServices), 'gmail (ro)')
-	assert.equal(summarizeScopes('https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/calendar.readonly', gServices), 'calendar, gmail (ro)')
-	assert.equal(summarizeScopes('https://mail.google.com/ https://www.googleapis.com/auth/calendar.readonly', gServices), 'calendar (ro), gmail (rw)')
+	assert.deepEqual(
+		parseGrantedServices('https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata https://www.googleapis.com/auth/photoslibrary.appendonly', gServices),
+		[{ id: 'photos', modes: ['read', 'write'] }]
+	)
+	assert.deepEqual(
+		parseGrantedServices('admin:org read:packages write:packages', providers.github.services),
+		[{ id: 'packages', modes: ['read', 'write'] }, { id: 'org', modes: ['admin'] }]
+	)
+	assert.deepEqual(
+		parseGrantedServices('https://www.googleapis.com/auth/apps.groups.settings https://www.googleapis.com/auth/apps.licensing https://www.googleapis.com/auth/admin.directory.user', gServices),
+		[{ id: 'admin', modes: ['write'] }]
+	)
+	assert.deepEqual(
+		parseGrantedServices('https://www.googleapis.com/auth/apps.groups.settings https://www.googleapis.com/auth/apps.licensing https://www.googleapis.com/auth/admin.directory.user https://www.googleapis.com/auth/admin.reports.audit.readonly', gServices),
+		[{ id: 'admin', modes: ['read', 'write'] }]
+	)
+	assert.equal(summarizeScopes('https://www.googleapis.com/auth/gmail.readonly', gServices), 'gmail (read)')
+	assert.equal(summarizeScopes('https://www.googleapis.com/auth/gmail.readonly https://mail.google.com/', gServices), 'gmail (read+write)')
+	assert.equal(summarizeScopes('https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/calendar.readonly', gServices), 'calendar, gmail (read)')
+	assert.equal(summarizeScopes('https://mail.google.com/ https://www.googleapis.com/auth/calendar.readonly', gServices), 'calendar (read), gmail (write)')
+	assert.equal(summarizeScopes('admin:org write:packages', providers.github.services), 'packages (write), org (admin)')
 	const firstFour = Object.values(gServices).slice(0, 4)
-	assert.equal(summarizeScopes(firstFour.flatMap(s => s.ro).join(' '), gServices), '4 (ro)')
-	assert.equal(summarizeScopes([...firstFour[0].rw, ...firstFour[1].rw, ...firstFour[2].ro, ...firstFour[3].ro].join(' '), gServices), '4 (2 rw, 2 ro)')
-	assert.equal(summarizeScopes(Object.values(gServices).flatMap(s => s.ro).join(' '), gServices), '21 (ro)')
-	assert.equal(summarizeScopes(Object.values(gServices).flatMap(s => s.rw).join(' '), gServices), 'all (rw)')
+	assert.equal(summarizeScopes(firstFour.flatMap(s => s.scopes.read).join(' '), gServices), '4 (read)')
+	assert.equal(summarizeScopes([...firstFour[0].scopes.write, ...firstFour[1].scopes.write, ...firstFour[2].scopes.read, ...firstFour[3].scopes.read].join(' '), gServices), '4 (2 write, 2 read)')
+	assert.equal(summarizeScopes(Object.values(gServices).flatMap(s => s.scopes.read || []).join(' '), gServices), '21 (read)')
+	assert.equal(summarizeScopes(Object.values(gServices).flatMap(s => s.scopes.write || []).join(' '), gServices), 'all (write)')
 	const synthServices = {
-		same: { id: 'same', ro: ['x'], rw: ['x', 'y'] },
-		other: { id: 'other', ro: ['o.ro'], rw: ['o.rw'] }
+		same: { id: 'same', scopes: { read: ['x'], write: ['x', 'y'] } },
+		other: { id: 'other', scopes: { read: ['o.ro'], write: ['o.rw'] } }
 	}
-	assert.equal(summarizeScopes('x o.ro', synthServices), 'all (ro)')
-	assert.equal(summarizeScopes('x y o.rw', synthServices), 'all (rw)')
-	assert.deepEqual(parseGrantedServices('x', synthServices), [{ id: 'same', mode: 'ro' }])
-	assert.deepEqual(parseGrantedServices('x y', synthServices), [{ id: 'same', mode: 'rw' }])
+	assert.equal(summarizeScopes('x o.ro', synthServices), 'all (read)')
+	assert.equal(summarizeScopes('x y o.rw', synthServices), 'all (write)')
+	assert.deepEqual(parseGrantedServices('x', synthServices), [{ id: 'same', modes: ['read'] }])
+	assert.deepEqual(parseGrantedServices('x y', synthServices), [{ id: 'same', modes: ['write'] }])
 	const sameBoth = {
-		exact: { id: 'exact', ro: ['a', 'b'], rw: ['a', 'b'] },
-		second: { id: 'second', ro: ['s.ro'], rw: ['s.rw'] }
+		exact: { id: 'exact', scopes: { read: ['a', 'b'], write: ['a', 'b'] } },
+		second: { id: 'second', scopes: { read: ['s.ro'], write: ['s.rw'] } }
 	}
-	assert.deepEqual(parseGrantedServices('a', sameBoth), [{ id: 'exact', mode: 'ro' }])
-	assert.deepEqual(parseGrantedServices('a b', sameBoth), [{ id: 'exact', mode: 'rw' }])
+	assert.deepEqual(parseGrantedServices('a', sameBoth), [{ id: 'exact', modes: ['read'] }])
+	assert.deepEqual(parseGrantedServices('a b', sameBoth), [{ id: 'exact', modes: ['write'] }])
 })
 
 test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLocalAdmin', async () => {
@@ -265,7 +283,7 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 	const existingSessVerify = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: session.id, admin: 1, newAppIds: [newApp.id], name: 'Linked Session' })
 	const getExistingVerify = await req('GET', `/oauth/verify?code=${existingSessVerify}`)
 	assert.equal(getExistingVerify.status, 200)
-	assert.ok(getExistingVerify.text.includes('Test Google App · calendar (ro), gmail (rw)'), 'Verify page renders app scope summary')
+	assert.ok(getExistingVerify.text.includes('Test Google App · calendar (read), gmail (write)'), 'Verify page renders app scope summary')
 	assert.ok(getExistingVerify.text.includes(`value="${app.id}" checked>`), 'Existing linked app is pre-checked')
 	assert.ok(getExistingVerify.text.includes(`value="${newApp.id}" checked>`), 'Newly connected admin app is pre-checked')
 	assert.ok(getExistingVerify.text.includes(`value="${extraApp.id}">`), 'Unlinked prior app stays unchecked')
@@ -437,12 +455,35 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		assert.ok(initMatch, 'reauth connect page embeds initData JSON')
 		const initData = JSON.parse(initMatch[1])
 		assert.equal(initData.params.reauth_app_id, app.id, 'reauth connect page pre-populates reauth_app_id')
-		assert.equal(initData.params.services, 'calendar,gmail', 'reauth connect page pre-populates granted services')
-		assert.equal(initData.params.write, 'gmail', 'reauth connect page pre-populates granted write services')
-		const overrideHtml = await (await origFetch(`${baseUrl()}${reauthUrl.pathname}${reauthUrl.search}&services=docs&write=docs`)).text()
+		assert.equal(initData.params.services, 'calendar:read,gmail:write', 'reauth connect page pre-populates granted services')
+		const overrideHtml = await (await origFetch(`${baseUrl()}${reauthUrl.pathname}${reauthUrl.search}&services=docs:write`)).text()
 		const overrideData = JSON.parse(overrideHtml.match(/const initData = (\{[^\n]+\})/)[1])
-		assert.equal(overrideData.params.services, 'docs')
-		assert.equal(overrideData.params.write, 'docs')
+		assert.equal(overrideData.params.services, 'docs:write')
+		const repeatParamHtml = await (await origFetch(`${baseUrl()}${reauthUrl.pathname}${reauthUrl.search}&services=gmail&services=calendar:write`)).text()
+		const repeatParamData = JSON.parse(repeatParamHtml.match(/const initData = (\{[^\n]+\})/)[1])
+		assert.equal(repeatParamData.params.services, 'gmail:read,calendar:write')
+		const clearParamHtml = await (await origFetch(`${baseUrl()}${reauthUrl.pathname}${reauthUrl.search}&services=`)).text()
+		const clearParamData = JSON.parse(clearParamHtml.match(/const initData = (\{[^\n]+\})/)[1])
+		assert.equal(clearParamData.params.services, '')
+		const presetConnect = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'google', name: 'Preset Google', services: ['gmail', 'calendar:write', 'books'] })).content[0].text)
+		const presetUrl = new URL(presetConnect.connectUrl)
+		const presetHtml = await (await origFetch(`${baseUrl()}${presetUrl.pathname}${presetUrl.search}`)).text()
+		const presetData = JSON.parse(presetHtml.match(/const initData = (\{[^\n]+\})/)[1])
+		assert.equal(presetData.params.services, 'gmail:read,calendar:write,books:write', 'connect_app services preset populates connect page')
+		const emptyConsentRes = await origFetch(`${baseUrl()}/providers/google/consent`, {
+			method: 'POST',
+			headers: { origin: baseUrl(), 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: presetUrl.searchParams.get('code'), app_name: 'Unchecked Google' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(emptyConsentRes.status, 302)
+		const emptyConsentLoc = new URL(emptyConsentRes.headers.get('location'))
+		assert.equal(emptyConsentLoc.searchParams.get('scope'), 'https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile')
+		const reauthPresetConnect = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', appId: app.id, services: ['drive:write'] })).content[0].text)
+		const reauthPresetUrl = new URL(reauthPresetConnect.connectUrl)
+		const reauthPresetHtml = await (await origFetch(`${baseUrl()}${reauthPresetUrl.pathname}${reauthPresetUrl.search}`)).text()
+		const reauthPresetData = JSON.parse(reauthPresetHtml.match(/const initData = (\{[^\n]+\})/)[1])
+		assert.equal(reauthPresetData.params.services, 'drive:write', 'connect_app services on appId overrides existing scopes fallback')
 		const connectInfo = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'google', name: 'Work Google' })).content[0].text)
 		const connectUrl = new URL(connectInfo.connectUrl)
 		const connectCode = connectUrl.searchParams.get('code')
@@ -450,11 +491,13 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		const consentRes = await origFetch(`${baseUrl()}/providers/google/consent`, {
 			method: 'POST',
 			headers: { origin: baseUrl(), 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({ code: connectCode, services: 'gmail', app_name: 'Work Google' }).toString(),
+			body: new URLSearchParams({ code: connectCode, services: 'gmail:write', app_name: 'Work Google' }).toString(),
 			redirect: 'manual'
 		})
 		assert.equal(consentRes.status, 302)
-		const consentState = new URL(consentRes.headers.get('location')).searchParams.get('state')
+		const consentLocation = new URL(consentRes.headers.get('location'))
+		assert.ok(consentLocation.searchParams.get('scope').includes('https://mail.google.com/'))
+		const consentState = consentLocation.searchParams.get('state')
 		returnedEmail = 'connected-ui@example.com'
 		assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${consentState}`)).status, 200)
 		const createdApp = db.tokens.listByUserId(adminSess.userId).find(t => t.type === 'oauth' && t.name === 'Work Google')
@@ -617,12 +660,43 @@ test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login,
 		assert.equal(ghConnect.isError, undefined)
 		const ghConnectUrl = new URL(JSON.parse(ghConnect.content[0].text).connectUrl)
 		assert.equal((await req('GET', `${ghConnectUrl.pathname}${ghConnectUrl.search}`)).status, 200)
+		const toolsBoth = await req('POST', '/mcp', { token: adminSess.token, body: { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} } })
+		const bothServicesDesc = toolsBoth.data.result.tools.find(t => t.name === 'admin').inputSchema.properties.services.description
+		assert.match(bothServicesDesc, /github:.*packages \[read, write, delete\]/)
 		const ghConsent = await req('POST', '/providers/github/consent', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({ code: ghConnectUrl.searchParams.get('code') }).toString(),
 			redirect: 'manual'
 		})
 		assert.equal(ghConsent.status, 302)
+		const ghPresetConnect = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'github', name: 'Preset GitHub', services: ['packages:delete', 'org:admin'] })).content[0].text)
+		const ghPresetUrl = new URL(ghPresetConnect.connectUrl)
+		const ghConnectRes = await req('GET', `${ghPresetUrl.pathname}${ghPresetUrl.search}`)
+		assert.equal(ghConnectRes.status, 200)
+		const ghInitData = JSON.parse(ghConnectRes.text.match(/const initData = (\{[^\n]+\})/)[1])
+		assert.equal(ghInitData.params.services, 'packages:delete,org:admin')
+		const ghPresetConsent = await req('POST', '/providers/github/consent', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: ghPresetUrl.searchParams.get('code'), services: 'packages:delete,org:admin', app_name: 'Preset GitHub' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(ghPresetConsent.status, 302)
+		const ghAuthRedirect = new URL(ghPresetConsent.headers.get('location'))
+		assert.deepEqual(ghAuthRedirect.searchParams.get('scope').split(' '), ['read:user', 'delete:packages', 'admin:org'])
+		await withMockFetch((input, init, origFetch) => {
+			const u = typeof input === 'string' ? input : input.url
+			if (u === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'gho_ui', token_type: 'bearer', scope: 'read:user,delete:packages,admin:org' })
+			if (u === 'https://api.github.com/user') return Response.json({ login: 'octo-ui' })
+			return origFetch(input, init)
+		}, async origFetch => {
+			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${ghAuthRedirect.searchParams.get('state')}`)).status, 200)
+		})
+		const createdGh = db.tokens.listByUserId(adminSess.userId).find(t => t.provider === 'github' && t.name === 'Preset GitHub')
+		assert.equal(createdGh?.scopes, 'read:user,delete:packages,admin:org')
+		const ghReauthConnect = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', appId: createdGh.id })).content[0].text)
+		const ghReauthUrl = new URL(ghReauthConnect.connectUrl)
+		const ghReauthHtml = await req('GET', `${ghReauthUrl.pathname}${ghReauthUrl.search}`)
+		assert.equal(JSON.parse(ghReauthHtml.text.match(/const initData = (\{[^\n]+\})/)[1]).params.services, 'packages:delete,org:admin')
 		const loginCbState = db.tokens.createState({ mode: 'login', provider: 'github' })
 		assert.equal((await req('GET', `/oauth/callback?code=c&state=${loginCbState}`)).status, 403)
 		const linkCbState = db.tokens.createState({ mode: 'auth', sessionId: adminSess.id, provider: 'github' })
@@ -648,6 +722,10 @@ test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login,
 		const staticGh = await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'github', credentials: 'ghp_static_pat' })
 		assert.equal(staticGh.isError, undefined)
 		assert.equal(JSON.parse(staticGh.content[0].text).app.type, 'static')
+		const toolsGoogleOnly = await req('POST', '/mcp', { token: adminSess.token, body: { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} } })
+		const googleOnlyDesc = toolsGoogleOnly.data.result.tools.find(t => t.name === 'admin').inputSchema.properties.services.description
+		assert.match(googleOnlyDesc, /google: /)
+		assert.doesNotMatch(googleOnlyDesc, /github: /)
 	})
 	await withEnv({ OAUTH_PROVIDERS: 'google:app' }, async () => {
 		assert.deepEqual(providers.listOauthProviders('auth'), [])
