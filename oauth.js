@@ -281,9 +281,7 @@ function resolveSetupState (setup, expectedMode, expectedProvider = null) {
 	return session
 }
 
-function loadSetupContext (code, { mode, providerId = null, appType = null, consume = false } = {}) {
-	if (!code) return null
-	const setup = consume ? db.tokens.consumeState(code) : db.tokens.getState(code)
+function buildSetupContext (setup, { mode, providerId = null, appType = null } = {}) {
 	const session = resolveSetupState(setup, mode, providerId)
 	if (!session) return null
 	if (!setup.reauthAppId) {
@@ -291,6 +289,20 @@ function loadSetupContext (code, { mode, providerId = null, appType = null, cons
 	}
 	const existingApp = getOwnedApp(session, setup.reauthAppId, { providerId: setup.provider || providerId, type: appType })
 	return { setup, session, existingApp, unauthorizedApp: !existingApp }
+}
+
+function loadSetupContext (code, opts = {}) {
+	if (!code) return null
+	return buildSetupContext(db.tokens.getState(code), opts)
+}
+
+function consumeSetupContext (code, opts = {}, validate = null) {
+	if (!code) return null
+	return db.tokens.consumeState(code, setup => {
+		const ctx = buildSetupContext(setup, opts)
+		if (!ctx) return null
+		return validate ? validate(ctx) : ctx
+	})
 }
 
 function sendInitHtml (res, template, initData) {
@@ -495,43 +507,52 @@ async function handleAuthorizeConsent (req, res) {
 	}
 	let linkSession = null
 	let linkMerge = false
+	let provider
 	if (setupCode) {
-		const ctx = loadSetupContext(setupCode, { mode: 'setup_link' })
-		if (!ctx) {
-			sendText(res, 'Access denied: invalid or expired setup code.', 403)
-			return
-		}
-		linkSession = ctx.session
-		linkMerge = Boolean(ctx.setup.merge)
-		if (ctx.setup.provider) {
-			if (providerName && providerName !== ctx.setup.provider) {
-				sendText(res, 'Access denied: provider mismatch for setup code.', 403)
+		let consumed
+		try {
+			consumed = consumeSetupContext(setupCode, { mode: 'setup_link' }, ctx => {
+				if (ctx.setup.provider && providerName && providerName !== ctx.setup.provider) {
+					throw httpError(403, 'Access denied: provider mismatch for setup code.')
+				}
+				const targetProvider = ctx.setup.provider || providerName
+				if (!targetProvider) {
+					throw httpError(400, 'OAuth provider or admin token is required')
+				}
+				provider = requireOauthProvider(targetProvider, 'auth')
+				assertSsoLink(db.logins.listByUserId(ctx.session.userId), provider.id)
+				return ctx
+			})
+		} catch (err) {
+			if (err.status === 400) {
+				sendJson(res, { error: 'invalid_request', error_description: err.message }, 400)
 				return
 			}
-			providerName = ctx.setup.provider
+			if (err.status === 403) {
+				const msg = err.message.endsWith('.') ? err.message : `${err.message}.`
+				sendText(res, msg, 403)
+				return
+			}
+			throw err
 		}
-	}
-	if (!providerName) {
-		sendJson(res, { error: 'invalid_request', error_description: 'OAuth provider or admin token is required' }, 400)
-		return
-	}
-	let provider
-	try {
-		provider = requireOauthProvider(providerName, 'auth')
-	} catch (err) {
-		if (err.status !== 400) throw err
-		sendJson(res, { error: 'invalid_request', error_description: err.message }, 400)
-		return
-	}
-	if (linkSession && !enforceSso(res, () => assertSsoLink(db.logins.listByUserId(linkSession.userId), provider.id))) return
-	if (setupCode) {
-		const consumed = loadSetupContext(setupCode, { mode: 'setup_link', consume: true })
 		if (!consumed) {
 			sendText(res, 'Access denied: invalid or expired setup code.', 403)
 			return
 		}
 		linkSession = consumed.session
 		linkMerge = Boolean(consumed.setup.merge)
+	} else {
+		if (!providerName) {
+			sendJson(res, { error: 'invalid_request', error_description: 'OAuth provider or admin token is required' }, 400)
+			return
+		}
+		try {
+			provider = requireOauthProvider(providerName, 'auth')
+		} catch (err) {
+			if (err.status !== 400) throw err
+			sendJson(res, { error: 'invalid_request', error_description: err.message }, 400)
+			return
+		}
 	}
 	const callbackUrl = `${base}/oauth/callback`
 	const stateToken = db.tokens.createState({
@@ -568,6 +589,15 @@ function appIdentityKey (app) {
 	return app.type === 'share' ? `share:${app.credentials?.appId || app.id}` : `app:${app.id}`
 }
 
+function validateVerifyState (state) {
+	const user = state?.mode === 'verify' && state.userId ? db.users.get(state.userId) : null
+	if (!user) return null
+	if (!state.sessionId) return { state, user, targetSession: null }
+	const targetSession = db.tokens.getActiveSession(state.sessionId)
+	if (!targetSession || targetSession.userId !== user.id) return null
+	return { state, user, targetSession }
+}
+
 async function handleVerify (req, res, query) {
 	if (req.method === 'GET') {
 		const code = query.code
@@ -575,13 +605,12 @@ async function handleVerify (req, res, query) {
 			sendText(res, 'Invalid or expired verification code', 400)
 			return
 		}
-		const state = db.tokens.getState(code)
-		const existingUser = state?.mode === 'verify' && state.userId ? db.users.get(state.userId) : null
-		const targetSession = state?.sessionId ? db.tokens.getActiveSession(state.sessionId) : null
-		if (!existingUser || (state.sessionId && (!targetSession || targetSession.userId !== existingUser.id))) {
+		const ctx = validateVerifyState(db.tokens.getState(code))
+		if (!ctx) {
 			sendText(res, 'Invalid or expired verification code', 400)
 			return
 		}
+		const { state, user: existingUser, targetSession } = ctx
 		const userApps = db.tokens.listByUserId(existingUser.id).filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
 		let appsHtml = ''
 		if (userApps.length > 0) {
@@ -622,31 +651,13 @@ async function handleVerify (req, res, query) {
 		sendText(res, 'Missing verification code.', 400)
 		return
 	}
-	const peek = db.tokens.getState(code)
-	const peekUser = peek?.mode === 'verify' && peek.userId ? db.users.get(peek.userId) : null
-	if (!peekUser) {
+	const ctx = db.tokens.consumeState(code, validateVerifyState)
+	if (!ctx) {
 		sendText(res, 'Invalid or expired verification code', 400)
 		return
 	}
-	if (peek.sessionId) {
-		const targetSession = db.tokens.getActiveSession(peek.sessionId)
-		if (!targetSession || targetSession.userId !== peekUser.id) {
-			sendText(res, 'Invalid or expired verification code', 400)
-			return
-		}
-	}
-	const state = db.tokens.consumeState(code)
-	const user = state?.mode === 'verify' && state.userId ? db.users.get(state.userId) : null
-	if (!user) {
-		sendText(res, 'Invalid or expired verification code', 400)
-		return
-	}
-	if (state.sessionId) {
-		const targetSession = db.tokens.getActiveSession(state.sessionId)
-		if (!targetSession || targetSession.userId !== user.id) {
-			sendText(res, 'Invalid or expired verification code', 400)
-			return
-		}
+	const { state, user, targetSession } = ctx
+	if (targetSession) {
 		const selectedIds = new Set(filterValidAppIds(user.id, params.getAll('app_id')))
 		const existingLinkedIds = new Set(db.links.listBySessionId(targetSession.id).map(l => l.appId))
 		for (const appId of selectedIds) {
@@ -799,42 +810,28 @@ async function handleStaticConnectPost (req, res) {
 		return
 	}
 	const code = typeof body.code === 'string' ? body.code.trim() : ''
-	const peekCtx = loadSetupContext(code, { mode: 'setup_static', appType: 'static' })
-	if (!peekCtx) {
-		respondError(403, 'Access denied: invalid or expired setup code.')
-		return
-	}
-	if (peekCtx.unauthorizedApp) {
-		respondError(403, 'Access denied: unauthorized update request.')
-		return
-	}
-	const { setup, existingApp } = peekCtx
-	let validated
+	let consumed
 	try {
-		validated = validateStaticSubmission(body, setup, existingApp)
+		consumed = consumeSetupContext(code, { mode: 'setup_static', appType: 'static' }, ctx => {
+			if (ctx.unauthorizedApp) {
+				throw httpError(403, 'Access denied: unauthorized update request.')
+			}
+			return { ...ctx, validated: validateStaticSubmission(body, ctx.setup, ctx.existingApp) }
+		})
 	} catch (err) {
 		respondError(err.status || 400, err.message)
 		return
 	}
-	const consumedCtx = loadSetupContext(code, { mode: 'setup_static', appType: 'static', consume: true })
-	if (!consumedCtx) {
+	if (!consumed) {
 		respondError(403, 'Access denied: invalid or expired setup code.')
 		return
 	}
-	if (consumedCtx.unauthorizedApp) {
-		respondError(403, 'Access denied: unauthorized update request.')
-		return
-	}
-	const { session: activeSession, existingApp: target } = consumedCtx
+	const { setup, session: activeSession, existingApp: target, validated } = consumed
 	const { providerDef, cleanName, creds } = validated
-	const isUpdate = Boolean(existingApp)
+	const isUpdate = Boolean(target)
 	let appId
 	let appName
 	if (isUpdate) {
-		if (!target) {
-			respondError(403, 'Access denied: unauthorized update request.')
-			return
-		}
 		appName = cleanName !== undefined ? (cleanName || providerDef.name) : (target.name || providerDef.name)
 		db.tokens.updateCredentials(target.id, { name: appName, credentials: creds })
 		appId = target.id
@@ -885,34 +882,29 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 	if (!isOauthProviderAllowed(provider, 'app')) {
 		throw httpError(404, 'not found')
 	}
+	const ctx = loadSetupContext(query.code || '', { mode: 'setup_connect', providerId: provider.id, appType: 'oauth' })
+	if (!ctx) {
+		sendText(res, 'Access denied: invalid or expired setup code.', 403)
+		return
+	}
+	if (ctx.unauthorizedApp) {
+		sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
+		return
+	}
 	provider.requireEnv()
+	const { setup, existingApp } = ctx
 	const resolvedParams = { ...query }
 	delete resolvedParams.reauth_app_id
-	let setup = null
-	let existingApp = null
-	if (query.code !== undefined) {
-		const ctx = loadSetupContext(query.code, { mode: 'setup_connect', providerId: provider.id, appType: 'oauth' })
-		if (!ctx) {
-			sendText(res, 'Access denied: invalid or expired setup code.', 403)
-			return
-		}
-		if (ctx.unauthorizedApp) {
-			sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
-			return
-		}
-		setup = ctx.setup
-		existingApp = ctx.existingApp
-		if (existingApp) {
-			resolvedParams.reauth_app_id = setup.reauthAppId
-		} else if (setup.name && !resolvedParams.name && !resolvedParams.app_name) {
-			resolvedParams.name = setup.name
-		}
+	if (existingApp) {
+		resolvedParams.reauth_app_id = setup.reauthAppId
+	} else if (setup.name && !resolvedParams.name && !resolvedParams.app_name) {
+		resolvedParams.name = setup.name
 	}
 	if (query.services !== undefined) {
 		const rawList = url?.searchParams ? url.searchParams.getAll('services') : [query.services]
 		const entries = rawList.flatMap(v => String(v).split(','))
 		resolvedParams.services = normalizeServiceSelections(provider.services, entries).join(',')
-	} else if (Array.isArray(setup?.services)) {
+	} else if (Array.isArray(setup.services)) {
 		resolvedParams.services = normalizeServiceSelections(provider.services, setup.services).join(',')
 	} else if (existingApp?.scopes && provider.services) {
 		const granted = parseGrantedServices(existingApp.scopes, provider.services)
@@ -944,45 +936,47 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	if (!isOauthProviderAllowed(provider, 'app')) {
 		throw httpError(404, 'not found')
 	}
-	provider.requireEnv()
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
 	const servicesList = params.getAll('services').flatMap(v => v.split(','))
 	const setupCode = params.get('code') || null
-	const peekCtx = loadSetupContext(setupCode, { mode: 'setup_connect', providerId: provider.id, appType: 'oauth' })
-	if (!peekCtx) {
+	let consumed
+	try {
+		consumed = consumeSetupContext(setupCode, { mode: 'setup_connect', providerId: provider.id, appType: 'oauth' }, ctx => {
+			const reauthAppId = ctx.setup.reauthAppId || null
+			if (params.get('reauth_app_id') && params.get('reauth_app_id') !== reauthAppId) {
+				throw httpError(403, 'Access denied: unauthorized re-authentication request.')
+			}
+			if (ctx.unauthorizedApp) {
+				throw httpError(403, 'Access denied: unauthorized re-authentication request.')
+			}
+			provider.requireEnv()
+			return ctx
+		})
+	} catch (err) {
+		if (err.status === 403) {
+			sendText(res, err.message, 403)
+			return
+		}
+		throw err
+	}
+	if (!consumed) {
 		sendText(res, 'Access denied: admin session required.', 403)
 		return
 	}
-	const reauthAppId = peekCtx.setup.reauthAppId || null
-	if (params.get('reauth_app_id') && params.get('reauth_app_id') !== reauthAppId) {
-		sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
-		return
-	}
-	if (peekCtx.unauthorizedApp) {
-		sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
-		return
-	}
-	const rawAppName = params.get('app_name') || params.get('name') || peekCtx.setup.name || ''
+	const { setup, session, existingApp } = consumed
+	const reauthAppId = setup.reauthAppId || null
+	const rawAppName = params.has('app_name')
+		? params.get('app_name')
+		: (params.has('name') ? params.get('name') : (setup.name || ''))
 	const name = rawAppName ? String(rawAppName).trim() : null
 	const base = getBaseUrl(req)
 	const callbackUrl = `${base}/oauth/callback`
-	const loginHint = peekCtx.existingApp?.credentials?.account || null
-	provider.buildAuthUrl({
-		state: 'pending',
-		callbackUrl,
-		services: servicesList,
-		loginHint
-	})
-	const consumedCtx = loadSetupContext(setupCode, { mode: 'setup_connect', providerId: provider.id, appType: 'oauth', consume: true })
-	if (!consumedCtx || consumedCtx.unauthorizedApp) {
-		sendText(res, 'Access denied: admin session required.', 403)
-		return
-	}
+	const loginHint = existingApp?.credentials?.account || null
 	const ip = getClientIp(req)
 	const stateToken = db.tokens.createState({
 		mode: 'connect',
-		sessionId: consumedCtx.session.id,
+		sessionId: session.id,
 		reauthAppId,
 		name,
 		provider: provider.id,

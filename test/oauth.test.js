@@ -122,7 +122,16 @@ test('PKCE authorize validation, CSRF Origin guard, single-use setup codes, and 
 		})
 		assert.equal(r.status, 403)
 	}
+	assert.equal((await req('GET', '/providers/google/connect')).status, 403, 'GET /providers/:provider/connect requires setup code')
 	await withEnv({ GITHUB_CLIENT_ID: 'gh-id', GITHUB_CLIENT_SECRET: undefined }, async () => {
+		const unauthConnect = await req('GET', '/providers/github/connect')
+		assert.equal(unauthConnect.status, 403, 'GET /providers/:provider/connect must return 403 before CLIENT_SECRET check')
+		const unauthConsent = await req('POST', '/providers/github/consent', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ provider: 'github' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(unauthConsent.status, 403, 'POST /providers/:provider/consent must return 403 before CLIENT_SECRET check')
 		const unconfiguredConsent = await req('POST', '/oauth/authorize/consent', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({ provider: 'github' }).toString(),
@@ -693,6 +702,15 @@ test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login,
 		})
 		const createdGh = db.tokens.listByUserId(adminSess.userId).find(t => t.provider === 'github' && t.name === 'Preset GitHub')
 		assert.equal(createdGh?.scopes, 'read:user,delete:packages,admin:org')
+		const clearedNameCode = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSess.id, provider: 'github', name: 'Temporary Label' })
+		const clearedConsent = await req('POST', '/providers/github/consent', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: clearedNameCode, app_name: '' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(clearedConsent.status, 302)
+		const clearedState = new URL(clearedConsent.headers.get('location')).searchParams.get('state')
+		assert.equal(db.tokens.getState(clearedState).name, null, 'Clearing app_name to "" overrides preset setup.name')
 		const ghReauthConnect = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', appId: createdGh.id })).content[0].text)
 		const ghReauthUrl = new URL(ghReauthConnect.connectUrl)
 		const ghReauthHtml = await req('GET', `${ghReauthUrl.pathname}${ghReauthUrl.search}`)
