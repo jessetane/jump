@@ -476,39 +476,34 @@ function createProvider (config) {
 				return { allowed: false, reason: 'Invalid target URL: path traversal is not permitted' }
 			}
 			const appBase = appToken?.credentials?.baseUrl
-			if (appBase || (!baseUrl && allowedHosts.length === 0)) {
+			const pinnedToAppBase = Boolean(appBase || (!baseUrl && allowedHosts.length === 0))
+			let allowedBase = parsedProviderBase
+			if (pinnedToAppBase) {
 				const normalizedBase = validateBaseUrl(appBase)
 				if (!normalizedBase) {
 					return { allowed: false, reason: 'App is missing a valid baseUrl' }
 				}
-				const allowedBase = new URL(normalizedBase)
-				if (parsed.protocol !== allowedBase.protocol || parsed.origin !== allowedBase.origin) {
-					return {
-						allowed: false,
-						reason: `Target URL origin not allowed. Requests must target ${allowedBase.origin}, got: ${urlString}`
-					}
-				}
-				const basePrefix = allowedBase.pathname.replace(/\/+$/, '')
-				if (basePrefix && parsed.pathname !== basePrefix && !parsed.pathname.startsWith(`${basePrefix}/`)) {
-					return {
-						allowed: false,
-						reason: `Target URL path not allowed. Requests must target ${allowedBase.origin}${basePrefix}, got: ${urlString}`
-					}
-				}
-				return { allowed: true }
+				allowedBase = new URL(normalizedBase)
 			}
-			if (parsed.protocol !== 'https:' || !matchesAllowedHost(parsed.hostname, allowedHosts)) {
-				const hostHint = allowedHosts.find(h => h.startsWith('*.')) || parsedProviderBase?.origin || allowedHosts[0]
+			const expectedPort = allowedBase?.port || ''
+			const hostAllowed = pinnedToAppBase
+				? parsed.hostname === allowedBase.hostname
+				: matchesAllowedHost(parsed.hostname, allowedHosts)
+			if (parsed.protocol !== 'https:' || parsed.port !== expectedPort || !hostAllowed) {
+				const hint = pinnedToAppBase
+					? allowedBase.origin
+					: (allowedHosts.find(h => h.startsWith('*.')) || parsedProviderBase?.origin || allowedHosts[0])
+				const kind = pinnedToAppBase ? 'origin' : 'domain'
 				return {
 					allowed: false,
-					reason: `Target URL domain not allowed. Requests must target ${hostHint}, got: ${urlString}`
+					reason: `Target URL ${kind} not allowed. Requests must target ${hint}, got: ${urlString}`
 				}
 			}
-			const basePrefix = parsedProviderBase ? parsedProviderBase.pathname.replace(/\/+$/, '') : ''
+			const basePrefix = allowedBase ? allowedBase.pathname.replace(/\/+$/, '') : ''
 			if (basePrefix && parsed.pathname !== basePrefix && !parsed.pathname.startsWith(`${basePrefix}/`)) {
 				return {
 					allowed: false,
-					reason: `Target URL path not allowed. Requests must target ${parsedProviderBase.origin}${basePrefix}, got: ${urlString}`
+					reason: `Target URL path not allowed. Requests must target ${allowedBase.origin}${basePrefix}, got: ${urlString}`
 				}
 			}
 			return { allowed: true }

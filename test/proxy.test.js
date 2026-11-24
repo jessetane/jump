@@ -11,10 +11,13 @@ useServer()
 
 test('provider URL allowlists, target resolution, path traversal, and SSRF IP/hostname blocklist', async () => {
 	assert.equal(providers.google.isAllowedUrl('https://www.googleapis.com/drive/v3/files').allowed, true)
+	assert.equal(providers.google.isAllowedUrl('https://sheets.googleapis.com:443/v4/spreadsheets/1').allowed, true)
+	assert.equal(providers.google.isAllowedUrl('https://sheets.googleapis.com:8443/v4/spreadsheets/1').allowed, false)
 	assert.equal(providers.google.isAllowedUrl('http://www.googleapis.com/drive/v3/files').allowed, false)
 	assert.equal(providers.google.isAllowedUrl('https://evilgoogleapis.com/x').allowed, false)
 	assert.equal(providers.google.isAllowedUrl('https://user:pass@www.googleapis.com/drive/v3/files').allowed, false)
 	assert.equal(providers.github.isAllowedUrl('https://api.github.com/repos/jessetane/jump').allowed, true)
+	assert.equal(providers.github.isAllowedUrl('https://api.github.com:8443/user').allowed, false)
 	assert.equal(providers.github.isAllowedUrl('https://evil.com/repos').allowed, false)
 	const customProv = providers.createProvider({ id: 'scoped_prov', baseUrl: 'https://api.custom.dev/v2/tenant-a' })
 	assert.equal(customProv.isAllowedUrl('https://api.custom.dev/v2/tenant-a/items').allowed, true)
