@@ -352,7 +352,7 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 	})).status, 403, 'Local token sign-in rejected when OAuth providers exist')
 	assert.equal(bootstrapLocalAdmin(), null, 'bootstrapLocalAdmin no-ops when OAuth providers are configured')
 	await withEnv({ GOOGLE_CLIENT_ID: undefined, GITHUB_CLIENT_ID: undefined }, async () => {
-		assert.deepEqual(providers.listAuthProviders(), [])
+		assert.deepEqual(providers.listOauthProviders('auth'), [])
 		const localUser = db.users.create()
 		const localAdmin = db.tokens.create({ userId: localUser.id, provider: 'self', admin: 1 })
 		const localWorker = db.tokens.create({ userId: localUser.id, provider: 'self', admin: 0 })
@@ -580,4 +580,91 @@ test('getActiveSession allows in-flight setup/verify for refreshable OAuth sessi
 	const staleUpdated = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString()
 	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(staleUpdated, refreshableSess.id)
 	assert.equal(db.tokens.getActiveSession(refreshableSess.id), null)
+})
+
+test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login, share_app, connect_app, and callback', async () => {
+	const { session: adminSess } = createTestSession({ account: 'oauth-roles@example.com', admin: true })
+	const stripeApp = db.tokens.create({
+		userId: adminSess.userId,
+		provider: 'stripe',
+		type: 'static',
+		credentials: { bearer: 'sk_test', baseUrl: 'https://api.stripe.com' }
+	})
+	const ghExistingApp = db.tokens.create({
+		userId: adminSess.userId,
+		provider: 'github',
+		type: 'oauth',
+		credentials: { accessToken: 'gho_reauth', account: 'octo-reauth' }
+	})
+	await withEnv({ GITHUB_CLIENT_ID: 'gh-id', GITHUB_CLIENT_SECRET: 'gh-sec', OAUTH_PROVIDERS: 'google,github:app' }, async () => {
+		assert.deepEqual(providers.listOauthProviders('auth').map(p => p.id), ['google'])
+		assert.deepEqual(providers.listOauthProviders('app').map(p => p.id), ['google', 'github'])
+		const authPage = await req('GET', '/oauth/authorize')
+		assert.equal(authPage.status, 200)
+		assert.doesNotMatch(authPage.text, /"id":"github"/)
+		const ghLoginConsent = await req('POST', '/oauth/authorize/consent', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ provider: 'github' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(ghLoginConsent.status, 400)
+		assert.equal((await mcp(adminSess.token, 'admin', { action: 'link_login', provider: 'github' })).isError, true)
+		assert.equal((await mcp(adminSess.token, 'admin', { action: 'share_app', appId: stripeApp.id, account: 'github:octo' })).isError, true)
+		await withEnv({ SSO_DOMAINS: 'corp.io:github' }, async () => {
+			assert.equal((await mcp(adminSess.token, 'admin', { action: 'share_app', appId: stripeApp.id, account: 'bob@corp.io' })).isError, true)
+		})
+		const ghConnect = await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'github' })
+		assert.equal(ghConnect.isError, undefined)
+		const ghConnectUrl = new URL(JSON.parse(ghConnect.content[0].text).connectUrl)
+		assert.equal((await req('GET', `${ghConnectUrl.pathname}${ghConnectUrl.search}`)).status, 200)
+		const ghConsent = await req('POST', '/providers/github/consent', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: ghConnectUrl.searchParams.get('code') }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(ghConsent.status, 302)
+		const loginCbState = db.tokens.createState({ mode: 'login', provider: 'github' })
+		assert.equal((await req('GET', `/oauth/callback?code=c&state=${loginCbState}`)).status, 403)
+		const linkCbState = db.tokens.createState({ mode: 'auth', sessionId: adminSess.id, provider: 'github' })
+		assert.equal((await req('GET', `/oauth/callback?code=c&state=${linkCbState}`)).status, 403)
+	})
+	await withEnv({ GITHUB_CLIENT_ID: 'gh-id', GITHUB_CLIENT_SECRET: 'gh-sec', OAUTH_PROVIDERS: 'google,github:auth' }, async () => {
+		assert.deepEqual(providers.listOauthProviders('auth').map(p => p.id), ['google', 'github'])
+		assert.deepEqual(providers.listOauthProviders('app').map(p => p.id), ['google'])
+		const ghLoginConsent = await req('POST', '/oauth/authorize/consent', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ provider: 'github' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(ghLoginConsent.status, 302)
+		assert.equal((await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'github' })).isError, true)
+		assert.equal((await mcp(adminSess.token, 'admin', { action: 'connect_app', appId: ghExistingApp.id })).isError, true)
+		assert.equal((await req('GET', '/providers/github/connect')).status, 404)
+		assert.equal((await req('POST', '/providers/github/consent')).status, 404)
+		const connectCbState = db.tokens.createState({ mode: 'connect', sessionId: adminSess.id, provider: 'github' })
+		assert.equal((await req('GET', `/oauth/callback?code=c&state=${connectCbState}`)).status, 403)
+		const legacyCbState = db.tokens.createState({ mode: null, sessionId: adminSess.id, provider: 'github' })
+		assert.equal((await req('GET', `/oauth/callback?code=c&state=${legacyCbState}`)).status, 403)
+		const staticGh = await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'github', credentials: 'ghp_static_pat' })
+		assert.equal(staticGh.isError, undefined)
+		assert.equal(JSON.parse(staticGh.content[0].text).app.type, 'static')
+	})
+	await withEnv({ OAUTH_PROVIDERS: 'google:app' }, async () => {
+		assert.deepEqual(providers.listOauthProviders('auth'), [])
+		assert.deepEqual(providers.listOauthProviders('app').map(p => p.id), ['google'])
+		const authPage = await req('GET', '/oauth/authorize')
+		assert.equal(authPage.status, 200)
+		assert.match(authPage.text, /"localAuth":true/)
+		const localConsent = await req('POST', '/oauth/authorize/consent', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ token: adminSess.token, session_name: 'App-Only Local' }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(localConsent.status, 302)
+		assert.match(localConsent.headers.get('location'), /^https?:\/\/[^/]+\/oauth\/verify\?code=/)
+		assert.equal((await mcp(adminSess.token, 'admin', { action: 'link_login' })).isError, true)
+		db.sqlite.exec("DELETE FROM tokens WHERE provider = 'self'")
+		const bootstrapped = bootstrapLocalAdmin()
+		assert.ok(bootstrapped?.admin)
+	})
 })

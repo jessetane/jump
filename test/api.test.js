@@ -271,6 +271,7 @@ test('getBaseUrl / getClientIp fail-closed proxy trust, OAuth rate limiting, and
 		['USER_AGENT', undefined, /USER_AGENT must be set/],
 		['USER_AGENT', '   ', /USER_AGENT must be set/],
 		['SSO_DOMAINS', 'bad-entry', /Invalid SSO_DOMAINS entry/],
+		['OAUTH_PROVIDERS', 'stripe', /Invalid OAUTH_PROVIDERS provider/],
 		['OAUTH_RATE_LIMIT', 'abc', /Invalid OAUTH_RATE_LIMIT/]
 	]) {
 		const env = { ...process.env, HOST: '127.0.0.1', PORT: String(freePort), DB_PATH: subDbPath, USER_AGENT: 'jump-test' }

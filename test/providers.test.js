@@ -96,3 +96,44 @@ test('fetchOauth and fetchOauthJson normalize mixed-case and Headers overrides w
 		'user-agent': 'jump-test'
 	})
 })
+
+test('provider capability inference and parseOauthProviders validation', () => {
+	const okta = providers.createProvider({
+		id: 'okta',
+		name: 'Okta',
+		oauth: {
+			authUrl: 'https://okta.example/authorize',
+			tokenUrl: 'https://okta.example/token',
+			userInfoUrl: 'https://okta.example/userinfo',
+			extractAccount: u => u.email || null,
+			baseScopes: ['openid', 'email']
+		}
+	})
+	const customStatic = providers.createProvider('stripe')
+	assert.equal(providers.google.supportsAuth, true)
+	assert.equal(providers.google.supportsApp, true)
+	assert.equal(okta.supportsAuth, true)
+	assert.equal(okta.supportsApp, false)
+	assert.equal(customStatic.supportsAuth, false)
+	assert.equal(customStatic.supportsApp, true)
+	const registry = { google: providers.google, github: providers.github, okta, stripe: customStatic }
+	assert.equal(providers.parseOauthProviders('', registry), null)
+	assert.equal(providers.parseOauthProviders('   ', registry), null)
+	const parsed = providers.parseOauthProviders('google, github:app, okta', registry)
+	assert.deepEqual(parsed.get('google'), { auth: true, app: true })
+	assert.deepEqual(parsed.get('github'), { auth: false, app: true })
+	assert.deepEqual(parsed.get('okta'), { auth: true, app: false })
+	assert.throws(() => providers.parseOauthProviders('okta:app', registry), /does not support "app"/)
+	assert.throws(() => providers.parseOauthProviders('stripe', registry), /Invalid OAUTH_PROVIDERS provider/)
+	assert.throws(() => providers.parseOauthProviders('google:login', registry), /Invalid OAUTH_PROVIDERS role/)
+	assert.throws(() => providers.parseOauthProviders('google,google:auth', registry), /Duplicate provider/)
+	assert.throws(() => providers.parseOauthProviders('google:auth:extra', registry), /Invalid OAUTH_PROVIDERS entry/)
+	assert.throws(() => providers.parseOauthProviders('google:', registry), /Invalid OAUTH_PROVIDERS role/)
+	assert.throws(() => providers.parseOauthProviders(':auth', registry), /Invalid OAUTH_PROVIDERS provider/)
+	assert.throws(() => providers.parseOauthProviders('google,,github', registry), /Invalid OAUTH_PROVIDERS entry/)
+	assert.throws(() => providers.parseOauthProviders(',', registry), /Invalid OAUTH_PROVIDERS entry/)
+	assert.throws(() => providers.parseOauthProviders(123, registry), /Invalid OAUTH_PROVIDERS value/)
+	assert.throws(() => providers.isOauthProviderAllowed(providers.google, 'bogus'), /Invalid OAuth role/)
+	assert.throws(() => providers.listOauthProviders('bogus'), /Invalid OAuth role/)
+	assert.throws(() => providers.requireOauthProvider('google', 'bogus'), /Invalid OAuth role/)
+})
