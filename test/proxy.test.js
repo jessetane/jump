@@ -411,6 +411,11 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 			res.end()
 			return
 		}
+		if (upReq.url === '/not-modified-304') {
+			res.writeHead(304, { etag: '"v1"' })
+			res.end()
+			return
+		}
 		if (upReq.url === '/image-png') {
 			res.writeHead(200, { 'content-type': 'image/png' })
 			res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
@@ -531,6 +536,42 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 			assert.equal(resetRes.status, 502)
 			assert.equal(resetRes.headers.get('content-encoding'), null)
 			assert.equal(resetRes.headers.get('location'), null)
+			const rawHttp = (method, urlPath, { token: tok, headers = {}, chunks = null } = {}) => new Promise((resolve, reject) => {
+				const u = new URL(baseUrl())
+				const out = http.request({
+					hostname: u.hostname,
+					port: u.port,
+					path: urlPath,
+					method,
+					headers: { authorization: `Bearer ${tok}`, ...headers }
+				}, up => {
+					const bufs = []
+					up.on('data', c => bufs.push(c))
+					up.on('end', () => resolve({ status: up.statusCode, headers: up.headers, body: Buffer.concat(bufs) }))
+				})
+				out.on('error', reject)
+				if (chunks) {
+					for (const ch of chunks) out.write(ch)
+				}
+				out.end()
+			})
+			const rest304 = await rawHttp('GET', '/api/comp/not-modified-304', { token: session.token })
+			assert.equal(rest304.status, 304)
+			assert.equal(rest304.headers.etag, '"v1"')
+			assert.equal(rest304.body.byteLength, 0)
+			const restGz = await rawHttp('GET', '/api/comp/gzip', { token: session.token })
+			assert.equal(restGz.status, 200)
+			assert.equal(restGz.headers['content-encoding'], 'gzip')
+			assert.deepEqual(JSON.parse(zlib.gunzipSync(restGz.body).toString('utf8')), { ok: 'gz' })
+			const restChunked = await rawHttp('POST', '/api/comp/upload-stream', {
+				token: session.token,
+				headers: { 'content-type': 'text/plain' },
+				chunks: ['hello-', 'chunked']
+			})
+			assert.equal(restChunked.status, 200)
+			assert.equal(JSON.parse(restChunked.body.toString('utf8')).bytes, 13)
+			assert.equal(lastUploadBody, 'hello-chunked')
+			assert.equal(lastUploadContentLength, null, 'Uninspected REST upload preserves chunked streaming without Content-Length')
 			const restUp = await req('POST', '/api/comp/upload-stream', { token: session.token, headers: { 'content-type': 'application/octet-stream' }, body: Buffer.alloc(1536 * 1024, 0x42) })
 			assert.equal(restUp.data.bytes, 1536 * 1024)
 			const inspectedSess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
@@ -586,6 +627,19 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 				headers: { 'content-type': 'application/json' },
 				body: '{malformed'
 			})).status, 403, 'Malformed JSON under inspecting REST policy fails closed')
+			const chunkedAllow = await rawHttp('POST', '/api/comp/upload-stream', {
+				token: jsonPolicySess.token,
+				headers: { 'content-type': 'application/json' },
+				chunks: ['{"role":', '"user"}']
+			})
+			assert.equal(chunkedAllow.status, 200)
+			assert.equal(lastUploadContentLength, String(Buffer.byteLength('{"role":"user"}')))
+			const chunkedDeny = await rawHttp('POST', '/api/comp/upload-stream', {
+				token: jsonPolicySess.token,
+				headers: { 'content-type': 'application/json' },
+				chunks: ['{"role":', '"admin"}']
+			})
+			assert.equal(chunkedDeny.status, 403, 'Chunked upload still enforces JSON body policy')
 			const formPolicySess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
 			db.links.create({
 				sessionId: formPolicySess.id,
@@ -605,7 +659,7 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 				headers: { 'content-type': 'application/x-www-form-urlencoded' },
 				body: 'tag=evil'
 			})).status, 403)
-			assert.equal(uploadHits, hitsBefore + 3, 'Only allowed inspected requests reach upstream')
+			assert.equal(uploadHits, hitsBefore + 4, 'Only allowed inspected requests reach upstream')
 			const uninspectedSess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
 			db.links.create({ sessionId: uninspectedSess.id, appId: app.id, policy: [{ action: 'allow', methods: ['POST'], path: '/upload-stream' }] })
 			assert.equal((await req('POST', '/api/comp/upload-stream', {
@@ -787,6 +841,19 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer ghp_enterprise')
 		assert.equal((await mcp(mixedSess.token, 'github_api', { url: 'https://api.github.com/user', app: 'GHE' })).isError, true, 'Static GitHub app must stay pinned to its own baseUrl')
 		assert.equal((await mcp(mixedSess.token, 'github_api', { url: `${upstreamUrl}/user`, app: 'Personal' })).isError, true, 'OAuth GitHub app must stay pinned to https://api.github.com')
+		const gMixedSess = db.tokens.create({ userId: session.userId, provider: 'self', admin: 0 })
+		const gOauth = db.tokens.create({ userId: session.userId, provider: 'google', type: 'oauth', name: 'Work Google', credentials: { accessToken: 'ya29_work', account: 'alice@example.com' } })
+		const gStatic = db.tokens.create({ userId: session.userId, provider: 'google', type: 'static', name: 'Custom Proxy', credentials: { headers: { authorization: 'Bearer g_static' }, baseUrl: upstreamUrl } })
+		db.links.create({ sessionId: gMixedSess.id, appId: gOauth.id })
+		db.links.create({ sessionId: gMixedSess.id, appId: gStatic.id })
+		assert.equal((await mcp(gMixedSess.token, 'google_api', { url: '/drive/v3/files' })).isError, true, 'Mixed OAuth and static Google apps require explicit app selector')
+		assert.equal((await mcp(gMixedSess.token, 'google_api', { url: '/drive/v3/files', app: 'Custom Proxy' })).isError, undefined)
+		assert.equal(captured.at(-1).headers.authorization, 'Bearer g_static')
+		assert.equal((await mcp(gMixedSess.token, 'google_api', { url: 'https://www.googleapis.com/drive/v3/files', app: 'Custom Proxy' })).isError, true, 'Static Google app must stay pinned to its own baseUrl')
+		assert.equal((await mcp(gMixedSess.token, 'google_api', { url: `${upstreamUrl}/drive/v3/files`, app: 'Work Google' })).isError, true, 'OAuth Google app must stay pinned to *.googleapis.com')
+		const gTools = (await req('POST', '/mcp', { token: gMixedSess.token, body: { jsonrpc: '2.0', id: 9, method: 'tools/list', params: {} } })).data.result.tools
+		const gToolDesc = gTools.find(t => t.name === 'google_api').description
+		assert.match(gToolDesc, new RegExp(`Custom Proxy \\[${upstreamUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]`))
 	})
 })
 
