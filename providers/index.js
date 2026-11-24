@@ -13,6 +13,8 @@ export {
 	requireAuthProvider,
 	parseGrantedServices,
 	summarizeScopes,
+	fetchOauth,
+	fetchOauthJson,
 	google,
 	github
 }
@@ -148,30 +150,30 @@ async function withOauthTransport (fn, label, action) {
 	}
 }
 
-function fetchOauth (url, { method = 'GET', headers = {}, body, form } = {}, label = 'Upstream', action = 'contacting OAuth endpoint') {
-	const resolvedHeaders = {
-		'user-agent': getUserAgent(),
-		...headers
-	}
+function fetchOauth (url, { method = 'GET', headers, body, form } = {}, label = 'Upstream', action = 'contacting OAuth endpoint') {
+	const resolvedHeaders = new Headers(headers || undefined)
+	if (!resolvedHeaders.has('user-agent')) resolvedHeaders.set('user-agent', getUserAgent())
 	let resolvedMethod = method
 	let resolvedBody = body
 	if (form !== undefined) {
 		resolvedMethod = 'POST'
-		resolvedHeaders['content-type'] ||= 'application/x-www-form-urlencoded'
+		if (!resolvedHeaders.has('content-type')) resolvedHeaders.set('content-type', 'application/x-www-form-urlencoded')
 		resolvedBody = new URLSearchParams(form).toString()
 	}
 	return withOauthTransport(() => fetch(url, {
 		method: resolvedMethod,
-		headers: resolvedHeaders,
+		headers: Object.fromEntries(resolvedHeaders),
 		...(resolvedBody !== undefined && { body: resolvedBody }),
 		signal: oauthTimeout()
 	}), label, action)
 }
 
 async function fetchOauthJson (url, opts, label, action, fallbackErrorMsg) {
+	const resolvedHeaders = new Headers(opts?.headers || undefined)
+	if (!resolvedHeaders.has('accept')) resolvedHeaders.set('accept', 'application/json')
 	const res = await fetchOauth(url, {
 		...opts,
-		headers: { accept: 'application/json', ...opts?.headers }
+		headers: resolvedHeaders
 	}, label, action)
 	const rawText = await withOauthTransport(() => res.text(), label, action)
 	return parseOAuthResponse(res, rawText, fallbackErrorMsg)

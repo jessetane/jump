@@ -68,3 +68,31 @@ test('provider-specific hooks: google and github buildAuthUrl, extractAccount, a
 		assert.equal(new URLSearchParams(googleRevokeReq?.body).get('token'), '1//rev')
 	})
 })
+
+test('fetchOauth and fetchOauthJson normalize mixed-case and Headers overrides without colliding', async () => {
+	const seen = []
+	await withMockFetch((input, init) => {
+		seen.push({ method: init.method, headers: init.headers, body: init.body })
+		return Response.json({ ok: true })
+	}, async () => {
+		await providers.fetchOauth('https://oauth.example/token', {
+			headers: { 'User-Agent': 'custom-ua', 'Content-Type': 'text/plain; charset=utf-8' },
+			form: { a: '1' }
+		})
+		await providers.fetchOauthJson('https://oauth.example/info', {
+			headers: new Headers({ Accept: 'application/vnd.github+json', 'X-Extra': 'yes' })
+		})
+	})
+	assert.equal(seen[0].method, 'POST')
+	assert.deepEqual(seen[0].headers, {
+		'user-agent': 'custom-ua',
+		'content-type': 'text/plain; charset=utf-8'
+	})
+	assert.equal(seen[0].body, 'a=1')
+	assert.equal(seen[1].method, 'GET')
+	assert.deepEqual(seen[1].headers, {
+		accept: 'application/vnd.github+json',
+		'x-extra': 'yes',
+		'user-agent': 'jump-test'
+	})
+})
