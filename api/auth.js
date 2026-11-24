@@ -23,7 +23,6 @@ export {
 	unlinkLogin,
 	listLogs,
 	requireValidProviderId,
-	requireValidBaseUrl,
 	normalizeCredentials,
 	buildStaticCredentials
 }
@@ -327,9 +326,9 @@ function requireValidBaseUrl (rawBase) {
 	return normalized
 }
 
-function buildStaticCredentials ({ credentials, auth, baseUrl, providerDef, existingCreds = null }) {
+function buildStaticCredentials ({ credentials, auth, baseUrl, providerDef }) {
 	const normalizedAuth = auth !== undefined ? auth : normalizeCredentials(credentials)
-	const rawBase = baseUrl !== undefined ? baseUrl : (existingCreds?.baseUrl || providerDef?.baseUrl || null)
+	const rawBase = baseUrl !== undefined ? baseUrl : (providerDef?.baseUrl || null)
 	const normalizedBaseUrl = requireValidBaseUrl(rawBase)
 	return {
 		...normalizedAuth,
