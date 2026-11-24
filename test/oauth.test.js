@@ -956,51 +956,60 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		const ghInit = parseInit((await req('GET', `/apps/connect?code=${encodeURIComponent(ghStaticCode)}`)).text)
 		assert.equal(ghInit.provider, 'github')
 		assert.equal(ghInit.baseUrl, 'https://api.github.com')
-		const ghFormSubmit = await req('POST', '/apps/connect', {
+		const nonJsonSubmit = await req('POST', '/apps/connect', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded', origin: baseUrl() },
-			body: new URLSearchParams({
+			body: new URLSearchParams({ code: ghStaticCode, provider: 'github', credentials: 'ghp_form_secret' }).toString()
+		})
+		assert.equal(nonJsonSubmit.status, 415)
+		assert.ok(db.tokens.getState(ghStaticCode), 'Non-JSON submission must not consume setupCode')
+		const ghJsonSubmit = await req('POST', '/apps/connect', {
+			headers: { 'content-type': 'application/json', origin: baseUrl() },
+			body: {
 				code: ghStaticCode,
 				provider: 'github',
 				name: 'GitHub PAT',
 				baseUrl: '',
-				authType: 'bearer',
-				bearer: 'ghp_form_secret'
-			}).toString()
+				credentials: 'ghp_form_secret'
+			}
 		})
-		assert.equal(ghFormSubmit.status, 200)
-		assert.match(ghFormSubmit.text, /GitHub Connected/)
-		assert.match(ghFormSubmit.text, /Connected GitHub PAT/)
-		assert.equal(ghFormSubmit.text.includes('ghp_form_secret'), false)
+		assert.equal(ghJsonSubmit.status, 200)
+		assert.equal(ghJsonSubmit.data.title, 'GitHub Connected')
+		assert.equal(ghJsonSubmit.data.subtitle, 'Connected GitHub PAT')
+		assert.equal(JSON.stringify(ghJsonSubmit.data).includes('ghp_form_secret'), false)
 		const createdGhStatic = db.tokens.listByUserId(adminSess.userId).find(t => t.provider === 'github' && t.type === 'static' && t.name === 'GitHub PAT')
 		assert.equal(createdGhStatic.credentials.baseUrl, 'https://api.github.com')
 		assert.equal(createdGhStatic.credentials.headers.authorization, 'Bearer ghp_form_secret')
 	})
 	for (const modeCase of [
 		{
-			form: { authType: 'basic', basicUser: 'key_id', basicPass: 'sec ' },
+			tag: 'basic',
+			credentials: { basic: 'key_id:sec ' },
 			verify: creds => assert.equal(creds.headers.authorization, `Basic ${Buffer.from('key_id:sec ').toString('base64')}`)
 		},
 		{
-			form: { authType: 'headers', headerName: 'X-Api-Key', headerValue: 'hdr_secret' },
+			tag: 'headers',
+			credentials: { headers: { 'X-Api-Key': 'hdr_secret' } },
 			verify: creds => assert.equal(creds.headers['x-api-key'], 'hdr_secret')
 		},
 		{
-			form: { authType: 'query', queryName: 'api_key', queryValue: 'q_secret' },
+			tag: 'query',
+			credentials: { query: { api_key: 'q_secret' } },
 			verify: creds => assert.equal(creds.query.api_key, 'q_secret')
 		},
 		{
-			form: { authType: 'json', credentialsJson: JSON.stringify({ headers: { authorization: 'Bearer j_tok' }, query: { v: '2' } }) },
+			tag: 'mixed',
+			credentials: { headers: { authorization: 'Bearer j_tok' }, query: { v: '2' } },
 			verify: creds => {
 				assert.equal(creds.headers.authorization, 'Bearer j_tok')
 				assert.equal(creds.query.v, '2')
 			}
 		}
 	]) {
-		const modeProv = `custom_${modeCase.form.authType}`
+		const modeProv = `custom_${modeCase.tag}`
 		const modeCode = db.tokens.createState({ mode: 'setup_static', sessionId: adminSess.id, provider: modeProv, baseUrl: 'https://api.example.com' })
 		const modeRes = await req('POST', '/apps/connect', {
-			headers: { 'content-type': 'application/x-www-form-urlencoded', origin: baseUrl() },
-			body: new URLSearchParams({ code: modeCode, provider: modeProv, baseUrl: 'https://api.example.com', ...modeCase.form }).toString()
+			headers: { 'content-type': 'application/json', origin: baseUrl() },
+			body: { code: modeCode, provider: modeProv, baseUrl: 'https://api.example.com', credentials: modeCase.credentials }
 		})
 		assert.equal(modeRes.status, 200)
 		const stored = db.tokens.listByUserId(adminSess.userId).find(t => t.provider === modeProv)

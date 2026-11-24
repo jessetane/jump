@@ -698,46 +698,6 @@ function getOwnedApp (session, appId, { providerId = null, type = null } = {}) {
 
 const STATIC_CONNECT_KEYS = ['code', 'provider', 'name', 'baseUrl', 'credentials']
 
-function parseStaticFormBody (rawBody, req) {
-	const contentType = String(req?.headers?.['content-type'] || '').split(';')[0].trim().toLowerCase()
-	if (contentType === 'application/json' || contentType.endsWith('+json')) {
-		return parseJsonObject(rawBody, { allowedKeys: STATIC_CONNECT_KEYS })
-	}
-	const params = new URLSearchParams(rawBody)
-	const authType = params.get('authType') || params.get('auth_type') || 'bearer'
-	let credentials
-	if (params.has('credentials') && !params.has('bearer')) {
-		const rawCreds = params.get('credentials')
-		try {
-			credentials = JSON.parse(rawCreds)
-		} catch {
-			credentials = rawCreds
-		}
-	} else if (authType === 'json') {
-		const rawJson = params.get('credentialsJson') || params.get('credentials_json') || ''
-		try {
-			credentials = JSON.parse(rawJson)
-		} catch {
-			throw httpError(400, 'Credentials JSON must be valid JSON')
-		}
-	} else if (authType === 'basic') {
-		credentials = { basic: `${params.get('basicUser') || ''}:${params.get('basicPass') || ''}` }
-	} else if (authType === 'headers') {
-		credentials = { headers: { [params.get('headerName') || '']: params.get('headerValue') || '' } }
-	} else if (authType === 'query') {
-		credentials = { query: { [params.get('queryName') || '']: params.get('queryValue') || '' } }
-	} else {
-		credentials = params.get('bearer') ?? ''
-	}
-	return {
-		code: params.get('code') || '',
-		provider: params.get('provider') ?? undefined,
-		name: params.get('name') ?? undefined,
-		baseUrl: params.get('baseUrl') ?? params.get('base_url') ?? undefined,
-		credentials
-	}
-}
-
 function handleStaticConnectGet (res, query) {
 	const code = query.code || ''
 	const ctx = loadSetupContext(code, { mode: 'setup_static', appType: 'static' })
@@ -793,18 +753,15 @@ function validateStaticSubmission (body, setup, existingApp) {
 async function handleStaticConnectPost (req, res) {
 	if (!checkFormOrigin(req, res)) return
 	res.setHeader('cache-control', 'no-store')
+	const respondError = (status, message) => sendJson(res, { error: message }, status, { 'cache-control': 'no-store' })
 	const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
-	const wantsJson = contentType === 'application/json' || contentType.endsWith('+json') || String(req.headers.accept || '').includes('application/json')
-	const respondError = (status, message) => {
-		if (wantsJson) {
-			sendJson(res, { error: message }, status, { 'cache-control': 'no-store' })
-		} else {
-			sendText(res, message, status)
-		}
+	if (contentType !== 'application/json' && !contentType.endsWith('+json')) {
+		respondError(415, 'Content-Type must be application/json')
+		return
 	}
 	let body
 	try {
-		body = parseStaticFormBody(await getBody(req), req)
+		body = parseJsonObject(await getBody(req), { allowedKeys: STATIC_CONNECT_KEYS })
 	} catch (err) {
 		respondError(err.status || 400, err.message)
 		return
@@ -847,7 +804,7 @@ async function handleStaticConnectPost (req, res) {
 		db.links.create({ sessionId: activeSession.id, appId: created.id })
 		appId = created.id
 	}
-	const result = {
+	sendJson(res, {
 		connected: true,
 		updated: isUpdate,
 		appId,
@@ -857,12 +814,7 @@ async function handleStaticConnectPost (req, res) {
 		detail: isUpdate
 			? 'Linked sessions will use the updated credentials automatically.'
 			: 'You can close this window and return to your agent.'
-	}
-	if (wantsJson) {
-		sendJson(res, result, 200, { 'cache-control': 'no-store' })
-		return
-	}
-	sendHtml(res, renderCardPage(result.title, escapeHtml(result.subtitle), `<p class="subtitle">${escapeHtml(result.detail)}</p>`))
+	}, 200, { 'cache-control': 'no-store' })
 }
 
 async function handleStaticConnect (req, res, query) {
