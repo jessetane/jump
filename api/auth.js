@@ -21,7 +21,11 @@ export {
 	unlinkApp,
 	linkLogin,
 	unlinkLogin,
-	listLogs
+	listLogs,
+	requireValidProviderId,
+	requireValidBaseUrl,
+	normalizeCredentials,
+	buildStaticCredentials
 }
 
 function formatLogin (login) {
@@ -292,12 +296,47 @@ function requireNonEmptyString (val, label) {
 	return val.trim()
 }
 
+function requireValidProviderId (rawProvider) {
+	const provider = requireNonEmptyString(rawProvider, 'provider').toLowerCase()
+	if (!isValidProviderId(provider)) {
+		const msg = RESERVED_PROVIDERS.has(provider)
+			? `provider cannot be "${provider}"`
+			: 'provider must contain only letters, digits, underscores, or hyphens'
+		throw httpError(400, msg)
+	}
+	return provider
+}
+
+function requireAppType (rawType) {
+	if (rawType === undefined || rawType === null) return null
+	if (typeof rawType !== 'string' || !rawType.trim()) {
+		throw httpError(400, 'type must be "oauth" or "static"')
+	}
+	const clean = rawType.trim().toLowerCase()
+	if (clean !== 'oauth' && clean !== 'static') {
+		throw httpError(400, 'type must be "oauth" or "static"')
+	}
+	return clean
+}
+
 function requireValidBaseUrl (rawBase) {
 	const normalized = rawBase ? validateBaseUrl(rawBase) : null
 	if (!normalized) {
 		throw httpError(400, 'Valid https:// baseUrl is required for static apps')
 	}
 	return normalized
+}
+
+function buildStaticCredentials ({ credentials, auth, baseUrl, account, providerDef, existingCreds = null }) {
+	const normalizedAuth = auth !== undefined ? auth : normalizeCredentials(credentials)
+	const rawBase = baseUrl !== undefined ? baseUrl : (existingCreds?.baseUrl || providerDef?.baseUrl || null)
+	const normalizedBaseUrl = requireValidBaseUrl(rawBase)
+	const cleanAccount = optionalString(account, 'account')
+	return {
+		...normalizedAuth,
+		baseUrl: normalizedBaseUrl,
+		...(cleanAccount && { account: cleanAccount })
+	}
 }
 
 const ALLOWED_CREDENTIAL_KEYS = new Set(['bearer', 'basic', 'headers', 'query'])
@@ -437,40 +476,48 @@ function normalizeCredentials (raw) {
 
 async function connectApp (token, opts = {}, appUrl) {
 	const session = requireAdmin(token)
-	assertKeys(opts, ['provider', 'name', 'credentials', 'account', 'baseUrl', 'appId', 'services'])
-	let { provider, name, credentials, account, baseUrl, appId, services } = opts || {}
-	if (provider === undefined || provider === null) {
-		provider = null
-	} else {
-		provider = requireNonEmptyString(provider, 'provider').toLowerCase()
-	}
+	assertKeys(opts, ['provider', 'type', 'name', 'credentials', 'account', 'baseUrl', 'appId', 'services'])
+	let { provider, type, name, credentials, account, baseUrl, appId, services } = opts || {}
+	provider = provider === undefined || provider === null ? null : requireValidProviderId(provider)
+	let appType = requireAppType(type)
 	const cleanName = optionalString(name, 'name')
 	const cleanAccount = optionalString(account, 'account')
+	let existingApp = null
 	if (appId !== undefined) {
-		const existing = requireApp(session.userId, appId, { allowShare: false })
-		appId = existing.id
-		if (provider && provider !== existing.provider) {
-			throw httpError(400, `App ${appId} belongs to provider "${existing.provider}", not "${provider}"`)
+		existingApp = requireApp(session.userId, appId, { allowShare: false })
+		appId = existingApp.id
+		if (provider && provider !== existingApp.provider) {
+			throw httpError(400, `App ${appId} belongs to provider "${existingApp.provider}", not "${provider}"`)
 		}
-		if (existing.type !== 'oauth') {
-			throw httpError(400, `Cannot re-authenticate ${existing.type} app via connect_app; use update_app instead`)
+		if (appType && appType !== existingApp.type) {
+			throw httpError(400, `App ${appId} has type "${existingApp.type}", not "${appType}"`)
 		}
 		if (name !== undefined || credentials !== undefined || account !== undefined || baseUrl !== undefined) {
 			throw httpError(400, 'Cannot pass name, credentials, account, or baseUrl with appId in connect_app; use update_app instead')
 		}
-		provider = existing.provider
+		provider = existingApp.provider
+		appType = existingApp.type
 	}
 	const normalizedAuth = credentials !== undefined ? normalizeCredentials(credentials) : null
-	provider = provider || 'google'
-	if (!isValidProviderId(provider)) {
-		const msg = RESERVED_PROVIDERS.has(provider)
-			? `provider cannot be "${provider}"`
-			: 'provider must contain only letters, digits, underscores, or hyphens'
-		throw httpError(400, msg)
+	if (!appType) {
+		if (normalizedAuth) {
+			appType = 'static'
+		} else if (provider) {
+			appType = getProvider(provider)?.type === 'oauth' ? 'oauth' : 'static'
+		} else {
+			provider = 'google'
+			appType = 'oauth'
+		}
 	}
-	const providerDef = getProvider(provider)
-	if (providerDef?.type === 'oauth' && !normalizedAuth) {
-		requireOauthProvider(providerDef.id, 'app')
+	if (appType === 'oauth') {
+		if (normalizedAuth) {
+			throw httpError(400, 'credentials cannot be used with OAuth apps')
+		}
+		if (baseUrl !== undefined || account !== undefined) {
+			throw httpError(400, 'baseUrl and account are only supported for static apps')
+		}
+		provider = provider || 'google'
+		const providerDef = requireOauthProvider(provider, 'app')
 		let resolvedServices = null
 		if (services !== undefined) {
 			if (!providerDef.services) {
@@ -499,15 +546,32 @@ async function connectApp (token, opts = {}, appUrl) {
 		throw httpError(400, 'services is only supported for OAuth apps')
 	}
 	if (!normalizedAuth) {
-		throw httpError(400, 'credentials is required for static apps')
+		const validatedBase = baseUrl !== undefined ? requireValidBaseUrl(baseUrl) : null
+		const setupCode = db.tokens.createState({
+			mode: 'setup_static',
+			sessionId: session.id,
+			provider,
+			reauthAppId: appId || null,
+			name: existingApp ? existingApp.name : cleanName,
+			baseUrl: existingApp ? (existingApp.credentials?.baseUrl || null) : validatedBase,
+			account: existingApp ? (existingApp.credentials?.account || null) : cleanAccount,
+			ttl: 10 * 60 * 1000
+		})
+		return {
+			actionRequired: 'browser_flow',
+			connectUrl: `${resolveOrigin(appUrl)}/apps/connect?code=${encodeURIComponent(setupCode)}`
+		}
 	}
-	const rawBase = baseUrl !== undefined ? baseUrl : (providerDef?.baseUrl || null)
-	const normalizedBaseUrl = requireValidBaseUrl(rawBase)
-	const creds = {
-		...normalizedAuth,
-		baseUrl: normalizedBaseUrl,
-		...(cleanAccount && { account: cleanAccount })
+	if (!provider) {
+		throw httpError(400, 'provider is required for static apps')
 	}
+	const providerDef = getProvider(provider)
+	const creds = buildStaticCredentials({
+		auth: normalizedAuth,
+		baseUrl,
+		account: cleanAccount,
+		providerDef
+	})
 	const app = db.tokens.create({
 		userId: session.userId,
 		provider,

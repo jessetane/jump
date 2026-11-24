@@ -61,7 +61,7 @@ function buildAdminTool () {
 					description: 'Administrative action to perform.'
 				},
 				sessionId: { type: 'string', description: 'Target session token ID.' },
-				appId: { type: 'string', description: 'Target upstream app token ID (used for connect_app, update_app, disconnect_app, share_app, unshare_app, link_app, unlink_app, list_logs).' },
+				appId: { type: 'string', description: 'Target upstream app token ID (for connect_app to re-authenticate OAuth or rotate static credentials via browser, plus update_app, disconnect_app, share_app, unshare_app, link_app, unlink_app, list_logs).' },
 				linkAppIds: {
 					type: 'array',
 					items: { type: 'string' },
@@ -73,7 +73,7 @@ function buildAdminTool () {
 				baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or static-credential providers (e.g. "https://api.stripe.com").' },
 				credentials: {
 					type: ['string', 'object'],
-					description: 'Upstream static credentials for connect_app and update_app: pass a string shorthand "<token>" for Bearer auth, or a structured object { bearer?, basic?, headers?, query? } where bearer is "<token>", basic is "user:pass", headers is { [name]: value } (e.g. { "x-api-key": "..." }), and query is { [name]: value }.',
+					description: 'Upstream static credentials for connect_app and update_app (omit on connect_app to return a browser URL so the user can submit keys without exposing them to the model): pass a string shorthand "<token>" for Bearer auth, or a structured object { bearer?, basic?, headers?, query? } where bearer is "<token>", basic is "user:pass", headers is { [name]: value } (e.g. { "x-api-key": "sk-ant-..." }), and query is { [name]: value }.',
 					properties: {
 						bearer: { type: 'string', description: 'Bearer token sent as Authorization: Bearer <token>.' },
 						basic: { type: 'string', description: 'HTTP Basic credentials in "user:pass" format.' },
@@ -81,7 +81,8 @@ function buildAdminTool () {
 						query: { type: 'object', description: 'URL query parameters to attach on upstream requests (e.g. { ApiKey: "..." }).' }
 					}
 				},
-				provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe", "github").' },
+				provider: { type: 'string', description: 'Provider namespace / tool slug (e.g. "google", "stripe", "github"; exposes <provider>_api).' },
+				type: { type: 'string', enum: ['oauth', 'static'], description: 'Optional auth type for connect_app. Defaults to "oauth" for built-in OAuth providers (when credentials are omitted) and "static" otherwise; set "static" to connect a static key or launch the browser credential form for an OAuth or unspecified provider.' },
 				services: {
 					type: 'array',
 					items: { type: 'string' },
