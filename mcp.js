@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import RpcEngine from 'rpc-engine'
 import * as api from './api/index.js'
 import * as db from './db/index.js'
-import { getProvider, parseProviderTool } from './providers/index.js'
+import { getProvider, listOauthProviders, parseProviderTool } from './providers/index.js'
 import { assertKeys, getBody, getBaseUrl, httpError, isPlainObject, sendJson } from './util.js'
 
 export {
@@ -13,109 +13,133 @@ export {
 
 const PKG_VERSION = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 
-const adminTool = {
-	name: 'admin',
-	description: 'Administer MCP sessions, connected upstream apps, cross-user app shares, routing policies, login keys, and usage logs. Note: link_app and share_app upsert in place—re-calling them replaces the existing policy.',
-	inputSchema: {
-		type: 'object',
-		properties: {
-			action: {
-				type: 'string',
-				enum: [
-					'whoami',
-					'list_sessions',
-					'get_session',
-					'create_session',
-					'update_session',
-					'revoke_session',
-					'list_apps',
-					'connect_app',
-					'disconnect_app',
-					'update_app',
-					'share_app',
-					'unshare_app',
-					'link_app',
-					'unlink_app',
-					'link_login',
-					'unlink_login',
-					'list_logs'
-				],
-				description: 'Administrative action to perform.'
-			},
-			sessionId: { type: 'string', description: 'Target session token ID.' },
-			appId: { type: 'string', description: 'Target upstream app token ID (used for connect_app, update_app, disconnect_app, share_app, unshare_app, link_app, unlink_app, list_logs).' },
-			linkAppIds: {
-				type: 'array',
-				items: { type: 'string' },
-				description: 'Optional list of upstream or shared app IDs to link immediately when action is create_session.'
-			},
-			loginId: { type: 'string', description: 'Target login key ID (optional for unlink_login).' },
-			name: { type: 'string', description: 'Human-readable label for a session or upstream app.' },
-			account: { type: 'string', description: 'Upstream account, login key account, or recipient user account identifier (e.g. email, username, or "provider:account").' },
-			baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or static-credential providers (e.g. "https://api.stripe.com").' },
-			credentials: {
-				type: ['string', 'object'],
-				description: 'Upstream static credentials for connect_app and update_app: pass a string shorthand "<token>" for Bearer auth, or a structured object { bearer?, basic?, headers?, query? } where bearer is "<token>", basic is "user:pass", headers is { [name]: value } (e.g. { "x-api-key": "..." }), and query is { [name]: value }.',
-				properties: {
-					bearer: { type: 'string', description: 'Bearer token sent as Authorization: Bearer <token>.' },
-					basic: { type: 'string', description: 'HTTP Basic credentials in "user:pass" format.' },
-					headers: { type: 'object', description: 'Exact HTTP headers to attach on upstream requests (e.g. { "x-api-key": "sk-ant-...", "anthropic-version": "2023-06-01" }).' },
-					query: { type: 'object', description: 'URL query parameters to attach on upstream requests (e.g. { ApiKey: "..." }).' }
-				}
-			},
-			provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe", "github").' },
-			policy: {
-				type: ['array', 'null'],
-				description: 'Ordered list of rules evaluated top-to-bottom (first match wins; unmatched requests are denied). Semantics: (1) null or omitted = unrestricted allow-all; [] = deny-all. (2) Within a rule, all present fields (methods, origin, path, query, body) are ANDed; omitted fields match anything. Place specific deny rules BEFORE broader allow rules. (3) On shared apps, the owner share_app policy acts as an immutable ceiling—both the share policy AND the recipient link_app policy must independently allow each request. (4) Prefer minimal allowlists over denylists.',
-				items: {
-					type: 'object',
-					required: ['action'],
+function formatProviderServices (provider) {
+	const entries = Object.values(provider.services || {})
+	if (entries.length === 0) return ''
+	const items = entries.map(svc => {
+		const modes = Object.keys(svc.scopes || {})
+		if (modes.length === 2 && modes.includes('read') && modes.includes('write')) return svc.id
+		return `${svc.id} [${modes.join(', ')}]`
+	})
+	return `${provider.id}: ${items.join(', ')}`
+}
+
+function buildAdminTool () {
+	const providerGuides = listOauthProviders('app')
+		.filter(p => p.services)
+		.map(formatProviderServices)
+		.filter(Boolean)
+	const servicesDesc = 'Optional list of OAuth service permissions to pre-check on connect_app (e.g. ["<service1>", "<service2>:read", "<service2>:write"]). Bare "<service>" selects "read" (or the sole mode for single-mode services); specify "<service>:<mode>" for each desired mode.'
+		+ (providerGuides.length > 0 ? ` Unqualified names support read & write unless noted — ${providerGuides.join('; ')}.` : '')
+	return {
+		name: 'admin',
+		description: 'Administer MCP sessions, connected upstream apps, cross-user app shares, routing policies, login keys, and usage logs. Note: link_app and share_app upsert in place—re-calling them replaces the existing policy.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				action: {
+					type: 'string',
+					enum: [
+						'whoami',
+						'list_sessions',
+						'get_session',
+						'create_session',
+						'update_session',
+						'revoke_session',
+						'list_apps',
+						'connect_app',
+						'disconnect_app',
+						'update_app',
+						'share_app',
+						'unshare_app',
+						'link_app',
+						'unlink_app',
+						'link_login',
+						'unlink_login',
+						'list_logs'
+					],
+					description: 'Administrative action to perform.'
+				},
+				sessionId: { type: 'string', description: 'Target session token ID.' },
+				appId: { type: 'string', description: 'Target upstream app token ID (used for connect_app, update_app, disconnect_app, share_app, unshare_app, link_app, unlink_app, list_logs).' },
+				linkAppIds: {
+					type: 'array',
+					items: { type: 'string' },
+					description: 'Optional list of upstream or shared app IDs to link immediately when action is create_session.'
+				},
+				loginId: { type: 'string', description: 'Target login key ID (optional for unlink_login).' },
+				name: { type: 'string', description: 'Human-readable label for a session or upstream app.' },
+				account: { type: 'string', description: 'Upstream account, login key account, or recipient user account identifier (e.g. email, username, or "provider:account").' },
+				baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or static-credential providers (e.g. "https://api.stripe.com").' },
+				credentials: {
+					type: ['string', 'object'],
+					description: 'Upstream static credentials for connect_app and update_app: pass a string shorthand "<token>" for Bearer auth, or a structured object { bearer?, basic?, headers?, query? } where bearer is "<token>", basic is "user:pass", headers is { [name]: value } (e.g. { "x-api-key": "..." }), and query is { [name]: value }.',
 					properties: {
-						action: {
-							type: 'string',
-							enum: ['allow', 'deny'],
-							description: 'Rule outcome when all predicates on this rule match: "allow" or "deny".'
-						},
-						methods: {
-							type: 'array',
-							items: { type: 'string' },
-							description: 'Case-insensitive HTTP methods (["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "*"]). Omit (or use ["*"]) to match all methods.'
-						},
-						origin: {
-							type: 'string',
-							description: 'HTTPS origin glob without path or query (e.g. "https://sheets.googleapis.com" or "https://*.googleapis.com"). Always set origin on multi-host providers like Google so a path rule such as "/v4/spreadsheets/**" cannot match another host.'
-						},
-						path: {
-							type: 'string',
-							description: 'Case-insensitive URL pathname glob (* matches within one segment excluding "/", ** matches across segments). Trailing "/**" matches both the base path and all nested sub-paths (e.g. "/v1/events/**" matches "/v1/events" and "/v1/events/123"). Trailing slashes and safe percent-encoding are normalized automatically—write literal "@" rather than "%40", and never include "?query" here.'
-						},
-						query: {
-							type: 'object',
-							description: 'Non-empty map of URL query parameter names to expected primitive glob(s) or null. Matching is case-insensitive and "*" matches any character (including "/"). IMPORTANT: a string pattern requires the parameter to be PRESENT—use ["none", null] to allow a parameter to be either "none" or omitted, or null alone to require absence. Repeated parameters (?tag=a&tag=b) only match when EVERY value matches at least one pattern.'
-						},
-						body: {
-							type: ['object', 'string', 'array', 'null'],
-							description: 'Optional request body constraint (omit to pass body through uninspected): (a) field-map object: non-empty map of literal field keys (or nested plain objects mirroring JSON, e.g. { recipient: { email: "*@good.com" } }; use flat keys like "metadata[env]" for form) to primitive glob(s) or null—same presence/absence and array-every semantics as query; empty bodies evaluate as {}; (b) string or string[] of globs: case-insensitive full-body match where "*" crosses newlines (e.g. "*<DeleteDomain*" matches both "<DeleteDomain>" and "<DeleteDomain/>"); (c) null: requires an empty request body.'
-						},
-						bodyType: {
-							type: 'string',
-							enum: ['json', 'form'],
-							description: 'Required serialization format when "body" is a field-map object (invalid otherwise): "json" (default) or "form" (application/x-www-form-urlencoded—use "form" for Stripe, Twilio, Mailgun, etc.). Caveat: if a non-empty payload cannot be parsed as bodyType, an "allow" rule skips it, whereas a "deny" rule FAILS CLOSED and blocks the request immediately so callers cannot bypass field blocks by switching formats.'
-						},
-						description: {
-							type: 'string',
-							description: 'Optional human-readable label; returned as the error reason when a "deny" rule blocks a request.'
+						bearer: { type: 'string', description: 'Bearer token sent as Authorization: Bearer <token>.' },
+						basic: { type: 'string', description: 'HTTP Basic credentials in "user:pass" format.' },
+						headers: { type: 'object', description: 'Exact HTTP headers to attach on upstream requests (e.g. { "x-api-key": "sk-ant-...", "anthropic-version": "2023-06-01" }).' },
+						query: { type: 'object', description: 'URL query parameters to attach on upstream requests (e.g. { ApiKey: "..." }).' }
+					}
+				},
+				provider: { type: 'string', description: 'Provider name (e.g. "google", "stripe", "github").' },
+				services: {
+					type: 'array',
+					items: { type: 'string' },
+					description: servicesDesc
+				},
+				policy: {
+					type: ['array', 'null'],
+					description: 'Ordered list of rules evaluated top-to-bottom (first match wins; unmatched requests are denied). Semantics: (1) null or omitted = unrestricted allow-all; [] = deny-all. (2) Within a rule, all present fields (methods, origin, path, query, body) are ANDed; omitted fields match anything. Place specific deny rules BEFORE broader allow rules. (3) On shared apps, the owner share_app policy acts as an immutable ceiling—both the share policy AND the recipient link_app policy must independently allow each request. (4) Prefer minimal allowlists over denylists.',
+					items: {
+						type: 'object',
+						required: ['action'],
+						properties: {
+							action: {
+								type: 'string',
+								enum: ['allow', 'deny'],
+								description: 'Rule outcome when all predicates on this rule match: "allow" or "deny".'
+							},
+							methods: {
+								type: 'array',
+								items: { type: 'string' },
+								description: 'Case-insensitive HTTP methods (["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "*"]). Omit (or use ["*"]) to match all methods.'
+							},
+							origin: {
+								type: 'string',
+								description: 'HTTPS origin glob without path or query (e.g. "https://sheets.googleapis.com" or "https://*.googleapis.com"). Always set origin on multi-host providers like Google so a path rule such as "/v4/spreadsheets/**" cannot match another host.'
+							},
+							path: {
+								type: 'string',
+								description: 'Case-insensitive URL pathname glob (* matches within one segment excluding "/", ** matches across segments). Trailing "/**" matches both the base path and all nested sub-paths (e.g. "/v1/events/**" matches "/v1/events" and "/v1/events/123"). Trailing slashes and safe percent-encoding are normalized automatically—write literal "@" rather than "%40", and never include "?query" here.'
+							},
+							query: {
+								type: 'object',
+								description: 'Non-empty map of URL query parameter names to expected primitive glob(s) or null. Matching is case-insensitive and "*" matches any character (including "/"). IMPORTANT: a string pattern requires the parameter to be PRESENT—use ["none", null] to allow a parameter to be either "none" or omitted, or null alone to require absence. Repeated parameters (?tag=a&tag=b) only match when EVERY value matches at least one pattern.'
+							},
+							body: {
+								type: ['object', 'string', 'array', 'null'],
+								description: 'Optional request body constraint (omit to pass body through uninspected): (a) field-map object: non-empty map of literal field keys (or nested plain objects mirroring JSON, e.g. { recipient: { email: "*@good.com" } }; use flat keys like "metadata[env]" for form) to primitive glob(s) or null—same presence/absence and array-every semantics as query; empty bodies evaluate as {}; (b) string or string[] of globs: case-insensitive full-body match where "*" crosses newlines (e.g. "*<DeleteDomain*" matches both "<DeleteDomain>" and "<DeleteDomain/>"); (c) null: requires an empty request body.'
+							},
+							bodyType: {
+								type: 'string',
+								enum: ['json', 'form'],
+								description: 'Required serialization format when "body" is a field-map object (invalid otherwise): "json" (default) or "form" (application/x-www-form-urlencoded—use "form" for Stripe, Twilio, Mailgun, etc.). Caveat: if a non-empty payload cannot be parsed as bodyType, an "allow" rule skips it, whereas a "deny" rule FAILS CLOSED and blocks the request immediately so callers cannot bypass field blocks by switching formats.'
+							},
+							description: {
+								type: 'string',
+								description: 'Optional human-readable label; returned as the error reason when a "deny" rule blocks a request.'
+							}
 						}
 					}
-				}
-			},
-			admin: { type: 'boolean', description: 'Grant or revoke admin permissions on a session (used for create_session and update_session).' },
-			rotateToken: { type: 'boolean', description: 'When action is update_session, set to true to rotate and regenerate the session bearer token.' },
-			merge: { type: 'boolean', description: 'When action is link_login, set to true to merge an existing Jump account into the current user if that login is already registered.' },
-			revoke: { type: 'boolean', description: 'When action is disconnect_app, set to false to remove locally without upstream revocation (defaults to true).' },
-			allOthers: { type: 'boolean', description: 'When action is revoke_session, set to true to revoke all other sessions.' },
-			allowed: { type: 'boolean', description: 'When action is list_logs, filter logs by whether the request was allowed by policy.' },
-			limit: { type: 'number', description: 'When action is list_logs, maximum number of log entries to return (defaults to 100, max 1000).' }
+				},
+				admin: { type: 'boolean', description: 'Grant or revoke admin permissions on a session (used for create_session and update_session).' },
+				rotateToken: { type: 'boolean', description: 'When action is update_session, set to true to rotate and regenerate the session bearer token.' },
+				merge: { type: 'boolean', description: 'When action is link_login, set to true to merge an existing Jump account into the current user if that login is already registered.' },
+				revoke: { type: 'boolean', description: 'When action is disconnect_app, set to false to remove locally without upstream revocation (defaults to true).' },
+				allOthers: { type: 'boolean', description: 'When action is revoke_session, set to true to revoke all other sessions.' },
+				allowed: { type: 'boolean', description: 'When action is list_logs, filter logs by whether the request was allowed by policy.' },
+				limit: { type: 'number', description: 'When action is list_logs, maximum number of log entries to return (defaults to 100, max 1000).' }
+			}
 		}
 	}
 }
@@ -270,7 +294,7 @@ function getAvailableTools (auth) {
 	const links = db.links.listBySessionId(session.id)
 	const list = []
 	if (session.admin) {
-		list.push(adminTool)
+		list.push(buildAdminTool())
 	}
 	const grouped = new Map()
 	for (const link of links) {

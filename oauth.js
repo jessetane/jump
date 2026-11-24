@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import * as db from './db/index.js'
-import { getProvider, isValidProviderId, isOauthProviderAllowed, listOauthProviders, requireOauthProvider, parseGrantedServices, summarizeScopes } from './providers/index.js'
+import { getProvider, isValidProviderId, isOauthProviderAllowed, listOauthProviders, requireOauthProvider, parseGrantedServices, summarizeScopes, normalizeServiceSelections } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
 import { getBody, getBaseUrl, getClientIp, httpError, isPlainObject, sendJson, sendText, sendHtml, redirect, isLoopbackHost } from './util.js'
 
@@ -663,37 +663,37 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 	}
 	provider.requireEnv()
 	const resolvedParams = { ...query }
-	if (url?.searchParams) {
-		for (const key of ['services', 'write']) {
-			const all = url.searchParams.getAll(key)
-			if (all.length > 1) resolvedParams[key] = all.join(',')
-		}
-	}
 	delete resolvedParams.reauth_app_id
+	let setup = null
+	let existingApp = null
 	if (query.code !== undefined) {
-		const setup = db.tokens.getState(query.code)
+		setup = db.tokens.getState(query.code)
 		const session = resolveSetupState(setup, 'setup_connect', provider.id)
 		if (!session) {
 			sendText(res, 'Access denied: invalid or expired setup code.', 403)
 			return
 		}
 		if (setup.reauthAppId) {
-			const existingApp = getOwnedOauthApp(session, setup.reauthAppId, provider.id)
+			existingApp = getOwnedOauthApp(session, setup.reauthAppId, provider.id)
 			if (!existingApp) {
 				sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
 				return
 			}
 			resolvedParams.reauth_app_id = setup.reauthAppId
-			if (query.services === undefined && query.write === undefined && provider.services && existingApp.scopes) {
-				const granted = parseGrantedServices(existingApp.scopes, provider.services)
-				if (granted.length > 0) {
-					resolvedParams.services = granted.map(g => g.id).join(',')
-					const rwIds = granted.filter(g => g.mode === 'rw').map(g => g.id)
-					if (rwIds.length > 0) resolvedParams.write = rwIds.join(',')
-				}
-			}
 		} else if (setup.name && !resolvedParams.name && !resolvedParams.app_name) {
 			resolvedParams.name = setup.name
+		}
+	}
+	if (query.services !== undefined) {
+		const rawList = url?.searchParams ? url.searchParams.getAll('services') : [query.services]
+		const entries = rawList.flatMap(v => String(v).split(','))
+		resolvedParams.services = normalizeServiceSelections(provider.services, entries).join(',')
+	} else if (Array.isArray(setup?.services)) {
+		resolvedParams.services = normalizeServiceSelections(provider.services, setup.services).join(',')
+	} else if (existingApp?.scopes && provider.services) {
+		const granted = parseGrantedServices(existingApp.scopes, provider.services)
+		if (granted.length > 0) {
+			resolvedParams.services = granted.flatMap(g => g.modes.map(m => `${g.id}:${m}`)).join(',')
 		}
 	}
 	const initData = {
@@ -703,8 +703,7 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 			services: Object.values(provider.services).map(s => ({
 				id: s.id,
 				name: s.name,
-				ro: Boolean(s.ro?.length),
-				rw: Boolean(s.rw?.length) && JSON.stringify(s.rw) !== JSON.stringify(s.ro)
+				modes: Object.keys(s.scopes || {})
 			}))
 		})
 	}
@@ -724,20 +723,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	provider.requireEnv()
 	const rawBody = await getBody(req)
 	const params = new URLSearchParams(rawBody)
-	const servicesList = []
-	for (const v of params.getAll('services')) {
-		for (const s of v.split(',')) {
-			const clean = s.trim().toLowerCase()
-			if (clean) servicesList.push(clean)
-		}
-	}
-	const writeList = []
-	for (const v of params.getAll('write')) {
-		for (const s of v.split(',')) {
-			const clean = s.trim().toLowerCase()
-			if (clean) writeList.push(clean)
-		}
-	}
+	const servicesList = params.getAll('services').flatMap(v => v.split(','))
 	const setupCode = params.get('code') || null
 	const setup = db.tokens.consumeState(setupCode)
 	const session = resolveSetupState(setup, 'setup_connect', provider.id)
@@ -775,7 +761,6 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		state: stateToken,
 		callbackUrl,
 		services: servicesList,
-		write: writeList,
 		loginHint: existingApp?.credentials?.account || null
 	})
 	redirect(res, authUrl)

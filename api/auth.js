@@ -1,5 +1,5 @@
 import * as db from '../db/index.js'
-import { RESERVED_PROVIDERS, isValidProviderId, getProvider, listOauthProviders, requireOauthProvider } from '../providers/index.js'
+import { RESERVED_PROVIDERS, isValidProviderId, getProvider, listOauthProviders, requireOauthProvider, normalizeServiceSelections } from '../providers/index.js'
 import { assertSsoLink, resolveShareProvider } from '../sso.js'
 import { parsePolicy, validatePolicy } from '../policy.js'
 import { HOP_BY_HOP_HEADERS, assertKeys, getBaseUrl, httpError, validateBaseUrl, parseAccountSpec, isPlainObject, requireBoolean, optionalString } from '../util.js'
@@ -437,8 +437,8 @@ function normalizeCredentials (raw) {
 
 async function connectApp (token, opts = {}, appUrl) {
 	const session = requireAdmin(token)
-	assertKeys(opts, ['provider', 'name', 'credentials', 'account', 'baseUrl', 'appId'])
-	let { provider, name, credentials, account, baseUrl, appId } = opts || {}
+	assertKeys(opts, ['provider', 'name', 'credentials', 'account', 'baseUrl', 'appId', 'services'])
+	let { provider, name, credentials, account, baseUrl, appId, services } = opts || {}
 	if (provider === undefined || provider === null) {
 		provider = null
 	} else {
@@ -455,8 +455,8 @@ async function connectApp (token, opts = {}, appUrl) {
 		if (existing.type !== 'oauth') {
 			throw httpError(400, `Cannot re-authenticate ${existing.type} app via connect_app; use update_app instead`)
 		}
-		if (credentials !== undefined || account !== undefined || baseUrl !== undefined) {
-			throw httpError(400, 'Cannot pass credentials, account, or baseUrl with appId in connect_app; use update_app instead')
+		if (name !== undefined || credentials !== undefined || account !== undefined || baseUrl !== undefined) {
+			throw httpError(400, 'Cannot pass name, credentials, account, or baseUrl with appId in connect_app; use update_app instead')
 		}
 		provider = existing.provider
 	}
@@ -471,18 +471,32 @@ async function connectApp (token, opts = {}, appUrl) {
 	const providerDef = getProvider(provider)
 	if (providerDef?.type === 'oauth' && !normalizedAuth) {
 		requireOauthProvider(providerDef.id, 'app')
+		let resolvedServices = null
+		if (services !== undefined) {
+			if (!providerDef.services) {
+				throw httpError(400, `Provider "${providerDef.id}" does not support service permissions`)
+			}
+			resolvedServices = normalizeServiceSelections(providerDef.services, services, { strict: true, providerId: providerDef.id })
+			if (resolvedServices.length === 0) {
+				throw httpError(400, 'services must contain at least one service')
+			}
+		}
 		const setupCode = db.tokens.createState({
 			mode: 'setup_connect',
 			sessionId: session.id,
 			provider: providerDef.id,
 			reauthAppId: appId || null,
 			name: cleanName,
+			services: resolvedServices,
 			ttl: 10 * 60 * 1000
 		})
 		return {
 			actionRequired: 'oauth_flow',
 			connectUrl: `${resolveOrigin(appUrl)}/providers/${providerDef.id}/connect?code=${encodeURIComponent(setupCode)}`
 		}
+	}
+	if (services !== undefined) {
+		throw httpError(400, 'services is only supported for OAuth apps')
 	}
 	if (!normalizedAuth) {
 		throw httpError(400, 'credentials is required for static apps')

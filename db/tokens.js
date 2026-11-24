@@ -716,6 +716,7 @@ function formatState (row, rawState = null) {
 		merge: Boolean(meta.merge),
 		newAppIds: Array.isArray(meta.newAppIds) ? meta.newAppIds : null,
 		reauthAppId: meta.reauthAppId || null,
+		services: Array.isArray(meta.services) ? meta.services : null,
 		sessionId: meta.sessionId || null,
 		provider: tok.provider === 'self' ? null : tok.provider,
 		ip: tok.ip,
@@ -737,6 +738,7 @@ function createState (opts = {}) {
 		merge = false,
 		newAppIds = null,
 		reauthAppId = null,
+		services = null,
 		sessionId = null,
 		provider = null,
 		ip = null,
@@ -758,6 +760,7 @@ function createState (opts = {}) {
 			...(merge && { merge: true }),
 			...(Array.isArray(newAppIds) && { newAppIds }),
 			reauthAppId,
+			...(Array.isArray(services) && { services }),
 			sessionId
 		},
 		expiresAt,
