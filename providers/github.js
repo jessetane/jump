@@ -26,73 +26,101 @@ export default {
 		services: {
 			repo: {
 				name: 'Repositories',
-				ro: ['public_repo'],
-				rw: ['repo']
+				scopes: {
+					read: ['public_repo'],
+					write: ['repo']
+				}
 			},
 			workflow: {
 				name: 'GitHub Actions Workflows',
-				ro: [],
-				rw: ['workflow']
+				scopes: {
+					write: ['workflow']
+				}
 			},
 			packages: {
 				name: 'GitHub Packages',
-				ro: ['read:packages'],
-				rw: ['read:packages', 'write:packages', 'delete:packages']
+				scopes: {
+					read: ['read:packages'],
+					write: ['write:packages'],
+					delete: ['delete:packages']
+				}
 			},
 			org: {
 				name: 'Organizations & Teams',
-				ro: ['read:org'],
-				rw: ['write:org', 'admin:org']
+				scopes: {
+					read: ['read:org'],
+					write: ['write:org'],
+					admin: ['admin:org']
+				}
 			},
 			project: {
 				name: 'Projects',
-				ro: ['read:project'],
-				rw: ['project']
+				scopes: {
+					read: ['read:project'],
+					write: ['project']
+				}
 			},
 			discussions: {
 				name: 'Discussions',
-				ro: ['read:discussion'],
-				rw: ['write:discussion']
+				scopes: {
+					read: ['read:discussion'],
+					write: ['write:discussion']
+				}
 			},
 			gist: {
 				name: 'Gists',
-				ro: [],
-				rw: ['gist']
+				scopes: {
+					write: ['gist']
+				}
 			},
 			notifications: {
 				name: 'Notifications',
-				ro: ['notifications'],
-				rw: []
+				scopes: {
+					read: ['notifications']
+				}
 			},
 			user: {
 				name: 'User Profile & Emails',
-				ro: ['user:email'],
-				rw: ['user']
+				scopes: {
+					read: ['user:email'],
+					write: ['user']
+				}
 			},
 			gpg_key: {
 				name: 'GPG Keys',
-				ro: ['read:gpg_key'],
-				rw: ['write:gpg_key', 'admin:gpg_key']
+				scopes: {
+					read: ['read:gpg_key'],
+					write: ['write:gpg_key'],
+					admin: ['admin:gpg_key']
+				}
 			},
 			public_key: {
 				name: 'SSH Keys',
-				ro: ['read:public_key'],
-				rw: ['write:public_key', 'admin:public_key']
+				scopes: {
+					read: ['read:public_key'],
+					write: ['write:public_key'],
+					admin: ['admin:public_key']
+				}
 			},
 			repo_hook: {
 				name: 'Repository Webhooks',
-				ro: ['read:repo_hook'],
-				rw: ['write:repo_hook', 'admin:repo_hook']
+				scopes: {
+					read: ['read:repo_hook'],
+					write: ['write:repo_hook'],
+					admin: ['admin:repo_hook']
+				}
 			},
 			audit_log: {
 				name: 'Audit Log',
-				ro: ['read:audit_log'],
-				rw: []
+				scopes: {
+					read: ['read:audit_log']
+				}
 			},
 			codespace: {
 				name: 'Codespaces',
-				ro: [],
-				rw: ['codespace']
+				scopes: {
+					write: ['codespace']
+				}
 			}
 		}
 	}

@@ -15,6 +15,7 @@ export {
 	requireOauthProvider,
 	parseGrantedServices,
 	summarizeScopes,
+	normalizeServiceSelections,
 	fetchOauth,
 	fetchOauthJson,
 	google,
@@ -54,13 +55,26 @@ function parseGrantedServices (scopesStr, services) {
 	const granted = new Set(scopesStr.split(/[\s,]+/).filter(Boolean))
 	const matched = []
 	for (const svc of Object.values(services)) {
-		const ro = svc.ro || []
-		const rw = svc.rw || []
-		const rwDiff = rw.filter(s => !ro.includes(s))
-		const isRw = rw.length > 0 && (rwDiff.length > 0 ? rwDiff.some(s => granted.has(s)) : rw.every(s => granted.has(s)))
-		const isRo = !isRw && ro.length > 0 && ro.some(s => granted.has(s))
-		if (isRw || isRo) {
-			matched.push({ id: svc.id, mode: isRw ? 'rw' : 'ro' })
+		const modeEntries = Object.entries(svc.scopes || {}).filter(([, list]) => Array.isArray(list) && list.length > 0)
+		const matchedModes = []
+		for (let i = 0; i < modeEntries.length; i++) {
+			const [mode, list] = modeEntries[i]
+			const priorScopes = new Set(modeEntries.slice(0, i).flatMap(([, s]) => s))
+			const unique = list.filter(s => !priorScopes.has(s))
+			const isMatch = unique.length > 0
+				? unique.some(s => granted.has(s))
+				: list.every(s => granted.has(s))
+			if (isMatch) matchedModes.push({ mode, list, grantedScopes: list.filter(s => granted.has(s)) })
+		}
+		const activeModes = matchedModes
+			.filter((cand, i) => !matchedModes.some((other, j) => {
+				if (j === i) return false
+				if (!cand.grantedScopes.every(s => other.list.includes(s))) return false
+				return cand.grantedScopes.length < other.grantedScopes.length || j > i
+			}))
+			.map(m => m.mode)
+		if (activeModes.length > 0) {
+			matched.push({ id: svc.id, modes: activeModes })
 		}
 	}
 	return matched
@@ -72,24 +86,29 @@ function summarizeScopes (scopesStr, services) {
 	if (allServices.length === 0) return ''
 	const matched = parseGrantedServices(scopesStr, services)
 	if (matched.length === 0) return ''
-	const allRw = matched.every(m => m.mode === 'rw')
-	const allRo = matched.every(m => m.mode === 'ro')
-	const uniformMode = allRw ? 'rw' : (allRo ? 'ro' : null)
-	if (matched.length === allServices.length && uniformMode) {
-		return `all (${uniformMode})`
+	const labels = matched.map(m => m.modes.join('+'))
+	const uniformLabel = labels.every(l => l === labels[0]) ? labels[0] : null
+	if (matched.length === allServices.length && uniformLabel) {
+		return `all (${uniformLabel})`
 	}
 	if (matched.length <= 3) {
-		if (uniformMode && matched.length > 1) {
-			return `${matched.map(m => m.id).join(', ')} (${uniformMode})`
+		if (uniformLabel && matched.length > 1) {
+			return `${matched.map(m => m.id).join(', ')} (${uniformLabel})`
 		}
-		return matched.map(m => `${m.id} (${m.mode})`).join(', ')
+		return matched.map((m, i) => `${m.id} (${labels[i]})`).join(', ')
 	}
-	if (uniformMode) {
-		return `${matched.length} (${uniformMode})`
+	if (uniformLabel) {
+		return `${matched.length} (${uniformLabel})`
 	}
-	const rwCount = matched.filter(m => m.mode === 'rw').length
-	const roCount = matched.length - rwCount
-	return `${matched.length} (${rwCount} rw, ${roCount} ro)`
+	const counts = new Map()
+	for (const l of labels) {
+		counts.set(l, (counts.get(l) || 0) + 1)
+	}
+	const summary = Array.from(counts.entries())
+		.sort((a, b) => b[1] - a[1])
+		.map(([label, n]) => `${n} ${label}`)
+		.join(', ')
+	return `${matched.length} (${summary})`
 }
 
 function matchesAllowedHost (hostname, allowedHosts) {
@@ -106,20 +125,67 @@ function matchesAllowedHost (hostname, allowedHosts) {
 	return false
 }
 
-function buildScopesFromSelection (services, baseScopes = [], selectedServices = [], writeServiceIds = []) {
+function normalizeServiceSelections (services, entries = [], { strict = false, providerId = '' } = {}) {
+	if (!Array.isArray(entries)) {
+		if (strict) throw httpError(400, 'services must be an array of service strings')
+		return []
+	}
+	const targetLabel = providerId ? ` for provider "${providerId}"` : ''
+	const seen = new Set()
+	const normalized = []
+	for (const raw of entries) {
+		if (typeof raw !== 'string') {
+			if (strict) throw httpError(400, 'services entries must be strings')
+			continue
+		}
+		const cleaned = raw.trim().toLowerCase()
+		if (!cleaned) {
+			if (strict) throw httpError(400, 'services entries cannot be empty')
+			continue
+		}
+		const parts = cleaned.split(':')
+		if (parts.length > 2 || !parts[0] || (parts.length === 2 && !parts[1])) {
+			if (strict) throw httpError(400, `Invalid service specification "${raw}" (expected "<service>" or "<service>:<mode>")`)
+			continue
+		}
+		const [svcId, explicitMode] = parts
+		const svc = services?.[svcId]
+		if (!svc) {
+			if (strict) throw httpError(400, `Unknown service "${svcId}"${targetLabel}`)
+			continue
+		}
+		const availableModes = Object.entries(svc.scopes || {})
+			.filter(([, list]) => Array.isArray(list) && list.length > 0)
+			.map(([mode]) => mode)
+		let mode = explicitMode
+		if (mode) {
+			if (!availableModes.includes(mode)) {
+				if (strict) throw httpError(400, `Unknown mode "${mode}" for service "${svcId}"${targetLabel} (available: ${availableModes.join(', ')})`)
+				continue
+			}
+		} else if (availableModes.includes('read')) {
+			mode = 'read'
+		} else if (availableModes.length === 1) {
+			mode = availableModes[0]
+		} else {
+			if (strict) throw httpError(400, `Service "${svcId}"${targetLabel} requires an explicit mode (available: ${availableModes.join(', ')})`)
+			continue
+		}
+		const token = `${svcId}:${mode}`
+		if (!seen.has(token)) {
+			seen.add(token)
+			normalized.push(token)
+		}
+	}
+	return normalized
+}
+
+function buildScopesFromSelection (services, baseScopes = [], selectedServices = []) {
 	const scopeSet = new Set(baseScopes)
-	const writeSet = new Set(writeServiceIds.map(s => String(s).trim().toLowerCase()))
-	if (services) {
-		for (const rawId of selectedServices) {
-			const svcId = String(rawId).trim().toLowerCase()
-			const svc = services[svcId]
-			if (!svc) continue
-			const ro = svc.ro || []
-			const rw = svc.rw || []
-			const scopes = writeSet.has(svcId)
-				? (rw.length ? rw : ro)
-				: (ro.length ? ro : rw)
-			for (const s of scopes) scopeSet.add(s)
+	for (const token of normalizeServiceSelections(services, selectedServices)) {
+		const [svcId, mode] = token.split(':')
+		for (const s of services[svcId].scopes[mode]) {
+			scopeSet.add(s)
 		}
 	}
 	return Array.from(scopeSet).join(' ')
@@ -215,7 +281,16 @@ function createProvider (config) {
 	if (oauth?.services) {
 		services = Object.create(null)
 		for (const [key, svc] of Object.entries(oauth.services)) {
-			services[key] = { id: key, ...svc }
+			const scopes = Object.create(null)
+			for (const [mode, list] of Object.entries(svc.scopes || {})) {
+				if (Array.isArray(list) && list.length > 0) {
+					scopes[mode] = [...list]
+				}
+			}
+			if (Object.keys(scopes).length === 0) {
+				throw new Error(`Provider "${id}" service "${key}" must define at least one non-empty mode`)
+			}
+			services[key] = { id: key, name: svc.name, scopes }
 		}
 	}
 	const envPrefix = id.toUpperCase()
@@ -249,11 +324,11 @@ function createProvider (config) {
 			requireEnv () {
 				return requireOauthEnv(envPrefix)
 			},
-			buildAuthUrl ({ state, callbackUrl, services: selectedServices = [], write = [], login = false, loginHint = null }) {
+			buildAuthUrl ({ state, callbackUrl, services: selectedServices = [], login = false, loginHint = null }) {
 				const { clientId } = requireOauthEnv(envPrefix)
 				const scopes = login
 					? (oauth.baseScopes || []).join(' ')
-					: buildScopesFromSelection(services, oauth.baseScopes, selectedServices, write)
+					: buildScopesFromSelection(services, oauth.baseScopes, selectedServices)
 				const u = new URL(oauth.authUrl)
 				u.searchParams.set('client_id', clientId)
 				u.searchParams.set('redirect_uri', callbackUrl)
