@@ -222,6 +222,38 @@ function attachAuth (hopUrl, baseHeaders, authHeaders, queryEntries) {
 	return { url: hopUrl.toString(), headers: hopHeaders }
 }
 
+function escapeRegex (str) {
+	return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function redactCredentialText (text, credentials) {
+	if (typeof text !== 'string' || !text || !credentials) return text
+	let scrubbed = text
+	const { authHeaders, queryEntries } = toAuthEntries(credentials)
+	const literalSecrets = new Set()
+	for (const [k, v] of queryEntries) {
+		for (const keyForm of new Set([k, encodeURIComponent(k)])) {
+			if (!keyForm) continue
+			scrubbed = scrubbed.replace(new RegExp(`([?&]${escapeRegex(keyForm)}=)[^&\\s"'<>\\\\)]+`, 'g'), '$1[REDACTED]')
+		}
+		if (v.length >= 6) {
+			literalSecrets.add(v)
+			literalSecrets.add(encodeURIComponent(v))
+			const formVal = new URLSearchParams([[k, v]]).toString().split('=')[1]
+			if (formVal && formVal.length >= 6) literalSecrets.add(formVal)
+		}
+	}
+	for (const [, v] of authHeaders) {
+		if (v.length >= 6) literalSecrets.add(v)
+		const stripped = v.replace(/^(?:Bearer|Basic)\s+/i, '')
+		if (stripped.length >= 6) literalSecrets.add(stripped)
+	}
+	for (const secret of Array.from(literalSecrets).sort((a, b) => b.length - a.length)) {
+		scrubbed = scrubbed.replaceAll(secret, '[REDACTED]')
+	}
+	return scrubbed
+}
+
 function isFormContentType (contentType) {
 	return parseMimeType(contentType) === 'application/x-www-form-urlencoded'
 }
@@ -419,7 +451,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, baseHe
 		const msg = result?.binary ? `Binary error response (${contentType})`
 			: typeof result === 'object' ? JSON.stringify(result)
 			: result
-		throw httpError(status, msg, { upstream: true })
+		throw httpError(status, redactCredentialText(msg, credentials), { upstream: true })
 	}
 	return result
 }
@@ -583,9 +615,11 @@ async function runProxyCall ({ auth, providerName = 'google', url, method, app, 
 	const logState = {
 		targetAppId: null,
 		resolvedUrl: String(url),
-		allowed: false
+		allowed: false,
+		credentials: null
 	}
 	const recordLog = (status, error = null) => {
+		const safeError = typeof error === 'string' ? redactCredentialText(error, logState.credentials) : error
 		db.logs.create({
 			userId: session.userId,
 			sessionId: session.id,
@@ -596,7 +630,7 @@ async function runProxyCall ({ auth, providerName = 'google', url, method, app, 
 			allowed: logState.allowed,
 			status,
 			duration: Date.now() - start,
-			error
+			error: safeError
 		})
 	}
 	try {
@@ -617,6 +651,7 @@ async function request (opts = {}, auth) {
 		ctx.checkTargetPolicy(ctx.resolvedUrl, normalizedMethod, body, ctx.contentType)
 		logState.allowed = true
 		const credentials = await resolveUpstreamCredentials(session, provider, ctx.targetLink, ctx.upstreamApp)
+		logState.credentials = credentials
 		let upstreamStatus = 200
 		const result = await executeBufferedUpstream({
 			credentials,
@@ -658,6 +693,7 @@ async function stream (opts = {}, auth, req, res) {
 		ctx.checkTargetPolicy(ctx.resolvedUrl, normalizedMethod, bufferedBody, ctx.contentType)
 		logState.allowed = true
 		const credentials = await resolveUpstreamCredentials(session, provider, ctx.targetLink, ctx.upstreamApp)
+		logState.credentials = credentials
 		if (allowsBody && !bodyStream) {
 			if (bufferedBody !== undefined) {
 				baseHeaders['content-length'] = String(bufferedBody.byteLength)

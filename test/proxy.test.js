@@ -840,3 +840,44 @@ test('aborted streams fail immediately when destroyed before sendUpstreamHop or 
 		})
 	})
 })
+
+test('upstream 4xx/5xx error echoes redact injected query and header secrets from logs and shared callers', async () => {
+	await withUpstream((r, upstreamRes) => {
+		upstreamRes.statusCode = 400
+		upstreamRes.setHeader('content-type', 'application/json')
+		upstreamRes.end(JSON.stringify({ error: `Bad request for https://upstream.test${r.url} (hdr=${r.headers['x-secret-hdr'] || ''})` }))
+	}, async ({ url: upstreamUrl }) => {
+		const { session: ownerSess } = createTestSession({ account: 'leak-owner@example.com', admin: true, withApp: false })
+		const { user: recipient, session: recipientSess } = createTestSession({ account: 'leak-recipient@example.com', admin: true, withApp: false })
+		const app = db.tokens.create({
+			userId: ownerSess.userId,
+			provider: 'secret_echo',
+			type: 'static',
+			name: 'Echo API',
+			credentials: {
+				headers: { 'x-secret-hdr': 'hdr_secret_value_99' },
+				query: { api_key: 'q_secret_leak_tok', v: '2' },
+				baseUrl: upstreamUrl
+			}
+		})
+		const shareRes = await mcp(ownerSess.token, 'admin', { action: 'share_app', appId: app.id, account: 'leak-recipient@example.com' })
+		assert.equal(shareRes.isError, undefined, shareRes.content[0].text)
+		const shareId = JSON.parse(shareRes.content[0].text).shareId
+		db.links.create({ sessionId: recipientSess.id, appId: shareId })
+		const mcpErr = await mcp(recipientSess.token, 'secret_echo_api', { url: '/items?keep=yes' })
+		assert.equal(mcpErr.isError, true)
+		assert.equal(mcpErr.content[0].text.includes('q_secret_leak_tok'), false, 'MCP error must redact query secret')
+		assert.equal(mcpErr.content[0].text.includes('hdr_secret_value_99'), false, 'MCP error must redact header secret')
+		assert.match(mcpErr.content[0].text, /v=\[REDACTED\]/)
+		assert.match(mcpErr.content[0].text, /api_key=\[REDACTED\]/)
+		const restErr = await req('GET', '/api/secret_echo/items?keep=yes', { token: recipientSess.token })
+		assert.equal(restErr.status, 400)
+		const recipientLogs = db.logs.listByUserId(recipient.id, { provider: 'secret_echo' })
+		assert.equal(recipientLogs.length, 2)
+		for (const entry of recipientLogs) {
+			assert.equal(entry.error.includes('q_secret_leak_tok'), false, 'Audit log must redact echoed query secret')
+			assert.equal(entry.error.includes('hdr_secret_value_99'), false, 'Audit log must redact echoed header secret')
+			assert.match(entry.error, /api_key=\[REDACTED\]/)
+		}
+	})
+})
