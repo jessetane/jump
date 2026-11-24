@@ -6,138 +6,215 @@
 		<title>jump connect</title>
 		<link rel="stylesheet" href="/style.css">
 		<style>
+			.subtitle,
+			#app-name-group,
+			#submit-btn {
+				width: 100%;
+				max-width: 432px;
+				margin-left: auto;
+				margin-right: auto;
+			}
+
 			.subtitle {
 				margin-bottom: 0.75rem;
+			}
+
+			.table-wrap {
+				width: 100%;
+				overflow-x: auto;
+				margin-bottom: 1rem;
 			}
 
 			.table {
 				width: 100%;
 				border-collapse: collapse;
-				margin-bottom: 1rem;
 				font-size: 0.9rem;
 			}
 
-			.table th {
-				text-align: left;
-				padding: 8px 6px;
-				border-bottom: 2px solid #ccc;
+			.table thead {
+				display: none;
 			}
 
-			.table td {
+			.table th {
+				text-align: center;
+				padding: 8px 6px;
+				border-bottom: 2px solid #ccc;
+				white-space: nowrap;
+			}
+
+			.table th:first-child {
+				text-align: left;
+			}
+
+			.table tbody tr {
+				display: flex;
+				flex-wrap: wrap;
+				align-items: center;
+				gap: 6px 14px;
 				padding: 8px 6px;
 				border-bottom: 1px solid #eee;
 			}
 
-			.table tr:hover {
+			.table tbody tr:hover {
 				background: #fafafa;
 			}
 
-			.col-check {
-				text-align: center;
-				width: 60px;
+			.table tbody td {
+				padding: 0;
+				border-bottom: none;
 			}
 
-			.col-check input:disabled {
-				opacity: 0.35;
-				cursor: not-allowed;
+			.table tbody td:first-child {
+				flex: 1 0 100%;
+			}
+
+			.table tbody td.col-check:empty {
+				display: none;
+			}
+
+			.mode-option {
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+				cursor: pointer;
+			}
+
+			.mode-label {
+				font-size: 0.85rem;
+				color: #444;
+			}
+
+			@media (min-width: 600px) {
+				.view.has-table {
+					width: fit-content;
+					min-width: 480px;
+					max-width: 94vw;
+				}
+
+				.table thead {
+					display: table-header-group;
+				}
+
+				.table tbody tr {
+					display: table-row;
+					padding: 0;
+					border-bottom: none;
+				}
+
+				.table tbody td {
+					padding: 8px 6px;
+					border-bottom: 1px solid #eee;
+				}
+
+				.table tbody td.col-check {
+					text-align: center;
+					width: 68px;
+				}
+
+				.table tbody td.col-check:empty {
+					display: table-cell;
+				}
+
+				.mode-option {
+					justify-content: center;
+				}
+
+				.mode-label {
+					display: none;
+				}
 			}
 		</style>
 	</head>
 	<body class=column>
-		<div class="view column">
+		<div class="view column" id="connect-view">
 			<h1>jump</h1>
 			<p class="subtitle" id="page-subtitle">Configure API services access</p>
-			<form id="connect-form" method="POST" action="/providers/google/consent">
+			<form id="connect-form" method="POST" action="/providers/google/consent" class="column">
 				<div id="hidden-inputs"></div>
 				<div class="form-group" id="app-name-group">
 					<label for="app-name">App Name (optional)</label>
 					<input type="text" id="app-name" name="app_name" placeholder="e.g. Personal Account, Work Account">
 				</div>
-				<table class="table" id="services-table">
-					<thead>
-						<tr>
-							<th>Service</th>
-							<th class="col-check">Read</th>
-							<th class="col-check">Write</th>
-						</tr>
-					</thead>
-					<tbody id="service-rows">
-						<tr id="row-all">
-							<td><strong>All</strong></td>
-							<td class="col-check"><input type="checkbox" id="all-read"></td>
-							<td class="col-check"><input type="checkbox" id="all-write" disabled></td>
-						</tr>
-					</tbody>
-				</table>
+				<div class="table-wrap" id="services-wrap">
+					<table class="table" id="services-table">
+						<thead>
+							<tr id="header-row">
+								<th>Service</th>
+							</tr>
+						</thead>
+						<tbody id="service-rows">
+							<tr id="row-all">
+								<td><strong>All</strong></td>
+							</tr>
+						</tbody>
+					</table>
+				</div>
 				<button type="submit" id="submit-btn">Sign in with Google</button>
 			</form>
 		</div>
 		<script>
 			const initData = {{INIT_DATA}}
 
-			function updateAllRowState () {
-				const allRead = document.getElementById('all-read')
-				const allWrite = document.getElementById('all-write')
-				if (!allRead || !allWrite) return
-				const services = document.querySelectorAll('input[name="services"]')
-				if (services.length === 0) return
-				let readTotal = 0
-				let readCount = 0
-				let writeCount = 0
+			function formatModeLabel (mode) {
+				return mode ? mode.charAt(0).toUpperCase() + mode.slice(1) : ''
+			}
+
+			function collectModes (services) {
+				const modes = []
+				const seen = new Set()
 				for (const s of services) {
-					const id = s.value
-					const w = document.getElementById('wr_' + id)
-					const writeOnly = s.type === 'hidden'
-					if (!writeOnly) {
-						readTotal++
-						if (s.checked) readCount++
-					}
-					if (w && (writeOnly || s.checked) && w.checked) {
-						writeCount++
-					}
-				}
-				let writeTotal = 0
-				if (readCount > 0 || writeCount > 0 || readTotal === 0) {
-					for (const s of services) {
-						const id = s.value
-						const w = document.getElementById('wr_' + id)
-						const writeOnly = s.type === 'hidden'
-						if (w && (writeOnly || s.checked)) {
-							writeTotal++
+					for (const mode of (Array.isArray(s.modes) ? s.modes : [])) {
+						if (!seen.has(mode)) {
+							seen.add(mode)
+							modes.push(mode)
 						}
 					}
 				}
-				allRead.checked = readTotal > 0 && readCount === readTotal
-				allRead.indeterminate = readCount > 0 && readCount < readTotal
-				allWrite.disabled = writeTotal === 0
-				if (writeTotal === 0) {
-					allWrite.checked = false
-					allWrite.indeterminate = false
-				} else {
-					allWrite.checked = writeCount === writeTotal
-					allWrite.indeterminate = writeCount > 0 && writeCount < writeTotal
+				return modes
+			}
+
+			function updateAllRowState (allModes) {
+				const allBoxes = document.querySelectorAll('input[name="services"]')
+				for (const mode of allModes) {
+					const allBox = document.getElementById('all_' + mode)
+					if (!allBox) continue
+					let total = 0
+					let checked = 0
+					for (const box of allBoxes) {
+						if (box.dataset.mode !== mode) continue
+						total++
+						if (box.checked) checked++
+					}
+					allBox.disabled = total === 0
+					allBox.checked = total > 0 && checked === total
+					allBox.indeterminate = checked > 0 && checked < total
 				}
 			}
 
-			function onServiceToggle (id) {
-				const s = document.getElementById('svc_' + id)
-				const w = document.getElementById('wr_' + id)
-				if (!s) return
-				if (w) {
-					w.disabled = !s.checked
-					if (!s.checked) w.checked = false
-				}
-				updateAllRowState()
+			function createModeCell (labelText, inputEl) {
+				const td = document.createElement('td')
+				td.className = 'col-check'
+				const label = document.createElement('label')
+				label.className = 'mode-option'
+				const span = document.createElement('span')
+				span.className = 'mode-label'
+				span.textContent = labelText
+				label.appendChild(inputEl)
+				label.appendChild(span)
+				td.appendChild(label)
+				return td
 			}
 
 			function init () {
 				const params = initData.params || {}
 				const provider = initData.provider || { id: 'google', name: 'Google' }
 				const services = Array.isArray(initData.services) ? initData.services : []
+				const allModes = collectModes(services)
+				const viewEl = document.getElementById('connect-view')
 				const formEl = document.getElementById('connect-form')
 				const subtitleEl = document.getElementById('page-subtitle')
 				const submitEl = document.getElementById('submit-btn')
-				const tableEl = document.getElementById('services-table')
+				const wrapEl = document.getElementById('services-wrap')
 				document.title = 'jump connect'
 				if (formEl) formEl.action = '/providers/' + provider.id + '/consent'
 				if (params.reauth_app_id) {
@@ -152,143 +229,80 @@
 							: 'Connect ' + provider.name + ' account'
 					}
 					if (submitEl) submitEl.textContent = 'Sign in with ' + provider.name
+					if (params.app_name || params.name) {
+						const nameInput = document.getElementById('app-name')
+						if (nameInput) nameInput.value = params.app_name || params.name
+					}
 				}
-				if (params.app_name || params.name) {
-					const nameInput = document.getElementById('app-name')
-					if (nameInput) nameInput.value = params.app_name || params.name
-				}
-				let serviceIdsRead = null
+				const selectedTokens = new Set()
 				if (params.services) {
-					serviceIdsRead = new Set()
 					for (const part of String(params.services).split(',')) {
-						const s = part.trim().toLowerCase()
-						if (s) serviceIdsRead.add(s)
+						const token = part.trim().toLowerCase()
+						if (token) selectedTokens.add(token)
 					}
 				}
-				const serviceIdsWrite = new Set()
-				if (params.write) {
-					for (const part of String(params.write).split(',')) {
-						const w = part.trim().toLowerCase()
-						if (w) serviceIdsWrite.add(w)
+				if (services.length > 0 && allModes.length > 0) {
+					if (viewEl) viewEl.classList.add('has-table')
+					const headerRow = document.getElementById('header-row')
+					const allRow = document.getElementById('row-all')
+					for (const mode of allModes) {
+						const labelText = formatModeLabel(mode)
+						const th = document.createElement('th')
+						th.textContent = labelText
+						headerRow.appendChild(th)
+						const allBox = document.createElement('input')
+						allBox.type = 'checkbox'
+						allBox.id = 'all_' + mode
+						allBox.setAttribute('aria-label', 'All ' + labelText)
+						allBox.addEventListener('change', function () {
+							const checked = allBox.checked
+							for (const box of document.querySelectorAll('input[name="services"]')) {
+								if (box.dataset.mode === mode) box.checked = checked
+							}
+							updateAllRowState(allModes)
+						})
+						allRow.appendChild(createModeCell(labelText, allBox))
 					}
-				}
-				if (services.length > 0) {
 					const tbody = document.getElementById('service-rows')
 					for (const s of services) {
-						const hasRo = s.ro !== false
-						const hasRw = s.rw !== false
+						const svcModes = new Set(Array.isArray(s.modes) ? s.modes : [])
 						const tr = document.createElement('tr')
 						const tdSvc = document.createElement('td')
 						const spanName = document.createElement('span')
 						spanName.textContent = s.name
 						tdSvc.appendChild(spanName)
-						const tdRead = document.createElement('td')
-						tdRead.className = 'col-check'
-						const tdWrite = document.createElement('td')
-						tdWrite.className = 'col-check'
-						if (!hasRo && hasRw) {
-							const isWriteChecked = (serviceIdsRead ? serviceIdsRead.has(s.id) : false) || serviceIdsWrite.has(s.id)
-							const inputSvc = document.createElement('input')
-							inputSvc.type = 'hidden'
-							inputSvc.name = 'services'
-							inputSvc.id = 'svc_' + s.id
-							inputSvc.value = s.id
-							inputSvc.disabled = !isWriteChecked
-							tdRead.appendChild(inputSvc)
-							const inputWr = document.createElement('input')
-							inputWr.type = 'checkbox'
-							inputWr.name = 'write'
-							inputWr.id = 'wr_' + s.id
-							inputWr.value = s.id
-							inputWr.checked = isWriteChecked
-							inputWr.addEventListener('change', function () {
-								inputSvc.disabled = !inputWr.checked
-								updateAllRowState()
-							})
-							tdWrite.appendChild(inputWr)
-						} else {
-							const isReadChecked = serviceIdsRead ? serviceIdsRead.has(s.id) : false
-							const inputSvc = document.createElement('input')
-							inputSvc.type = 'checkbox'
-							inputSvc.name = 'services'
-							inputSvc.id = 'svc_' + s.id
-							inputSvc.value = s.id
-							inputSvc.checked = isReadChecked
-							inputSvc.addEventListener('change', function () {
-								onServiceToggle(s.id)
-							})
-							tdRead.appendChild(inputSvc)
-							if (hasRw) {
-								const isWriteChecked = isReadChecked && serviceIdsWrite.has(s.id)
-								const inputWr = document.createElement('input')
-								inputWr.type = 'checkbox'
-								inputWr.name = 'write'
-								inputWr.id = 'wr_' + s.id
-								inputWr.value = s.id
-								inputWr.checked = isWriteChecked
-								inputWr.disabled = !isReadChecked
-								inputWr.addEventListener('change', function () {
-									updateAllRowState()
-								})
-								tdWrite.appendChild(inputWr)
-							}
-						}
 						tr.appendChild(tdSvc)
-						tr.appendChild(tdRead)
-						tr.appendChild(tdWrite)
+						for (const mode of allModes) {
+							if (!svcModes.has(mode)) {
+								const emptyTd = document.createElement('td')
+								emptyTd.className = 'col-check'
+								tr.appendChild(emptyTd)
+								continue
+							}
+							const token = s.id + ':' + mode
+							const labelText = formatModeLabel(mode)
+							const box = document.createElement('input')
+							box.type = 'checkbox'
+							box.name = 'services'
+							box.id = 'svc_' + s.id + '_' + mode
+							box.value = token
+							box.dataset.mode = mode
+							box.checked = selectedTokens.has(token)
+							box.setAttribute('aria-label', s.name + ' ' + labelText)
+							box.addEventListener('change', function () {
+								updateAllRowState(allModes)
+							})
+							tr.appendChild(createModeCell(labelText, box))
+						}
 						tbody.appendChild(tr)
 					}
-					const allRead = document.getElementById('all-read')
-					const allWrite = document.getElementById('all-write')
-					if (allRead) {
-						allRead.addEventListener('click', function () {
-							const checked = allRead.checked
-							const services = document.querySelectorAll('input[name="services"]')
-							for (const s of services) {
-								const id = s.value
-								const w = document.getElementById('wr_' + id)
-								if (s.type === 'hidden') {
-									if (!checked && w) {
-										w.checked = false
-										s.disabled = true
-									}
-									continue
-								}
-								s.checked = checked
-								if (w) {
-									w.disabled = !s.checked
-									if (!s.checked) w.checked = false
-								}
-							}
-							updateAllRowState()
-						})
-					}
-					if (allWrite) {
-						allWrite.addEventListener('click', function () {
-							const checked = allWrite.checked
-							const services = document.querySelectorAll('input[name="services"]')
-							for (const s of services) {
-								const id = s.value
-								const w = document.getElementById('wr_' + id)
-								if (s.type === 'hidden') {
-									if (w) {
-										w.checked = checked
-										s.disabled = !checked
-									}
-								} else if (w && s.checked) {
-									w.checked = checked
-								}
-							}
-							updateAllRowState()
-						})
-					}
-					updateAllRowState()
-				} else {
-					if (tableEl) tableEl.style.display = 'none'
+					updateAllRowState(allModes)
+				} else if (wrapEl) {
+					wrapEl.style.display = 'none'
 				}
 				const hiddenContainer = document.getElementById('hidden-inputs')
 				for (const [key, value] of Object.entries(params)) {
-					if (key === 'services' || key === 'write' || key === 'app_name' || key === 'name' || key === 'reauth_app_id') continue
+					if (key === 'services' || key === 'app_name' || key === 'name' || key === 'reauth_app_id') continue
 					const input = document.createElement('input')
 					input.type = 'hidden'
 					input.name = key
