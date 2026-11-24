@@ -55,7 +55,7 @@ const resources = Object.assign(Object.create(null), {
 	},
 	logins: {
 		async POST (req, res, { token, body }) {
-			sendJson(res, await api.auth.linkLogin(token, body, getBaseUrl(req)))
+			sendJson(res, await api.auth.linkLogin(token, body, getBaseUrl(req)), 201)
 		},
 		item: {
 			idKey: 'loginId',

@@ -234,7 +234,7 @@ test('login-key lifecycle, lockout guard, verified-email pending claim guard, an
 		const soleWorker = db.tokens.create({ userId: sole.user.id, provider: 'self', admin: 0 })
 		assert.equal((await req('POST', '/api/logins', { token: soleWorker.token, body: { provider: 'github' } })).status, 403)
 		const linkLoginRes = await req('POST', '/api/logins', { token: sole.session.token, body: { provider: 'github' } })
-		assert.equal(linkLoginRes.status, 200)
+		assert.equal(linkLoginRes.status, 201)
 		assert.match(linkLoginRes.data.connectUrl, /\/oauth\/authorize\?code=/)
 		assert.equal((await req('POST', '/api/shares', { token: soleWorker.token, body: { appId: shayApp.id, account: 'rest-share@example.com' } })).status, 403)
 		const shareRest = await req('POST', '/api/shares', { token: shay.session.token, body: { appId: shayApp.id, account: 'rest-share@example.com', policy: [{ action: 'allow', path: '/v1/*' }] } })
