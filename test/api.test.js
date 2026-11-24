@@ -130,6 +130,8 @@ test('canonical REST contract rejects method/payload smuggling, trailing slashes
 	assert.equal((await req('GET', '/api/whoami', { token: rotated.data.session.token })).data.authenticated, true)
 	assert.equal(db.links.listBySessionId(sess2.id).length, 1, 'rotateToken preserves session links')
 	assert.equal((await req('DELETE', `/api/sessions/${sess2.id}`, { token: session.token })).status, 200)
+	assert.equal((await req('DELETE', `/api/sessions/${sess2.id}`, { token: session.token })).status, 404)
+	assert.equal((await mcp(session.token, 'admin', { action: 'revoke_session', sessionId: sess2.id })).isError, true)
 	assert.equal((await req('GET', '/api/whoami', { token: rotated.data.session.token })).data.authenticated, false)
 	const sess3 = db.tokens.create({ userId: session.userId, provider: 'self', admin: 0 })
 	assert.equal((await req('DELETE', '/api/sessions?allOthers=true', { token: session.token })).status, 200)

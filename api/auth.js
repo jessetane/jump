@@ -243,13 +243,7 @@ async function revokeSession (token, opts = {}) {
 		if (!session.admin) {
 			throw httpError(403, 'Access denied: revoking other sessions requires admin privileges')
 		}
-		const targetSession = db.tokens.get(sessionId)
-		if (!db.tokens.isSession(targetSession) || targetSession.userId !== session.userId) {
-			return {
-				revoked: false,
-				message: `Session not found: ${sessionId}`
-			}
-		}
+		const targetSession = requireTargetSession(session.userId, sessionId)
 		db.tokens.remove(targetSession.id)
 		return {
 			revoked: true,
