@@ -316,9 +316,12 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	for (const badProv of ['self', 'sessions', 'my.api']) {
 		assert.equal((await mcp(session.token, 'admin', { action: 'connect_app', provider: badProv, credentials: 'sk', baseUrl: 'https://api.stripe.com' })).isError, true)
 	}
-	for (const badCreds of ['', '   ', 'tok\r\ninj: 1', {}, { bearer: 'a', basic: 'u:p' }, { basic: 'nocolon' }, { basic: ' : ' }, { headers: { cookie: 'x=1' } }, { headers: { host: 'evil.com' } }, { query: { ApiKey: '1', apikey: '2' } }]) {
+	for (const badCreds of ['', '   ', 'tok\r\ninj: 1', {}, { bearer: 'a', basic: 'u:p' }, { basic: 'nocolon' }, { basic: ' : ' }, { headers: { connection: 'close' } }, { headers: { host: 'evil.com' } }, { headers: { cookie: 'x=1\r\ninj: 1' } }, { headers: { Cookie: 'a=1', cookie: 'b=2' } }, { query: { ApiKey: '1', apikey: '2' } }]) {
 		assert.equal((await req('POST', '/api/apps', { token: session.token, body: { provider: 'stripe', credentials: badCreds, baseUrl: 'https://api.stripe.com' } })).status, 400)
 	}
+	const cookieAppRes = await req('POST', '/api/apps', { token: session.token, body: { provider: 'stripe', credentials: { headers: { Cookie: 'sid=abc123' } }, baseUrl: 'https://api.stripe.com' } })
+	assert.equal(cookieAppRes.status, 201)
+	assert.deepEqual(db.tokens.get(cookieAppRes.data.app.id).credentials.headers, { cookie: 'sid=abc123' })
 	const spaceBasic = await req('POST', '/api/apps', { token: session.token, body: { provider: 'stripe', credentials: { basic: ' user:pass ' }, baseUrl: 'https://api.stripe.com' } })
 	assert.equal(spaceBasic.status, 201)
 	assert.equal(db.tokens.get(spaceBasic.data.app.id).credentials.headers.authorization, `Basic ${Buffer.from(' user:pass ').toString('base64')}`)

@@ -183,7 +183,7 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 			}
 			if (upReq.url === '/echo-auth') {
 				res.writeHead(200, { 'content-type': 'application/json' })
-				res.end(JSON.stringify({ auth: upReq.headers.authorization || null }))
+				res.end(JSON.stringify({ auth: upReq.headers.authorization || null, cookie: upReq.headers.cookie || null }))
 				return
 			}
 			if (upReq.url === '/public/bounce-admin') {
@@ -292,7 +292,7 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 				userId: user.id,
 				provider: 'github',
 				type: 'static',
-				credentials: { headers: { authorization: 'Bearer ghp_secret', 'x-tenant': 'acme' }, baseUrl: apiUrl }
+				credentials: { headers: { authorization: 'Bearer ghp_secret', 'x-tenant': 'acme', cookie: 'sid=gh_cookie_secret' }, baseUrl: apiUrl }
 			})
 			db.links.create({
 				sessionId: session.id,
@@ -314,10 +314,13 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 			assert.equal(Buffer.from(JSON.parse(okDl.content[0].text).data, 'base64').toString('utf8'), 'archive-bytes')
 			assert.equal(cdnReceived[0].headers.authorization, undefined)
 			assert.equal(cdnReceived[0].headers['x-tenant'], undefined)
+			assert.equal(cdnReceived[0].headers.cookie, undefined)
 			const restRedirect = await req('GET', '/api/github/repos/acme/tarball', { token: session.token, redirect: 'manual' })
 			assert.equal(restRedirect.status, 302)
 			assert.equal((await mcp(session.token, 'github_api', { url: '/public/bounce-admin' })).isError, true, 'Same-origin redirect re-checks policy')
-			assert.equal(JSON.parse((await mcp(session.token, 'github_api', { url: '/bounce-back-auth' })).content[0].text).auth, null, 'Off-origin then back-origin redirect must not re-attach auth')
+			const bounceBack = JSON.parse((await mcp(session.token, 'github_api', { url: '/bounce-back-auth' })).content[0].text)
+			assert.equal(bounceBack.auth, null, 'Off-origin then back-origin redirect must not re-attach auth')
+			assert.equal(bounceBack.cookie, null, 'Off-origin then back-origin redirect must not re-attach cookie')
 			cdnReceived.length = 0
 			assert.equal((await mcp(session.token, 'github_api', { url: '/post-303', method: 'POST', body: { a: 1 } })).isError, undefined)
 			assert.equal(cdnReceived[0].method, 'GET')
@@ -796,6 +799,12 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		db.links.create({ sessionId: session.id, appId: colonBearer.id })
 		await mcp(session.token, 'colon_b_api', { url: '/c' })
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer part1:part2', 'String credentials with colon stay Bearer')
+		const cookieApp = JSON.parse((await mcp(session.token, 'admin', { action: 'connect_app', provider: 'cookie_api', credentials: { headers: { cookie: 'session=cookie_secret_99; theme=dark' } }, baseUrl: upstreamUrl })).content[0].text).app
+		db.links.create({ sessionId: session.id, appId: cookieApp.id })
+		assert.equal((await mcp(session.token, 'cookie_api_api', { url: '/c', headers: { cookie: 'spoof=1' } })).isError, undefined)
+		assert.equal(captured.at(-1).headers.cookie, 'session=cookie_secret_99; theme=dark')
+		assert.equal((await req('GET', '/api/cookie_api/c', { token: session.token, headers: { cookie: 'caller=evil' } })).status, 200)
+		assert.equal(captured.at(-1).headers.cookie, 'session=cookie_secret_99; theme=dark')
 		assert.equal((await req('GET', '/api/colon_b/c', { token: session.token, headers: { 'x-upstream-app': 'colon_b' } })).status, 404, 'Non-ID selector rejected even on single-linked provider')
 		const m1 = db.tokens.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Personal', credentials: { account: 'p@example.com', headers: { authorization: 'Bearer sk_1' }, baseUrl: upstreamUrl } })
 		const m2 = db.tokens.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Work', credentials: { account: 'w@example.com', headers: { authorization: 'Bearer sk_2' }, baseUrl: upstreamUrl } })
@@ -925,7 +934,10 @@ test('upstream 4xx/5xx error echoes redact injected query and header secrets fro
 	await withUpstream((r, upstreamRes) => {
 		upstreamRes.statusCode = 400
 		upstreamRes.setHeader('content-type', 'application/json')
-		upstreamRes.end(JSON.stringify({ error: `Bad request for https://upstream.test${r.url} (hdr=${r.headers['x-secret-hdr'] || ''})` }))
+		const rawCookie = r.headers.cookie || ''
+		const quotedTok = rawCookie.match(/session="([^"]+)"/)?.[1] || ''
+		const sigTok = decodeURIComponent(rawCookie.match(/sig=([^;]+)/)?.[1] || '')
+		upstreamRes.end(JSON.stringify({ error: `Bad request for https://upstream.test${r.url} (hdr=${r.headers['x-secret-hdr'] || ''}, cookie=${rawCookie}, tok=${quotedTok}, sig=${sigTok})` }))
 	}, async ({ url: upstreamUrl }) => {
 		const { session: ownerSess } = createTestSession({ account: 'leak-owner@example.com', admin: true, withApp: false })
 		const { user: recipient, session: recipientSess } = createTestSession({ account: 'leak-recipient@example.com', admin: true, withApp: false })
@@ -935,7 +947,7 @@ test('upstream 4xx/5xx error echoes redact injected query and header secrets fro
 			type: 'static',
 			name: 'Echo API',
 			credentials: {
-				headers: { 'x-secret-hdr': 'hdr_secret_value_99' },
+				headers: { 'x-secret-hdr': 'hdr_secret_value_99', cookie: 'session="cookie_secret_value_77"; sig=s%3Asigned_cookie%2B88%3D%3D; ; theme=dark' },
 				query: { api_key: 'q_secret_leak_tok', v: '2' },
 				baseUrl: upstreamUrl
 			}
@@ -948,8 +960,12 @@ test('upstream 4xx/5xx error echoes redact injected query and header secrets fro
 		assert.equal(mcpErr.isError, true)
 		assert.equal(mcpErr.content[0].text.includes('q_secret_leak_tok'), false, 'MCP error must redact query secret')
 		assert.equal(mcpErr.content[0].text.includes('hdr_secret_value_99'), false, 'MCP error must redact header secret')
+		assert.equal(mcpErr.content[0].text.includes('cookie_secret_value_77'), false, 'MCP error must redact quoted cookie secret')
+		assert.equal(mcpErr.content[0].text.includes('s:signed_cookie+88=='), false, 'MCP error must redact decoded cookie secret')
+		assert.equal(mcpErr.content[0].text.includes('s%3Asigned_cookie%2B88%3D%3D'), false, 'MCP error must redact encoded cookie secret')
 		assert.match(mcpErr.content[0].text, /v=\[REDACTED\]/)
 		assert.match(mcpErr.content[0].text, /api_key=\[REDACTED\]/)
+		assert.match(mcpErr.content[0].text, /tok=\[REDACTED\], sig=\[REDACTED\]/)
 		const restErr = await req('GET', '/api/secret_echo/items?keep=yes', { token: recipientSess.token })
 		assert.equal(restErr.status, 400)
 		const recipientLogs = db.logs.listByUserId(recipient.id, { provider: 'secret_echo' })
@@ -957,6 +973,8 @@ test('upstream 4xx/5xx error echoes redact injected query and header secrets fro
 		for (const entry of recipientLogs) {
 			assert.equal(entry.error.includes('q_secret_leak_tok'), false, 'Audit log must redact echoed query secret')
 			assert.equal(entry.error.includes('hdr_secret_value_99'), false, 'Audit log must redact echoed header secret')
+			assert.equal(entry.error.includes('cookie_secret_value_77'), false, 'Audit log must redact echoed quoted cookie secret')
+			assert.equal(entry.error.includes('s:signed_cookie+88=='), false, 'Audit log must redact echoed decoded cookie secret')
 			assert.match(entry.error, /api_key=\[REDACTED\]/)
 		}
 	})

@@ -226,6 +226,31 @@ function escapeRegex (str) {
 	return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+function addCookieSecrets (literalSecrets, headerVal) {
+	for (const part of headerVal.split(';')) {
+		const pair = part.trim()
+		if (pair.length >= 6) literalSecrets.add(pair)
+		const eq = pair.indexOf('=')
+		if (eq === -1) continue
+		const val = pair.slice(eq + 1).trim()
+		const candidates = [val]
+		if (val.length >= 2 && val.startsWith('"') && val.endsWith('"')) {
+			candidates.push(val.slice(1, -1))
+		}
+		for (const candidate of candidates) {
+			if (candidate.length >= 6) literalSecrets.add(candidate)
+			const encoded = encodeURIComponent(candidate)
+			if (encoded.length >= 6) literalSecrets.add(encoded)
+			if (candidate.includes('%')) {
+				try {
+					const decoded = decodeURIComponent(candidate)
+					if (decoded.length >= 6) literalSecrets.add(decoded)
+				} catch {}
+			}
+		}
+	}
+}
+
 function redactCredentialText (text, credentials) {
 	if (typeof text !== 'string' || !text || !credentials) return text
 	let scrubbed = text
@@ -243,10 +268,14 @@ function redactCredentialText (text, credentials) {
 			if (formVal && formVal.length >= 6) literalSecrets.add(formVal)
 		}
 	}
-	for (const [, v] of authHeaders) {
+	for (const [k, v] of authHeaders) {
 		if (v.length >= 6) literalSecrets.add(v)
-		const stripped = v.replace(/^(?:Bearer|Basic)\s+/i, '')
-		if (stripped.length >= 6) literalSecrets.add(stripped)
+		if (k === 'cookie') {
+			addCookieSecrets(literalSecrets, v)
+		} else {
+			const stripped = v.replace(/^(?:Bearer|Basic)\s+/i, '')
+			if (stripped.length >= 6) literalSecrets.add(stripped)
+		}
 	}
 	for (const secret of Array.from(literalSecrets).sort((a, b) => b.length - a.length)) {
 		scrubbed = scrubbed.replaceAll(secret, '[REDACTED]')

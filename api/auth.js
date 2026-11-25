@@ -349,8 +349,7 @@ const ALLOWED_CREDENTIAL_KEYS = new Set(['bearer', 'basic', 'headers', 'query'])
 const DISALLOWED_CREDENTIAL_HEADERS = new Set([
 	...HOP_BY_HOP_HEADERS,
 	'content-length',
-	'host',
-	'cookie'
+	'host'
 ])
 
 function assertHeaderValue (val, label) {
