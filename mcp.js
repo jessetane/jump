@@ -310,8 +310,18 @@ function getAvailableTools (auth) {
 	return list
 }
 
+function buildServerInstructions (session, base) {
+	const lines = [
+		`REST proxy: ALL ${base}/api/<provider>/* forwards raw HTTP requests with "Authorization: Bearer <token>" (and optional "X-Upstream-App: <id>" when multiple apps are linked for a provider) under the session's policies.`
+	]
+	if (session?.admin) {
+		lines.push('For parallel calls, pagination, loops, or untrusted subagents/scripts, call admin({ action: "create_session", admin: false, linkAppIds: [...], policy: [...], ttl: 60 }) to mint a short-lived, least-privilege token and call the REST proxy directly.')
+	}
+	return lines.join(' ')
+}
+
 const rpcMethods = Object.assign(Object.create(null), {
-	initialize: params => {
+	initialize: (params, session, base) => {
 		const requested = params?.protocolVersion
 		const protocolVersion = typeof requested === 'string' && requested ? requested : '2024-11-05'
 		const client = params?.clientInfo ? `${params.clientInfo.name || 'unknown'}/${params.clientInfo.version || ''}` : 'unknown'
@@ -319,7 +329,8 @@ const rpcMethods = Object.assign(Object.create(null), {
 		return {
 			protocolVersion,
 			capabilities: { tools: { listChanged: false } },
-			serverInfo: { name: 'jump', version: PKG_VERSION }
+			serverInfo: { name: 'jump', version: PKG_VERSION },
+			instructions: buildServerInstructions(session, base)
 		}
 	},
 	'notifications/initialized': () => {
@@ -413,6 +424,7 @@ async function handleMcp (req, res, token) {
 			}
 		},
 		methods: Object.assign(Object.create(null), rpcMethods, {
+			initialize: params => rpcMethods.initialize(params, session, base),
 			'tools/list': params => rpcMethods['tools/list'](params, session),
 			'tools/call': params => rpcMethods['tools/call'](params, session, base)
 		})
