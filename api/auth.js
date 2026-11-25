@@ -131,8 +131,8 @@ function requireApp (userId, appId, { allowShare = true } = {}) {
 
 function requireTargetSession (userId, sessionId) {
 	sessionId = requireNonEmptyString(sessionId, 'sessionId')
-	const targetSession = db.tokens.get(sessionId)
-	if (!db.tokens.isSession(targetSession) || targetSession.userId !== userId) {
+	const targetSession = db.tokens.getActiveSession(sessionId)
+	if (!targetSession || targetSession.userId !== userId) {
 		throw httpError(404, `Session not found: ${sessionId}`)
 	}
 	return targetSession
