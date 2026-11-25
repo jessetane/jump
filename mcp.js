@@ -312,10 +312,10 @@ function getAvailableTools (auth) {
 
 function buildServerInstructions (session, base) {
 	const lines = [
-		`This server proxies upstream APIs using server-held credentials, enforced by this session's linked apps and policies. Use <provider>_api tools for individual calls; if your environment can run code (and you have a bearer token), ${base}/api/<provider>/* also accepts direct HTTP requests ("Authorization: Bearer <token>", plus "X-Upstream-App: <id>" when multiple apps are linked) for complex workflows or large payloads.`
+		`This server proxies upstream APIs using server-held credentials, enforced by the current session's linked apps and policies. Use <provider>_api tools for individual calls; if your environment can run code (and you have a bearer token), ${base}/api/<provider>/* also accepts direct HTTP requests ("Authorization: Bearer <token>", plus "X-Upstream-App: <id>" when multiple apps are linked) for complex workflows or large payloads.`
 	]
 	if (session?.admin) {
-		lines.push('Use admin to manage sessions, apps, shares, and policies; prefer minting scoped (admin: false) tokens via create_session with minimal linkAppIds and policy rules, passing ttl for temporary scripts or subagents and omitting it for persistent integrations.')
+		lines.push('Use admin to manage sessions, apps, shares, and policies; prefer minting scoped (admin: false) tokens via create_session with minimal linkAppIds and policy rules, passing ttl for temporary scripts or subagents (so explict revocation is not required) and omitting for persistent integrations.')
 	}
 	return lines.join(' ')
 }
