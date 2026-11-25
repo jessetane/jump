@@ -87,6 +87,10 @@ const UPSTREAM_JOIN = `
 	LEFT JOIN tokens AS upstream ON tokens.type = 'share' AND upstream.id = json_extract(tokens.credentials, '$.appId')
 `
 
+function staleSessionSql (prefix = '') {
+	return `(${prefix}provider = 'self' AND ${prefix}type = 'bearer' AND ${prefix}expires_at IS NOT NULL AND (${prefix}updated < ? OR (${prefix}expires_at <= ? AND (${prefix}credentials IS NULL OR json_extract(${prefix}credentials, '$.refreshToken') IS NULL))))`
+}
+
 function hashSecret (secret) {
 	if (!secret || typeof secret !== 'string') return null
 	return createHash('sha256').update(secret).digest('hex')
@@ -418,7 +422,7 @@ function listByUserId (userId, opts = {}) {
 		JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
 		WHERE tokens.user_id = ? AND tokens.type IN ('bearer', 'oauth', 'static', 'share')
-			AND NOT (tokens.provider = 'self' AND tokens.type = 'bearer' AND tokens.expires_at IS NOT NULL AND (tokens.updated < ? OR (tokens.expires_at <= ? AND (tokens.credentials IS NULL OR json_extract(tokens.credentials, '$.refreshToken') IS NULL))))
+			AND NOT ${staleSessionSql('tokens.')}
 	`
 	const params = [userId, minUpdated, now]
 	if (opts.provider) {
@@ -690,7 +694,7 @@ function prune (maxAgeMs = DORMANT_MS) {
 	pruneRecentRefreshes(now)
 	const minDate = new Date(now - maxAgeMs).toISOString()
 	sqlite.prepare("DELETE FROM tokens WHERE type IN ('oauth_state', 'oauth_code') AND expires_at IS NOT NULL AND expires_at <= ?").run(now)
-	sqlite.prepare("DELETE FROM tokens WHERE provider = 'self' AND type = 'bearer' AND expires_at IS NOT NULL AND (updated < ? OR (expires_at <= ? AND (credentials IS NULL OR json_extract(credentials, '$.refreshToken') IS NULL)))").run(minDate, now)
+	sqlite.prepare(`DELETE FROM tokens WHERE ${staleSessionSql()}`).run(minDate, now)
 }
 
 function formatState (row, rawState = null) {
