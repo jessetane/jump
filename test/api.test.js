@@ -249,10 +249,35 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 		{ action: 'revoke_session', sessionId: '' },
 		{ action: 'create_session', linkAppIds: ['missing'] },
 		{ action: 'create_session', policy: [{ action: 'allow' }] },
-		{ action: 'create_session', linkAppIds: [], policy: [] }
+		{ action: 'create_session', linkAppIds: [], policy: [] },
+		{ action: 'create_session', ttl: 0 },
+		{ action: 'create_session', ttl: -5 },
+		{ action: 'create_session', ttl: '60' },
+		{ action: 'create_session', ttl: NaN },
+		{ action: 'create_session', ttl: Infinity },
+		{ action: 'create_session', ttl: 1e16 }
 	]) {
 		assert.equal((await mcp(session.token, 'admin', bad)).isError, true)
 	}
+	const beforeTtl = Date.now()
+	const ttlRes = await req('POST', '/api/sessions', { token: session.token, body: { name: 'Ephemeral', linkAppIds: [app.id], policy: [{ action: 'allow', methods: ['GET'], path: '/v1/invoices/**' }], ttl: 60 } })
+	assert.equal(ttlRes.status, 201)
+	assert.ok(ttlRes.data.session.expiresAt >= beforeTtl + 59000 && ttlRes.data.session.expiresAt <= Date.now() + 61000)
+	assert.equal((await req('GET', '/api/whoami', { token: ttlRes.data.session.token })).data.authenticated, true)
+	const ttlRotated = await req('PATCH', `/api/sessions/${ttlRes.data.session.id}`, { token: session.token, body: { rotateToken: true } })
+	assert.equal(ttlRotated.status, 200)
+	assert.equal(ttlRotated.data.session.expiresAt, ttlRes.data.session.expiresAt, 'rotateToken must preserve fixed TTL expiry')
+	const nullTtlRes = JSON.parse((await mcp(session.token, 'admin', { action: 'create_session', name: 'Persistent', ttl: null })).content[0].text)
+	assert.equal(nullTtlRes.session.expiresAt, null)
+	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id = ?').run(Date.now() - 1000, ttlRes.data.session.id)
+	assert.equal((await req('GET', '/api/whoami', { token: ttlRotated.data.session.token })).data.authenticated, false)
+	assert.equal((await req('GET', '/api/sessions', { token: session.token })).data.sessions.some(s => s.id === ttlRes.data.session.id), false)
+	const expOauthSess = db.tokens.create({ userId: user.id, provider: 'self', credentials: { refreshToken: 'rt_keep_until_dormant' }, expiresAt: Date.now() - 1000 })
+	db.tokens.prune()
+	assert.equal(db.tokens.get(ttlRes.data.session.id), null)
+	assert.ok(db.tokens.get(expOauthSess.id), 'prune must preserve expired OAuth session while refreshToken is active')
+	db.tokens.remove(expOauthSess.id)
+	db.tokens.remove(nullTtlRes.session.id)
 	assert.equal((await req('POST', '/api/links', { token: session.token, body: { sessionId: session.id } })).status, 400)
 	assert.equal((await req('POST', '/api/links', { token: session.token, body: { appId: app.id } })).status, 400)
 	assert.equal((await req('DELETE', '/api/links', { token: session.token, body: { appId: app.id } })).status, 400)

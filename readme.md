@@ -113,7 +113,7 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 	* `whoami` - Current user, linked logins, session info and linked apps.
 	* `list_sessions` - List active sessions.
 	* `get_session` - Get a session and its linked apps and policies.
-	* `create_session` - Mint a new bearer session (and optionally link apps).
+	* `create_session` - Mint a new bearer session (with optional `ttl` in seconds and linked apps).
 	* `update_session` - Rename a session, toggle `admin`, or rotate its token.
 	* `revoke_session` - Revoke the current session, a specific session, or `allOthers`.
 	* `list_apps` - List connected and shared apps.

@@ -171,12 +171,26 @@ async function getSession (token, opts = {}) {
 	return { session: formatSession(targetSession, session.id) }
 }
 
+function parseSessionTtl (ttl) {
+	if (ttl === undefined || ttl === null) return null
+	if (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl <= 0) {
+		throw httpError(400, 'ttl must be a positive number of seconds')
+	}
+	const ms = Math.round(ttl * 1000)
+	const expiresAt = Date.now() + ms
+	if (ms < 1 || !Number.isSafeInteger(expiresAt) || expiresAt > 8640000000000000) {
+		throw httpError(400, 'ttl must be a positive number of seconds')
+	}
+	return expiresAt
+}
+
 async function createSession (token, opts = {}) {
 	const session = requireAdmin(token, 'Access denied: session administration requires admin privileges')
-	assertKeys(opts, ['name', 'admin', 'linkAppIds', 'policy'])
-	const { name, admin, linkAppIds = [], policy = null } = opts
+	assertKeys(opts, ['name', 'admin', 'linkAppIds', 'policy', 'ttl'])
+	const { name, admin, linkAppIds = [], policy = null, ttl = null } = opts
 	const cleanName = optionalString(name, 'name')
 	const isAdmin = requireBoolean(admin, 'admin', false)
+	const expiresAt = parseSessionTtl(ttl)
 	if (!Array.isArray(linkAppIds)) {
 		throw httpError(400, 'linkAppIds must be an array')
 	}
@@ -196,6 +210,7 @@ async function createSession (token, opts = {}) {
 		provider: 'self',
 		type: 'bearer',
 		name: cleanName,
+		expiresAt,
 		admin: isAdmin ? 1 : 0
 	})
 	for (const app of appsToLink) {

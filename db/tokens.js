@@ -410,16 +410,17 @@ function touch (id) {
 
 function listByUserId (userId, opts = {}) {
 	if (!userId) return []
-	const minUpdated = new Date(Date.now() - DORMANT_MS).toISOString()
+	const now = Date.now()
+	const minUpdated = new Date(now - DORMANT_MS).toISOString()
 	let query = `
 		SELECT tokens.*, ${USER_ACCOUNT_SQL} AS account, ${UPSTREAM_SELECT}
 		FROM tokens
 		JOIN users ON tokens.user_id = users.id
 		${UPSTREAM_JOIN}
 		WHERE tokens.user_id = ? AND tokens.type IN ('bearer', 'oauth', 'static', 'share')
-			AND NOT (tokens.provider = 'self' AND tokens.type = 'bearer' AND tokens.expires_at IS NOT NULL AND tokens.updated < ?)
+			AND NOT (tokens.provider = 'self' AND tokens.type = 'bearer' AND tokens.expires_at IS NOT NULL AND (tokens.updated < ? OR (tokens.expires_at <= ? AND (tokens.credentials IS NULL OR json_extract(tokens.credentials, '$.refreshToken') IS NULL))))
 	`
-	const params = [userId, minUpdated]
+	const params = [userId, minUpdated, now]
 	if (opts.provider) {
 		query += ' AND tokens.provider = ?'
 		params.push(opts.provider)
@@ -664,7 +665,7 @@ function updateSession (id, { name, admin, rotateToken = false } = {}) {
 		recentRefreshes.delete(id)
 		sets.push('token = ?')
 		params.push(hashSecret(rotatedToken))
-		sets.push('expires_at = CASE WHEN expires_at IS NOT NULL THEN ? ELSE NULL END')
+		sets.push("expires_at = CASE WHEN expires_at IS NOT NULL AND json_extract(credentials, '$.refreshToken') IS NOT NULL THEN ? ELSE expires_at END")
 		params.push(nowMs + 3600 * 1000)
 	}
 	if (sets.length > 0) {
@@ -689,7 +690,7 @@ function prune (maxAgeMs = DORMANT_MS) {
 	pruneRecentRefreshes(now)
 	const minDate = new Date(now - maxAgeMs).toISOString()
 	sqlite.prepare("DELETE FROM tokens WHERE type IN ('oauth_state', 'oauth_code') AND expires_at IS NOT NULL AND expires_at <= ?").run(now)
-	sqlite.prepare("DELETE FROM tokens WHERE provider = 'self' AND type = 'bearer' AND expires_at IS NOT NULL AND updated < ?").run(minDate)
+	sqlite.prepare("DELETE FROM tokens WHERE provider = 'self' AND type = 'bearer' AND expires_at IS NOT NULL AND (updated < ? OR (expires_at <= ? AND (credentials IS NULL OR json_extract(credentials, '$.refreshToken') IS NULL)))").run(minDate, now)
 }
 
 function formatState (row, rawState = null) {
