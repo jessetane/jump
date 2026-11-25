@@ -459,37 +459,17 @@ async function executeBufferedUpstream ({ credentials, url, method, body, baseHe
 const PROXY_REQUEST_KEYS = ['provider', 'url', 'method', 'body', 'headers', 'app']
 const REST_EXTRA_STRIPPED_HEADERS = new Set(['x-api-key', 'x-upstream-app'])
 
-function countValues (items, getKey) {
-	const counts = new Map()
-	for (const item of items) {
-		const k = getKey(item)
-		if (k) counts.set(k, (counts.get(k) || 0) + 1)
-	}
-	return counts
-}
-
 function formatLinkedApps (providerLinks, provider, { includeBaseUrl = false } = {}) {
-	const nameCounts = countValues(providerLinks, l => (l.app?.name || '').toLowerCase())
-	const accCounts = countValues(providerLinks, l => (l.app?.credentials?.account || '').toLowerCase())
-	const defaultName = provider.name.toLowerCase()
 	return providerLinks.map(l => {
 		const name = l.app?.name || ''
 		const acc = l.app?.credentials?.account || ''
 		const id = l.app?.id || ''
-		const nameDup = nameCounts.get(name.toLowerCase()) > 1
-		const accDup = accCounts.get(acc.toLowerCase()) > 1
-		let label
-		if (name && (name.toLowerCase() !== defaultName || accDup || (nameDup && !acc))) {
-			if (!nameDup) label = acc ? `${name} (${acc})` : name
-			else label = acc && !accDup ? `${name} (${acc})` : `${name} (${acc ? `${acc}, ` : ''}${id})`
-		} else if (acc) {
-			label = accDup ? `${acc} (${id})` : acc
-		} else {
-			label = name || id
-		}
+		const label = name && acc ? `${name} (${acc})` : (name || acc || id)
 		if (!label) return ''
-		const base = includeBaseUrl ? (l.app?.credentials?.baseUrl || provider.baseUrl) : null
-		return base ? `${label} [${base}]` : label
+		const meta = []
+		if (id && label !== id) meta.push(`id=${id}`)
+		if (includeBaseUrl) meta.push(l.app?.credentials?.baseUrl || provider.baseUrl)
+		return meta.length > 0 ? `${label} [${meta.join(', ')}]` : label
 	}).filter(Boolean)
 }
 
@@ -502,21 +482,12 @@ function resolveTargetLink (providerLinks, rawApp, provider) {
 	if (typeof rawApp !== 'string' || !rawApp.trim()) {
 		throw httpError(400, 'app must be a non-empty string')
 	}
-	const trimmed = rawApp.trim()
-	const lower = trimmed.toLowerCase()
-	const byId = providerLinks.find(l => l.app?.id === trimmed)
-	if (byId) return byId
-	const byName = providerLinks.filter(l => (l.app?.name || '').toLowerCase() === lower)
-	if (byName.length === 1) return byName[0]
-	if (byName.length > 1) {
-		throw httpError(400, `Ambiguous app "${trimmed}" matches multiple linked ${provider.name} apps; specify a unique app name, account, or ID`)
+	const id = rawApp.trim()
+	const target = providerLinks.find(l => l.app?.id === id)
+	if (!target) {
+		throw httpError(404, `App not linked to session or not found: ${id}`)
 	}
-	const byAccount = providerLinks.filter(l => (l.app?.credentials?.account || '').toLowerCase() === lower)
-	if (byAccount.length === 1) return byAccount[0]
-	if (byAccount.length > 1) {
-		throw httpError(400, `Ambiguous app "${trimmed}" matches multiple linked ${provider.name} apps; specify a unique app name or ID`)
-	}
-	throw httpError(404, `App not linked to session or not found: ${trimmed}`)
+	return target
 }
 
 function normalizeMethod (method) {

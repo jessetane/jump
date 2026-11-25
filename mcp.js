@@ -176,7 +176,7 @@ function buildProviderTool (providerName, providerLinks = []) {
 				},
 				app: {
 					type: 'string',
-					description: `${multi ? 'Target' : 'Optional target'} ${provider.name} app name, account, or ID${multi ? ' (required when multiple apps are linked).' : '.'}`
+					description: `${multi ? 'Target' : 'Optional target'} ${provider.name} app ID${multi ? ' (required when multiple apps are linked).' : '.'}`
 				}
 			},
 			required: multi ? ['url', 'app'] : ['url']

@@ -181,7 +181,7 @@ GET    /api/logs                                # list usage logs (sessionId, ap
 ALL    /api/:provider/*                         # streaming rest proxy
 ```
 
-For `ALL /api/:provider/*`, authenticate with your session `Authorization: Bearer <token>`, pass `X-Upstream-App: <id|name|account>` when multiple apps are linked for the same provider (stripped before forwarding), and pass upstream path/query parameters directly in the URL.
+For `ALL /api/:provider/*`, authenticate with your session `Authorization: Bearer <token>`, pass `X-Upstream-App: <id>` when multiple apps are linked for the same provider (stripped before forwarding), and pass upstream path/query parameters directly in the URL.
 
 ## Security
 
