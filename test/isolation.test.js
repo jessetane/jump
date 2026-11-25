@@ -108,6 +108,8 @@ test('shared apps: pending shares without stub users, ceiling policy intersectio
 		const danLogs = JSON.parse((await mcp(danAdmin.token, 'admin', { action: 'list_logs' })).content[0].text).logs
 		assert.ok(danLogs.every(l => l.appId === shareRes.shareId), 'Recipient logs expose shareId and never owner appId')
 		assert.equal(JSON.parse((await mcp(danAdmin.token, 'admin', { action: 'list_logs', appId: sarahApp.id })).content[0].text).logs.length, 0)
+		assert.equal((await mcp(danAgent.token, 'stripe_api', { url: '/v1/customers/c1', app: sarahApp.id })).isError, true, 'Owner upstream appId must be rejected on shared app proxy')
+		assert.equal((await req('GET', '/api/stripe/v1/customers/c1', { token: danAgent.token, headers: { 'x-upstream-app': sarahApp.id } })).status, 404)
 		db.logins.upsert({ userId: dan.id, provider: 'github', account: 'dan-public-handle' })
 		const privApp = JSON.parse((await mcp(sarah.session.token, 'admin', {
 			action: 'connect_app',
@@ -124,6 +126,13 @@ test('shared apps: pending shares without stub users, ceiling policy intersectio
 			})).content[0].text)
 			const danPubSess = JSON.parse((await mcp(danAdmin.token, 'admin', { action: 'create_session', linkAppIds: [privShare.shareId] })).content[0].text).session
 			await mcp(danPubSess.token, 'stripe_api', { url: '/v1/customers/priv' })
+			const danMultiSess = JSON.parse((await mcp(danAdmin.token, 'admin', { action: 'create_session', linkAppIds: [privShare.shareId, shareRes.shareId] })).content[0].text).session
+			const multiShareErr = await mcp(danMultiSess.token, 'stripe_api', { url: '/v1/customers/priv' })
+			assert.equal(multiShareErr.isError, true)
+			assert.ok(multiShareErr.content[0].text.includes(`id=${privShare.shareId}`) && multiShareErr.content[0].text.includes(`id=${shareRes.shareId}`))
+			assert.equal(multiShareErr.content[0].text.includes(privApp.id) || multiShareErr.content[0].text.includes(sarahApp.id), false, 'Multi-share ambiguity error must never leak owner appIds')
+			assert.equal((await mcp(danMultiSess.token, 'stripe_api', { url: '/v1/customers/priv', app: privShare.shareId })).isError, undefined)
+			db.tokens.remove(danMultiSess.id)
 			const ownerPrivLogs = (await mcp(sarah.session.token, 'admin', { action: 'list_logs', appId: privApp.id })).content[0].text
 			assert.equal(ownerPrivLogs.includes('dan-share@acme.com'), false, 'Owner audit logs must not deanonymize recipient primary email across secondary handles')
 			assert.equal(JSON.parse((await mcp(sarah.session.token, 'admin', { action: 'unshare_app', appId: privApp.id, account: 'github:dan-public-handle' })).content[0].text).unshared, true)

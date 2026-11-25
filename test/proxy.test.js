@@ -856,6 +856,10 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		const gTools = (await req('POST', '/mcp', { token: gMixedSess.token, body: { jsonrpc: '2.0', id: 9, method: 'tools/list', params: {} } })).data.result.tools
 		const gToolDesc = gTools.find(t => t.name === 'google_api').description
 		assert.match(gToolDesc, new RegExp(`Custom Proxy \\[id=${gStatic.id}, ${upstreamUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]`))
+		assert.deepEqual(
+			proxy.formatLinkedApps([{ app: { id: 'no-base-id', name: 'No Base', credentials: {} } }], providers.getProvider('stripe'), { includeBaseUrl: true }),
+			['No Base [id=no-base-id]']
+		)
 	})
 })
 

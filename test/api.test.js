@@ -259,6 +259,9 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 		{ action: 'create_session', linkAppIds: [], policy: [] },
 		{ action: 'create_session', ttl: 0 },
 		{ action: 'create_session', ttl: -5 },
+		{ action: 'create_session', ttl: 0.0001 },
+		{ action: 'create_session', ttl: true },
+		{ action: 'create_session', ttl: {} },
 		{ action: 'create_session', ttl: '60' },
 		{ action: 'create_session', ttl: NaN },
 		{ action: 'create_session', ttl: Infinity },
@@ -278,11 +281,17 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	assert.equal(nullTtlRes.session.expiresAt, null)
 	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id = ?').run(Date.now() - 1000, ttlRes.data.session.id)
 	assert.equal((await req('GET', '/api/whoami', { token: ttlRotated.data.session.token })).data.authenticated, false)
+	assert.equal((await req('POST', '/mcp', { token: ttlRotated.data.session.token, body: { jsonrpc: '2.0', id: 52, method: 'tools/list', params: {} } })).status, 401)
+	assert.equal((await req('GET', '/api/google/drive/v3/files', { token: ttlRotated.data.session.token })).status, 401)
 	assert.equal((await req('GET', '/api/sessions', { token: session.token })).data.sessions.some(s => s.id === ttlRes.data.session.id), false)
 	assert.equal((await req('GET', `/api/sessions/${ttlRes.data.session.id}`, { token: session.token })).status, 404)
 	assert.equal((await req('PATCH', `/api/sessions/${ttlRes.data.session.id}`, { token: session.token, body: { rotateToken: true } })).status, 404)
 	assert.equal((await req('POST', '/api/links', { token: session.token, body: { sessionId: ttlRes.data.session.id, appId: app.id } })).status, 404)
+	assert.equal((await req('DELETE', `/api/links?sessionId=${ttlRes.data.session.id}&appId=${app.id}`, { token: session.token })).status, 404)
 	assert.equal((await req('DELETE', `/api/sessions/${ttlRes.data.session.id}`, { token: session.token })).status, 404)
+	const bulkRevoke = await req('DELETE', '/api/sessions?allOthers=true', { token: session.token })
+	assert.equal(bulkRevoke.status, 200)
+	assert.equal(bulkRevoke.data.count, 3, 'Expired TTL session excluded from bulk revoke count')
 	const expOauthSess = db.tokens.create({ userId: user.id, provider: 'self', credentials: { refreshToken: 'rt_keep_until_dormant' }, expiresAt: Date.now() - 1000 })
 	const expOauthRotated = await req('PATCH', `/api/sessions/${expOauthSess.id}`, { token: session.token, body: { rotateToken: true } })
 	assert.equal(expOauthRotated.status, 200)
