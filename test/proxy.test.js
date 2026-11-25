@@ -796,6 +796,7 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		db.links.create({ sessionId: session.id, appId: colonBearer.id })
 		await mcp(session.token, 'colon_b_api', { url: '/c' })
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer part1:part2', 'String credentials with colon stay Bearer')
+		assert.equal((await req('GET', '/api/colon_b/c', { token: session.token, headers: { 'x-upstream-app': 'colon_b' } })).status, 404, 'Non-ID selector rejected even on single-linked provider')
 		const m1 = db.tokens.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Personal', credentials: { account: 'p@example.com', headers: { authorization: 'Bearer sk_1' }, baseUrl: upstreamUrl } })
 		const m2 = db.tokens.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Work', credentials: { account: 'w@example.com', headers: { authorization: 'Bearer sk_2' }, baseUrl: upstreamUrl } })
 		const m3 = db.tokens.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Billing', credentials: { account: 'w@example.com', headers: { authorization: 'Bearer sk_3' }, baseUrl: upstreamUrl } })

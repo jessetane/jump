@@ -468,7 +468,8 @@ function formatLinkedApps (providerLinks, provider, { includeBaseUrl = false } =
 		if (!label) return ''
 		const meta = []
 		if (id && label !== id) meta.push(`id=${id}`)
-		if (includeBaseUrl) meta.push(l.app?.credentials?.baseUrl || provider.baseUrl)
+		const base = includeBaseUrl ? (l.app?.credentials?.baseUrl || provider.baseUrl) : null
+		if (base) meta.push(base)
 		return meta.length > 0 ? `${label} [${meta.join(', ')}]` : label
 	}).filter(Boolean)
 }

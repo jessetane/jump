@@ -98,6 +98,10 @@ test('shared apps: pending shares without stub users, ceiling policy intersectio
 				{ action: 'allow', methods: ['POST'], path: '/v1/invoices/**' }
 			]
 		})).content[0].text).session
+		const danAgentTools = (await req('POST', '/mcp', { token: danAgent.token, body: { jsonrpc: '2.0', id: 20, method: 'tools/list', params: {} } })).data.result.tools
+		const danStripeTool = danAgentTools.find(t => t.name === 'stripe_api')
+		assert.ok(danStripeTool.description.includes(`id=${shareRes.shareId}`), 'Shared app tools/list exposes shareId')
+		assert.equal(danStripeTool.description.includes(sarahApp.id), false, 'Shared app tools/list must never leak owner upstream appId')
 		assert.equal((await mcp(danAgent.token, 'stripe_api', { url: '/v1/customers/c1' })).isError, undefined)
 		assert.equal((await mcp(danAgent.token, 'stripe_api', { url: '/v1/invoices/i1', method: 'POST' })).isError, true, 'Owner ceiling denies POST even if session allows it')
 		assert.equal((await mcp(danAgent.token, 'stripe_api', { url: '/v1/invoices/i1', method: 'GET' })).isError, true, 'Session policy denies GET /invoices even if owner ceiling allows it')
