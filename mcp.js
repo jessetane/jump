@@ -312,7 +312,7 @@ function getAvailableTools (auth) {
 
 function buildServerInstructions (session, base) {
 	const lines = [
-		`REST proxy: ALL ${base}/api/<provider>/* forwards raw HTTP requests with "Authorization: Bearer <token>" (and optional "X-Upstream-App: <id>" when multiple apps are linked for a provider) under the session's policies.`
+		`REST proxy: ALL ${base}/api/<provider>/* forwards raw HTTP requests with "Authorization: Bearer <token>" (and "X-Upstream-App: <id>", required when multiple apps are linked for a provider) under the session's policies.`
 	]
 	if (session?.admin) {
 		lines.push('For parallel calls, pagination, loops, or untrusted subagents/scripts, call admin({ action: "create_session", admin: false, linkAppIds: [...], policy: [...], ttl: 60 }) to mint a short-lived, least-privilege token and call the REST proxy directly.')
