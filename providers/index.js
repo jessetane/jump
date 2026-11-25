@@ -309,7 +309,7 @@ function createProvider (config) {
 		toolDescription () {
 			if (typeof rawConfig.toolDescription === 'string') return rawConfig.toolDescription
 			if (typeof rawConfig.toolDescription === 'function') return rawConfig.toolDescription()
-			return `Make HTTP requests to ${label} REST APIs. Automatically attaches the configured ${label} credentials.`
+			return `Make HTTP requests to ${label} APIs. Automatically attaches the configured ${label} credentials.`
 		},
 		urlParamDescription () {
 			if (typeof rawConfig.urlParamDescription === 'string') return rawConfig.urlParamDescription

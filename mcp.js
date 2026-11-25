@@ -168,7 +168,7 @@ function buildProviderTool (providerName, providerLinks = []) {
 				},
 				body: {
 					type: ['object', 'string'],
-					description: 'Request body payload for POST/PUT/PATCH requests: JS object (serialized as JSON by default, or URL-encoded when headers["content-type"] is "application/x-www-form-urlencoded") or raw string (sent byte-for-byte without injecting a Content-Type header—set headers["content-type"] explicitly when upstream requires one).'
+					description: 'Request body: objects send as JSON (or form-encoded when headers["content-type"] is "application/x-www-form-urlencoded"); strings are sent raw as-is.'
 				},
 				headers: {
 					type: 'object',
@@ -312,10 +312,10 @@ function getAvailableTools (auth) {
 
 function buildServerInstructions (session, base) {
 	const lines = [
-		`REST proxy: ALL ${base}/api/<provider>/* forwards raw HTTP requests with "Authorization: Bearer <token>" (and "X-Upstream-App: <id>", required when multiple apps are linked for a provider) under the session's policies.`
+		`This server proxies upstream APIs using server-held credentials, enforced by this session's linked apps and policies. Use <provider>_api tools for individual calls; if your environment can run code (and you have a bearer token), ${base}/api/<provider>/* also accepts direct HTTP requests ("Authorization: Bearer <token>", plus "X-Upstream-App: <id>" when multiple apps are linked) for complex workflows or large payloads.`
 	]
 	if (session?.admin) {
-		lines.push('For parallel calls, pagination, loops, or untrusted subagents/scripts, call admin({ action: "create_session", admin: false, linkAppIds: [...], policy: [...], ttl: 60 }) to mint a short-lived, least-privilege token and call the REST proxy directly.')
+		lines.push('Use admin to manage sessions, apps, shares, and policies; prefer minting scoped (admin: false) tokens via create_session with minimal linkAppIds and policy rules, passing ttl for temporary scripts or subagents and omitting it for persistent integrations.')
 	}
 	return lines.join(' ')
 }
