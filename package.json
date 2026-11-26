@@ -2,7 +2,7 @@
 	"name": "jump",
 	"version": "0.1.0",
 	"type": "module",
-	"description": "MCP jump host for upstream REST APIs",
+	"description": "MCP proxy for HTTP APIs",
 	"license": "MIT",
 	"author": "Jesse Tane <jesse.tane@gmail.com>",
 	"repository": {

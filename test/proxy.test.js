@@ -315,8 +315,8 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 			assert.equal(cdnReceived[0].headers.authorization, undefined)
 			assert.equal(cdnReceived[0].headers['x-tenant'], undefined)
 			assert.equal(cdnReceived[0].headers.cookie, undefined)
-			const restRedirect = await req('GET', '/api/github/repos/acme/tarball', { token: session.token, redirect: 'manual' })
-			assert.equal(restRedirect.status, 302)
+			const httpRedirect = await req('GET', '/api/github/repos/acme/tarball', { token: session.token, redirect: 'manual' })
+			assert.equal(httpRedirect.status, 302)
 			assert.equal((await mcp(session.token, 'github_api', { url: '/public/bounce-admin' })).isError, true, 'Same-origin redirect re-checks policy')
 			const bounceBack = JSON.parse((await mcp(session.token, 'github_api', { url: '/bounce-back-auth' })).content[0].text)
 			assert.equal(bounceBack.auth, null, 'Off-origin then back-origin redirect must not re-attach auth')
@@ -380,7 +380,7 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 	})
 })
 
-test('MCP buffered decompression/limits vs REST streaming, body-inspection guards, timeouts, and teardown', async () => {
+test('MCP buffered decompression/limits vs HTTP streaming, body-inspection guards, timeouts, and teardown', async () => {
 	await assert.rejects(() => proxy.readResponseBody(Readable.from([Buffer.alloc(500), Buffer.alloc(600)]), 1000), err => err.status === 413)
 	const gzBr = zlib.brotliCompressSync(zlib.gzipSync(Buffer.from('stacked-ok')))
 	assert.equal((await proxy.readResponseBody(Object.assign(Readable.from([gzBr]), { headers: { 'content-encoding': 'gzip, br' } }), 1000)).toString('utf8'), 'stacked-ok')
@@ -521,17 +521,17 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 			const mcp500 = await mcp(session.token, 'comp_api', { url: '/upstream-500' })
 			assert.equal(mcp500.isError, true)
 			assert.equal(mcp500.content[0].text, 'Comp API Error (500): {"error":"upstream crash"}')
-			const rest500 = await req('GET', '/api/comp/upstream-500', { token: session.token })
-			assert.equal(rest500.status, 500)
-			assert.deepEqual(rest500.data, { error: 'upstream crash' })
+			const http500 = await req('GET', '/api/comp/upstream-500', { token: session.token })
+			assert.equal(http500.status, 500)
+			assert.deepEqual(http500.data, { error: 'upstream crash' })
 			assert.equal((await mcp(session.token, 'comp_api', { url: '/ws-upgrade' })).isError, true)
 			assert.equal((await mcp(session.token, 'comp_api', { url: '/gzip', method: 'CONNECT' })).isError, true)
-			const restLarge = await fetch(`${baseUrl()}/api/comp/large-stream`, { headers: { authorization: `Bearer ${session.token}` } })
-			assert.equal(restLarge.status, 200)
-			assert.equal((await restLarge.arrayBuffer()).byteLength, 1536 * 1024)
-			assert.equal(restLarge.headers.get('set-cookie'), null)
-			assert.equal(restLarge.headers.get('x-content-type-options'), 'nosniff')
-			assert.equal(restLarge.headers.get('content-security-policy'), 'sandbox')
+			const httpLarge = await fetch(`${baseUrl()}/api/comp/large-stream`, { headers: { authorization: `Bearer ${session.token}` } })
+			assert.equal(httpLarge.status, 200)
+			assert.equal((await httpLarge.arrayBuffer()).byteLength, 1536 * 1024)
+			assert.equal(httpLarge.headers.get('set-cookie'), null)
+			assert.equal(httpLarge.headers.get('x-content-type-options'), 'nosniff')
+			assert.equal(httpLarge.headers.get('content-security-policy'), 'sandbox')
 			assert.equal((await req('HEAD', '/api/comp/large-stream', { token: session.token })).status, 200)
 			assert.equal((await mcp(session.token, 'comp_api', { url: '/large-stream', method: 'HEAD' })).isError, undefined)
 			assert.equal((await mcp(session.token, 'comp_api', { url: '/large-stream', method: 'GET' })).isError, true)
@@ -558,25 +558,25 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 				}
 				out.end()
 			})
-			const rest304 = await rawHttp('GET', '/api/comp/not-modified-304', { token: session.token })
-			assert.equal(rest304.status, 304)
-			assert.equal(rest304.headers.etag, '"v1"')
-			assert.equal(rest304.body.byteLength, 0)
-			const restGz = await rawHttp('GET', '/api/comp/gzip', { token: session.token })
-			assert.equal(restGz.status, 200)
-			assert.equal(restGz.headers['content-encoding'], 'gzip')
-			assert.deepEqual(JSON.parse(zlib.gunzipSync(restGz.body).toString('utf8')), { ok: 'gz' })
-			const restChunked = await rawHttp('POST', '/api/comp/upload-stream', {
+			const http304 = await rawHttp('GET', '/api/comp/not-modified-304', { token: session.token })
+			assert.equal(http304.status, 304)
+			assert.equal(http304.headers.etag, '"v1"')
+			assert.equal(http304.body.byteLength, 0)
+			const httpGz = await rawHttp('GET', '/api/comp/gzip', { token: session.token })
+			assert.equal(httpGz.status, 200)
+			assert.equal(httpGz.headers['content-encoding'], 'gzip')
+			assert.deepEqual(JSON.parse(zlib.gunzipSync(httpGz.body).toString('utf8')), { ok: 'gz' })
+			const httpChunked = await rawHttp('POST', '/api/comp/upload-stream', {
 				token: session.token,
 				headers: { 'content-type': 'text/plain' },
 				chunks: ['hello-', 'chunked']
 			})
-			assert.equal(restChunked.status, 200)
-			assert.equal(JSON.parse(restChunked.body.toString('utf8')).bytes, 13)
+			assert.equal(httpChunked.status, 200)
+			assert.equal(JSON.parse(httpChunked.body.toString('utf8')).bytes, 13)
 			assert.equal(lastUploadBody, 'hello-chunked')
-			assert.equal(lastUploadContentLength, null, 'Uninspected REST upload preserves chunked streaming without Content-Length')
-			const restUp = await req('POST', '/api/comp/upload-stream', { token: session.token, headers: { 'content-type': 'application/octet-stream' }, body: Buffer.alloc(1536 * 1024, 0x42) })
-			assert.equal(restUp.data.bytes, 1536 * 1024)
+			assert.equal(lastUploadContentLength, null, 'Uninspected HTTP upload preserves chunked streaming without Content-Length')
+			const httpUp = await req('POST', '/api/comp/upload-stream', { token: session.token, headers: { 'content-type': 'application/octet-stream' }, body: Buffer.alloc(1536 * 1024, 0x42) })
+			assert.equal(httpUp.data.bytes, 1536 * 1024)
 			const inspectedSess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
 			db.links.create({ sessionId: inspectedSess.id, appId: app.id, policy: [{ action: 'deny', methods: ['POST'], body: '*secret*' }, { action: 'allow', methods: ['POST'], path: '/upload-stream' }] })
 			const gzDenied = await req('POST', '/api/comp/upload-stream', {
@@ -584,28 +584,28 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 				headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' },
 				body: zlib.gzipSync(Buffer.from(JSON.stringify({ msg: 'secret' })))
 			})
-			assert.equal(gzDenied.status, 415, 'Body-inspected REST requests reject Content-Encoding with 415')
+			assert.equal(gzDenied.status, 415, 'Body-inspected HTTP requests reject Content-Encoding with 415')
 			const hitsBefore = uploadHits
-			const allowedRestBody = JSON.stringify({ msg: 'hello-rest' })
-			const allowedRest = await req('POST', '/api/comp/upload-stream', {
+			const allowedHttpBody = JSON.stringify({ msg: 'hello-http' })
+			const allowedHttp = await req('POST', '/api/comp/upload-stream', {
 				token: inspectedSess.token,
 				headers: { 'content-type': 'application/json' },
-				body: allowedRestBody
+				body: allowedHttpBody
 			})
-			assert.equal(allowedRest.status, 200)
-			assert.equal(lastUploadBody, allowedRestBody)
-			assert.equal(lastUploadContentLength, String(Buffer.byteLength(allowedRestBody)))
+			assert.equal(allowedHttp.status, 200)
+			assert.equal(lastUploadBody, allowedHttpBody)
+			assert.equal(lastUploadContentLength, String(Buffer.byteLength(allowedHttpBody)))
 			assert.equal((await req('POST', '/api/comp/upload-stream', {
 				token: inspectedSess.token,
 				headers: { 'content-type': 'application/json' },
 				body: JSON.stringify({ msg: 'contains secret here' })
 			})).status, 403)
-			assert.equal(uploadHits, hitsBefore + 1, 'Denied REST body never reaches upstream')
+			assert.equal(uploadHits, hitsBefore + 1, 'Denied HTTP body never reaches upstream')
 			assert.equal((await req('POST', '/api/comp/upload-stream', {
 				token: inspectedSess.token,
 				headers: { 'content-type': 'application/octet-stream' },
 				body: Buffer.alloc(1024 * 1024 + 1, 0x61)
-			})).status, 413, 'Inspected REST request body enforces 1 MB getRawBody limit')
+			})).status, 413, 'Inspected HTTP request body enforces 1 MB getRawBody limit')
 			const jsonPolicySess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
 			db.links.create({
 				sessionId: jsonPolicySess.id,
@@ -629,7 +629,7 @@ test('MCP buffered decompression/limits vs REST streaming, body-inspection guard
 				token: jsonPolicySess.token,
 				headers: { 'content-type': 'application/json' },
 				body: '{malformed'
-			})).status, 403, 'Malformed JSON under inspecting REST policy fails closed')
+			})).status, 403, 'Malformed JSON under inspecting HTTP policy fails closed')
 			const chunkedAllow = await rawHttp('POST', '/api/comp/upload-stream', {
 				token: jsonPolicySess.token,
 				headers: { 'content-type': 'application/json' },
@@ -775,12 +775,12 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		assert.equal(notionMcp.isError, undefined)
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer secret_notion')
 		assert.equal(captured.at(-1).headers['notion-version'], '2022-06-28')
-		const notionRest = await req('POST', '/api/notion/v1/pages?WORKspace=spoof&apikey=spoof&page=1', {
+		const notionHttp = await req('POST', '/api/notion/v1/pages?WORKspace=spoof&apikey=spoof&page=1', {
 			token: session.token,
 			headers: { 'notion-version': '1999', cookie: 'sid=1', 'x-api-key': 'jump_key', 'x-safe': 'keep' },
 			body: Buffer.from('raw')
 		})
-		assert.equal(notionRest.status, 200, notionRest.text)
+		assert.equal(notionHttp.status, 200, notionHttp.text)
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer secret_notion')
 		assert.equal(captured.at(-1).headers['notion-version'], '2022-06-28')
 		assert.equal(captured.at(-1).headers.constructor, 'ctor_val')
@@ -823,17 +823,17 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		assert.equal((await req('GET', '/api/stripe/p/1', { token: session.token })).status, 400)
 		assert.equal((await req('GET', '/api/stripe/p/1', { token: session.token, headers: { 'x-upstream-app': 'non-existent' } })).status, 404)
 		assert.equal((await req('GET', '/api/stripe/b/1', { token: session.token, headers: { 'x-upstream-app': 'billing' } })).status, 404)
-		const restSelId = await req('GET', '/api/stripe/p/1?app=upstream-app&other=1', { token: session.token, headers: { 'x-upstream-app': m1.id } })
-		assert.equal(restSelId.status, 200)
+		const httpSelId = await req('GET', '/api/stripe/p/1?app=upstream-app&other=1', { token: session.token, headers: { 'x-upstream-app': m1.id } })
+		assert.equal(httpSelId.status, 200)
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer sk_1')
 		assert.equal(captured.at(-1).headers['x-upstream-app'], undefined)
 		assert.equal(captured.at(-1).url, '/p/1?app=upstream-app&other=1')
-		const restSelThird = await req('GET', '/api/stripe/b/1?other=2', { token: session.token, headers: { 'x-upstream-app': m3.id } })
-		assert.equal(restSelThird.status, 200)
+		const httpSelThird = await req('GET', '/api/stripe/b/1?other=2', { token: session.token, headers: { 'x-upstream-app': m3.id } })
+		assert.equal(httpSelThird.status, 200)
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer sk_3')
 		assert.equal(captured.at(-1).url, '/b/1?other=2')
-		const restOpts = await req('OPTIONS', '/api/stripe/b/1', { token: session.token, headers: { 'x-upstream-app': m3.id } })
-		assert.equal(restOpts.status, 200)
+		const httpOpts = await req('OPTIONS', '/api/stripe/b/1', { token: session.token, headers: { 'x-upstream-app': m3.id } })
+		assert.equal(httpOpts.status, 200)
 		assert.equal(captured.at(-1).method, 'OPTIONS')
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer sk_3')
 		assert.equal((await mcp(session.token, 'stripe_api', { url: '/b/1', app: m3.id })).isError, undefined)
@@ -966,8 +966,8 @@ test('upstream 4xx/5xx error echoes redact injected query and header secrets fro
 		assert.match(mcpErr.content[0].text, /v=\[REDACTED\]/)
 		assert.match(mcpErr.content[0].text, /api_key=\[REDACTED\]/)
 		assert.match(mcpErr.content[0].text, /tok=\[REDACTED\], sig=\[REDACTED\]/)
-		const restErr = await req('GET', '/api/secret_echo/items?keep=yes', { token: recipientSess.token })
-		assert.equal(restErr.status, 400)
+		const httpErr = await req('GET', '/api/secret_echo/items?keep=yes', { token: recipientSess.token })
+		assert.equal(httpErr.status, 400)
 		const recipientLogs = db.logs.listByUserId(recipient.id, { provider: 'secret_echo' })
 		assert.equal(recipientLogs.length, 2)
 		for (const entry of recipientLogs) {

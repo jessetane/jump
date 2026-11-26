@@ -178,7 +178,7 @@ DELETE /api/shares?appId=...&account=...        # unshare app from user (admin)
 
 # Audit & Upstream Proxy
 GET    /api/logs                                # list usage logs (sessionId, appId, provider, allowed, limit)
-ALL    /api/:provider/*                         # streaming rest proxy
+ALL    /api/:provider/*                         # streaming http proxy
 ```
 
 For `ALL /api/:provider/*`, authenticate with your session `Authorization: Bearer <token>`, pass `X-Upstream-App: <id>` when multiple apps are linked for the same provider (stripped before forwarding), and pass upstream path/query parameters directly in the URL.

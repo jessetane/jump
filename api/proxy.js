@@ -486,7 +486,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, baseHe
 }
 
 const PROXY_REQUEST_KEYS = ['provider', 'url', 'method', 'body', 'headers', 'app']
-const REST_EXTRA_STRIPPED_HEADERS = new Set(['x-api-key', 'x-upstream-app'])
+const STREAM_EXTRA_STRIPPED_HEADERS = new Set(['x-api-key', 'x-upstream-app'])
 
 function formatLinkedApps (providerLinks, provider, { includeBaseUrl = false } = {}) {
 	return providerLinks.map(l => {
@@ -676,7 +676,7 @@ async function request (opts = {}, auth) {
 
 async function stream (opts = {}, auth, req, res) {
 	const { provider: providerName = 'google', url, app } = opts
-	return runProxyCall({ auth, providerName, url, method: req.method, app, headers: req.headers, extraStrip: REST_EXTRA_STRIPPED_HEADERS }, async ({ session, provider, normalizedMethod, baseHeaders, timeoutMs, ctx, logState, recordLog }) => {
+	return runProxyCall({ auth, providerName, url, method: req.method, app, headers: req.headers, extraStrip: STREAM_EXTRA_STRIPPED_HEADERS }, async ({ session, provider, normalizedMethod, baseHeaders, timeoutMs, ctx, logState, recordLog }) => {
 		const allowsBody = reqMethodAllowsBody(normalizedMethod)
 		let bufferedBody = undefined
 		let bodyStream = null

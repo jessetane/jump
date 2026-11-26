@@ -178,13 +178,13 @@ async function handleRest (req, res, { pathname, url, query, token }) {
 			throw httpError(404, 'not found')
 		}
 	}
-	const restMatch = pathname.match(/^\/api\/([^/]+)\/(.+)$/)
-	if (restMatch) {
-		const provider = restMatch[1].toLowerCase()
+	const proxyMatch = pathname.match(/^\/api\/([^/]+)\/(.+)$/)
+	if (proxyMatch) {
+		const provider = proxyMatch[1].toLowerCase()
 		if (!isValidProviderId(provider)) {
 			throw httpError(404, 'not found')
 		}
-		await handleProviderProxy(req, res, provider, restMatch[2], url, token)
+		await handleProviderProxy(req, res, provider, proxyMatch[2], url, token)
 		return
 	}
 	throw httpError(404, 'not found')
