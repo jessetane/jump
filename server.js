@@ -88,7 +88,7 @@ const server = http.createServer(async (req, res) => {
 		const isProxyOptions = req.method === 'OPTIONS' && pathname.startsWith('/api/') && Boolean(token) && !req.headers['access-control-request-method']
 		if (isCorsRoute(pathname, req.method)) {
 			res.setHeader('access-control-allow-origin', corsOrigin)
-			res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+			res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS')
 			res.setHeader('access-control-allow-headers', 'authorization, content-type, mcp-session-id, mcp-protocol-version, last-event-id, x-api-key, x-upstream-app, accept')
 			res.setHeader('access-control-expose-headers', 'WWW-Authenticate, Mcp-Session-Id, MCP-Protocol-Version')
 			if (req.method === 'OPTIONS' && !isProxyOptions) {

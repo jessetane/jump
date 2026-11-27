@@ -30,7 +30,9 @@ test('HTTP security headers, malformed URL 400, OPTIONS CORS, and 404 routing', 
 	}
 	assert.equal((await req('PUT', '/')).status, 405)
 	assert.equal((await req('OPTIONS', '/oauth/token')).status, 204)
-	assert.equal((await req('OPTIONS', '/api/sessions')).status, 204)
+	const corsApi = await req('OPTIONS', '/api/sessions')
+	assert.equal(corsApi.status, 204)
+	assert.match(corsApi.headers.get('access-control-allow-methods'), /\bHEAD\b/)
 	const { session: corsSess } = createTestSession({ account: 'cors-opt@example.com', withApp: false })
 	assert.equal((await req('OPTIONS', '/api/sessions', { token: corsSess.token })).status, 405)
 	assert.equal((await req('OPTIONS', '/api/sessions', { token: corsSess.token, headers: { 'access-control-request-method': 'GET' } })).status, 204)
