@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { measureAuthUrlLength } from '../public/oauth-scopes.js'
+import { measureAuthUrlLength, findSubsumedTokens } from '../public/oauth-scopes.js'
 import { useServer, baseUrl, createTestSession, withMockFetch, withEnv, mcp, req, db, providers, oauthMod, bootstrapLocalAdmin } from './helpers.js'
 
 useServer()
@@ -1197,7 +1197,7 @@ test('connect page serves /oauth-scopes.js and emits generic non-secret authUrlW
 				for (const s of svc.scopes[mode]) allGoogleScopes.add(s)
 			}
 		}
-		const measuredAll = measureAuthUrlLength(gInit.authUrlWarning.templateUrl, allGoogleScopes, gInit.authUrlWarning.impliedScopes)
+		const measuredAll = measureAuthUrlLength(gInit.authUrlWarning.templateUrl, allGoogleScopes, gInit.impliedScopes)
 		const builtAll = providers.google.buildAuthUrl({
 			state: gSetup,
 			callbackUrl: `${baseUrl()}/oauth/callback`,
@@ -1211,6 +1211,69 @@ test('connect page serves /oauth-scopes.js and emits generic non-secret authUrlW
 		assert.equal(ghHtml.status, 200)
 		const ghInit = JSON.parse(ghHtml.text.match(/const initData = (.*?)\n/)[1])
 		assert.equal(ghInit.authUrlWarning, undefined)
-		assert.equal(ghInit.services[0].scopes, undefined)
+		assert.ok(ghInit.impliedScopes)
+		assert.ok(ghInit.services[0].scopes)
+	})
+})
+
+test('findSubsumedTokens derives forced subsumed modes generically for Google, GitHub, and reauth connect pages', async () => {
+	const { session } = createTestSession({ account: 'subsumed-owner@example.com', admin: 1 })
+	const app = db.tokens.create({
+		userId: session.userId,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Subsumed App',
+		scopes: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/drive.activity https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/yt-analytics.readonly',
+		credentials: { accessToken: 'tok', account: 'subsumed@example.com' }
+	})
+	await withEnv({ GOOGLE_CLIENT_ID: 'g-cid', GOOGLE_CLIENT_SECRET: 'g-sec', GITHUB_CLIENT_ID: 'gh-cid', GITHUB_CLIENT_SECRET: 'gh-sec' }, async () => {
+		const gSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'google', reauthAppId: app.id })
+		const gHtml = await req('GET', `/providers/google/connect?code=${gSetup}`)
+		assert.equal(gHtml.status, 200)
+		const gInit = JSON.parse(gHtml.text.match(/const initData = (.*?)\n/)[1])
+		const selected = gInit.params.services.split(',')
+		assert.ok(selected.includes('drive:write'))
+		assert.ok(!selected.includes('drive:read'))
+		assert.ok(selected.includes('youtube:read'))
+		assert.ok(selected.includes('youtube:write'))
+		const gSubsumed = findSubsumedTokens(gInit.services, selected, gInit.impliedScopes)
+		assert.ok(gSubsumed.has('drive:read'))
+		assert.ok(!gSubsumed.has('drive:write'))
+		assert.ok(!gSubsumed.has('youtube:read'))
+		const gAllWrite = findSubsumedTokens(
+			gInit.services,
+			['drive:write', 'youtube:write', 'photos:write', 'apps_script:write', 'admin:write'],
+			gInit.impliedScopes
+		)
+		assert.ok(gAllWrite.has('drive:read'))
+		assert.ok(!gAllWrite.has('youtube:read'))
+		assert.ok(!gAllWrite.has('photos:read'))
+		assert.ok(!gAllWrite.has('apps_script:read'))
+		assert.ok(!gAllWrite.has('admin:read'))
+		const ghSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'github' })
+		const ghInit = JSON.parse((await req('GET', `/providers/github/connect?code=${ghSetup}`)).text.match(/const initData = (.*?)\n/)[1])
+		const ghSubsumed = findSubsumedTokens(ghInit.services, ['org:admin', 'repo:write', 'packages:write'], ghInit.impliedScopes)
+		assert.ok(ghSubsumed.has('org:write'))
+		assert.ok(ghSubsumed.has('org:read'))
+		assert.ok(!ghSubsumed.has('org:admin'))
+		assert.ok(ghSubsumed.has('repo:read'))
+		assert.ok(!ghSubsumed.has('packages:read'))
+		const syntheticServices = [
+			{ id: 'dup', scopes: { a: ['x'], b: ['x'] } },
+			{ id: 'overlap', scopes: { ab: ['x', 'y'], c: ['z'] } },
+			{ id: 'pair', scopes: { a: ['x'], bc: ['y', 'z'] } }
+		]
+		const synthSelected = ['dup:a', 'dup:b', 'overlap:ab', 'overlap:c', 'pair:a', 'pair:bc']
+		const synthSubsumed = findSubsumedTokens(syntheticServices, synthSelected, null)
+		const activeScopes = new Set()
+		for (const svc of syntheticServices) {
+			for (const [mode, list] of Object.entries(svc.scopes)) {
+				const token = `${svc.id}:${mode}`
+				if (synthSelected.includes(token) && !synthSubsumed.has(token)) {
+					for (const s of list) activeScopes.add(s)
+				}
+			}
+		}
+		assert.deepEqual(Array.from(activeScopes).sort(), ['x', 'y', 'z'])
 	})
 })

@@ -901,9 +901,10 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 				id: s.id,
 				name: s.name,
 				modes: Object.keys(s.scopes || {}),
-				...(warnMax && { scopes: s.scopes })
+				scopes: s.scopes
 			}))
 		}),
+		...(provider.impliedScopes && { impliedScopes: provider.impliedScopes }),
 		...(warnMax && {
 			authUrlWarning: {
 				maxLength: warnMax,
@@ -913,8 +914,7 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 					services: [],
 					loginHint: maskedLoginHint
 				}),
-				baseScopes: provider.baseScopes || [],
-				impliedScopes: provider.impliedScopes || null
+				baseScopes: provider.baseScopes || []
 			}
 		})
 	}

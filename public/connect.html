@@ -92,6 +92,10 @@
 				cursor: pointer;
 			}
 
+			.mode-option:has(input:disabled) {
+				cursor: default;
+			}
+
 			.mode-label {
 				font-size: 0.85rem;
 				color: #444;
@@ -167,7 +171,7 @@
 			</form>
 		</div>
 		<script type="module">
-			import { measureAuthUrlLength } from '/oauth-scopes.js'
+			import { measureAuthUrlLength, findSubsumedTokens } from '/oauth-scopes.js'
 			const initData = {{INIT_DATA}}
 
 			function formatModeLabel (mode) {
@@ -188,14 +192,14 @@
 				return modes
 			}
 
-			function updateAuthUrlWarning (warningConfig, scopeByToken, warningEl, providerName) {
+			function updateAuthUrlWarning (warningConfig, scopeByToken, warningEl, providerName, impliedScopes) {
 				if (!warningConfig || !warningEl) return
 				const scopeSet = new Set(warningConfig.baseScopes || [])
 				for (const box of document.querySelectorAll('input[name="services"]')) {
 					if (!box.checked) continue
 					for (const s of (scopeByToken.get(box.value) || [])) scopeSet.add(s)
 				}
-				const len = measureAuthUrlLength(warningConfig.templateUrl, scopeSet, warningConfig.impliedScopes)
+				const len = measureAuthUrlLength(warningConfig.templateUrl, scopeSet, impliedScopes)
 				const over = len > warningConfig.maxLength
 				warningEl.style.display = over ? 'block' : 'none'
 				warningEl.textContent = over
@@ -203,19 +207,28 @@
 					: ''
 			}
 
-			function updateAllRowState (allModes, onUpdate) {
+			function syncServiceState (services, userSelectedTokens, impliedScopes, allModes, onUpdate) {
+				const subsumed = findSubsumedTokens(services, userSelectedTokens, impliedScopes)
 				const allBoxes = document.querySelectorAll('input[name="services"]')
+				for (const box of allBoxes) {
+					const isSubsumed = subsumed.has(box.value)
+					box.disabled = isSubsumed
+					box.checked = isSubsumed || userSelectedTokens.has(box.value)
+					box.title = isSubsumed ? 'Included by another selected scope' : ''
+				}
 				for (const mode of allModes) {
 					const allBox = document.getElementById('all_' + mode)
 					if (!allBox) continue
 					let total = 0
 					let checked = 0
+					let enabled = 0
 					for (const box of allBoxes) {
 						if (box.dataset.mode !== mode) continue
 						total++
 						if (box.checked) checked++
+						if (!box.disabled) enabled++
 					}
-					allBox.disabled = total === 0
+					allBox.disabled = total === 0 || enabled === 0
 					allBox.checked = total > 0 && checked === total
 					allBox.indeterminate = checked > 0 && checked < total
 				}
@@ -240,6 +253,7 @@
 				const params = initData.params || {}
 				const provider = initData.provider || { id: 'google', name: 'Google' }
 				const services = Array.isArray(initData.services) ? initData.services : []
+				const impliedScopes = initData.impliedScopes || null
 				const allModes = collectModes(services)
 				const viewEl = document.getElementById('connect-view')
 				const formEl = document.getElementById('connect-form')
@@ -255,7 +269,7 @@
 						scopeByToken.set(s.id + ':' + mode, list)
 					}
 				}
-				const syncWarning = () => updateAuthUrlWarning(warningConfig, scopeByToken, warningEl, provider.name)
+				const syncWarning = () => updateAuthUrlWarning(warningConfig, scopeByToken, warningEl, provider.name, impliedScopes)
 				document.title = 'jump connect'
 				if (formEl) formEl.action = '/providers/' + provider.id + '/consent'
 				if (params.reauth_app_id) {
@@ -275,13 +289,14 @@
 						if (nameInput) nameInput.value = params.app_name || params.name
 					}
 				}
-				const selectedTokens = new Set()
+				const userSelectedTokens = new Set()
 				if (params.services) {
 					for (const part of String(params.services).split(',')) {
 						const token = part.trim().toLowerCase()
-						if (token) selectedTokens.add(token)
+						if (token) userSelectedTokens.add(token)
 					}
 				}
+				const syncAll = () => syncServiceState(services, userSelectedTokens, impliedScopes, allModes, syncWarning)
 				if (services.length > 0 && allModes.length > 0) {
 					if (viewEl) viewEl.classList.add('has-table')
 					const headerRow = document.getElementById('header-row')
@@ -298,9 +313,11 @@
 						allBox.addEventListener('change', function () {
 							const checked = allBox.checked
 							for (const box of document.querySelectorAll('input[name="services"]')) {
-								if (box.dataset.mode === mode) box.checked = checked
+								if (box.dataset.mode !== mode) continue
+								if (checked) userSelectedTokens.add(box.value)
+								else userSelectedTokens.delete(box.value)
 							}
-							updateAllRowState(allModes, syncWarning)
+							syncAll()
 						})
 						allRow.appendChild(createModeCell(labelText, allBox))
 					}
@@ -328,16 +345,17 @@
 							box.id = 'svc_' + s.id + '_' + mode
 							box.value = token
 							box.dataset.mode = mode
-							box.checked = selectedTokens.has(token)
 							box.setAttribute('aria-label', s.name + ' ' + labelText)
 							box.addEventListener('change', function () {
-								updateAllRowState(allModes, syncWarning)
+								if (box.checked) userSelectedTokens.add(token)
+								else userSelectedTokens.delete(token)
+								syncAll()
 							})
 							tr.appendChild(createModeCell(labelText, box))
 						}
 						tbody.appendChild(tr)
 					}
-					updateAllRowState(allModes, syncWarning)
+					syncAll()
 				} else if (wrapEl) {
 					wrapEl.style.display = 'none'
 				}
