@@ -108,7 +108,7 @@ function encodeClientLabel (name) {
 }
 
 function decodeClientLabel (clientId) {
-	const match = clientId.match(/^client_(?:bearer_)?[0-9a-f-]{36}_([A-Za-z0-9_-]{1,120})$/i)
+	const match = clientId.match(/^client_(?:bearer_)?[0-9a-f-]{36}_([A-Za-z0-9_-]{1,256})$/i)
 	if (!match) return null
 	try {
 		const decoded = Buffer.from(match[1], 'base64url').toString('utf8').replace(/[\x00-\x1f\x7f]/g, '').trim()

@@ -60,6 +60,12 @@ test('DCR RFC 7591 ignores caller-supplied client secrets/IDs, preserves client_
 	assert.equal(reg.data.client_secret, undefined)
 	assert.equal(oauthMod.deriveClientName(reg.data.client_id), 'Claude Code')
 	assert.equal(oauthMod.deriveClientName('client_12345'), null)
+	const cjkName = '漢'.repeat(64)
+	const cjkReg = await req('POST', '/oauth/register', {
+		body: { client_name: cjkName, redirect_uris: ['http://127.0.0.1:9999/cb'] }
+	})
+	assert.equal(cjkReg.status, 201)
+	assert.equal(oauthMod.deriveClientName(cjkReg.data.client_id), cjkName)
 	const bearerReg = await req('POST', '/oauth/register', {
 		body: { client_name: 'Embedded Client', redirect_uris: ['http://localhost:8080/cb'], grant_types: ['authorization_code'], response_types: ['code'], token_endpoint_auth_method: 'none' }
 	})
