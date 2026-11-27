@@ -164,12 +164,32 @@ test('PKCE authorize validation, CSRF Origin guard, single-use setup codes, and 
 			redirect: 'manual'
 		})
 		assert.equal(okConsent.status, 302)
+		const firstState = new URL(okConsent.headers.get('location')).searchParams.get('state')
+		assert.ok(db.tokens.getState(setupCode), 'setupCode stays usable across consent until callback completes')
+		const retryConsent = await req('POST', '/providers/github/consent', {
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({ code: setupCode }).toString(),
+			redirect: 'manual'
+		})
+		assert.equal(retryConsent.status, 302)
+		const secondState = new URL(retryConsent.headers.get('location')).searchParams.get('state')
+		await withMockFetch(async (input, init, origFetch) => {
+			const u = typeof input === 'string' ? input : input.url
+			if (u === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'gho_setup_once', token_type: 'bearer' })
+			if (u === 'https://api.github.com/user') return Response.json({ login: 'setup-once-user' })
+			return origFetch(input, init)
+		}, async origFetch => {
+			const cbRes = await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${firstState}`)
+			assert.equal(cbRes.status, 200)
+			const lateCbRes = await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${secondState}`)
+			assert.equal(lateCbRes.status, 403, 'Completed setupCode must block concurrent/late callbacks')
+		})
 		const replay = await req('POST', '/providers/github/consent', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({ code: setupCode }).toString(),
 			redirect: 'manual'
 		})
-		assert.equal(replay.status, 403, 'setupCode must be single-use')
+		assert.equal(replay.status, 403, 'setupCode must be consumed once callback finishes')
 	})
 })
 
@@ -1109,7 +1129,20 @@ test('OAuth connect redirect and error responses emit safe [oauth] diagnostic lo
 				!line.includes('secret-email@example.com') &&
 				!line.includes(setupCode)
 			), `Expected safe consent redirect log, got: ${logs.join('\n')}`)
-			assert.equal((await req('GET', `/providers/google/connect?code=${setupCode}`)).status, 403)
+			const reauthState = new URL(locationUrl).searchParams.get('state')
+			assert.equal((await req('GET', `/providers/google/connect?code=${setupCode}`)).status, 200)
+			await withMockFetch(async (input, init, origFetch) => {
+				const u = typeof input === 'string' ? input : input.url
+				if (u === 'https://oauth2.googleapis.com/token') return Response.json({ access_token: 'tok', expires_in: 3600 })
+				if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') return Response.json({ email: 'wrong-user@example.com', verified_email: true })
+				return origFetch(input, init)
+			}, async origFetch => {
+				const mismatchRes = await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${reauthState}`)
+				assert.equal(mismatchRes.status, 409)
+				assert.ok(warns.some(line => line.includes(`GET /oauth/callback (google reauth=${app.id}) failed: upstream account mismatch`)))
+			})
+			assert.equal((await req('GET', `/providers/google/connect?code=${setupCode}`)).status, 200, 'Account mismatch must not burn setupCode')
+			assert.equal((await req('GET', '/providers/google/connect?code=expired-or-missing')).status, 403)
 			assert.ok(warns.some(line => line.includes('[oauth] GET /providers/google/connect rejected: invalid or expired setup code')))
 			assert.equal((await req('GET', '/oauth/callback?error=invalid_scope&error_description=Bad+scope')).status, 400)
 			assert.ok(warns.some(line => line.includes('[oauth] GET /oauth/callback failed: upstream error=invalid_scope (Bad scope)')))

@@ -28,6 +28,7 @@ export {
 	createState,
 	getState,
 	consumeState,
+	consumeStateById,
 	createAuthCode,
 	consumeAuthCode,
 	formatToken,
@@ -716,6 +717,7 @@ function formatState (row, rawState = null) {
 		merge: Boolean(meta.merge),
 		newAppIds: Array.isArray(meta.newAppIds) ? meta.newAppIds : null,
 		reauthAppId: meta.reauthAppId || null,
+		setupStateId: meta.setupStateId || null,
 		services: Array.isArray(meta.services) ? meta.services : null,
 		baseUrl: meta.baseUrl || null,
 		sessionId: meta.sessionId || null,
@@ -739,6 +741,7 @@ function createState (opts = {}) {
 		merge = false,
 		newAppIds = null,
 		reauthAppId = null,
+		setupStateId = null,
 		services = null,
 		baseUrl = null,
 		sessionId = null,
@@ -762,6 +765,7 @@ function createState (opts = {}) {
 			...(merge && { merge: true }),
 			...(Array.isArray(newAppIds) && { newAppIds }),
 			reauthAppId,
+			...(setupStateId && { setupStateId }),
 			...(Array.isArray(services) && { services }),
 			...(baseUrl && { baseUrl }),
 			sessionId
@@ -795,6 +799,12 @@ function consumeState (state, validate = null) {
 		sqlite.prepare("DELETE FROM tokens WHERE token = ? AND type = 'oauth_state'").run(tokenHash)
 		return result === true ? found : result
 	})
+}
+
+function consumeStateById (id) {
+	if (!id) return null
+	const row = sqlite.prepare("DELETE FROM tokens WHERE id = ? AND type = 'oauth_state' AND (expires_at IS NULL OR expires_at > ?) RETURNING *").get(id, Date.now())
+	return formatState(row)
 }
 
 function createAuthCode (opts = {}) {

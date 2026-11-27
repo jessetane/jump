@@ -322,9 +322,11 @@ function buildSetupContext (setup, { mode, providerId = null, appType = null } =
 	return { setup, session, existingApp, unauthorizedApp: !existingApp }
 }
 
-function loadSetupContext (code, opts = {}) {
+function loadSetupContext (code, opts = {}, validate = null) {
 	if (!code) return null
-	return buildSetupContext(db.tokens.getState(code), opts)
+	const ctx = buildSetupContext(db.tokens.getState(code), opts)
+	if (!ctx) return null
+	return validate ? validate(ctx) : ctx
 }
 
 function consumeSetupContext (code, opts = {}, validate = null) {
@@ -533,11 +535,12 @@ async function handleAuthorizeConsent (req, res) {
 	}
 	let linkSession = null
 	let linkMerge = false
+	let linkSetupStateId = null
 	let provider
 	if (setupCode) {
-		let consumed
+		let loaded
 		try {
-			consumed = consumeSetupContext(setupCode, { mode: 'setup_link' }, ctx => {
+			loaded = loadSetupContext(setupCode, { mode: 'setup_link' }, ctx => {
 				if (ctx.setup.provider && providerName && providerName !== ctx.setup.provider) {
 					throw httpError(403, 'Access denied: provider mismatch for setup code.')
 				}
@@ -561,12 +564,13 @@ async function handleAuthorizeConsent (req, res) {
 			}
 			throw err
 		}
-		if (!consumed) {
+		if (!loaded) {
 			warnSendText(res, 'Access denied: invalid or expired setup code.', 403, 'POST /oauth/authorize/consent rejected: invalid or expired setup code')
 			return
 		}
-		linkSession = consumed.session
-		linkMerge = Boolean(consumed.setup.merge)
+		linkSession = loaded.session
+		linkMerge = Boolean(loaded.setup.merge)
+		linkSetupStateId = loaded.setup.id
 	} else {
 		if (!providerName) {
 			sendJson(res, { error: 'invalid_request', error_description: 'OAuth provider or admin token is required' }, 400)
@@ -592,6 +596,7 @@ async function handleAuthorizeConsent (req, res) {
 		name,
 		admin,
 		merge: linkMerge,
+		setupStateId: linkSetupStateId,
 		sessionId: linkSession ? linkSession.id : null,
 		ip
 	})
@@ -908,9 +913,9 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	}
 	const servicesList = params.getAll('services').flatMap(v => v.split(','))
 	const setupCode = params.get('code') || null
-	let consumed
+	let loaded
 	try {
-		consumed = consumeSetupContext(setupCode, { mode: 'setup_connect', providerId: provider.id, appType: 'oauth' }, ctx => {
+		loaded = loadSetupContext(setupCode, { mode: 'setup_connect', providerId: provider.id, appType: 'oauth' }, ctx => {
 			const reauthAppId = ctx.setup.reauthAppId || null
 			if (params.get('reauth_app_id') && params.get('reauth_app_id') !== reauthAppId) {
 				throw httpError(403, 'Access denied: unauthorized re-authentication request.')
@@ -928,11 +933,11 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		}
 		throw err
 	}
-	if (!consumed) {
+	if (!loaded) {
 		warnSendText(res, 'Access denied: admin session required.', 403, `POST /providers/${provider.id}/consent rejected: invalid or expired setup code`)
 		return
 	}
-	const { setup, session, existingApp } = consumed
+	const { setup, session, existingApp } = loaded
 	const reauthAppId = setup.reauthAppId || null
 	const rawAppName = params.has('app_name')
 		? params.get('app_name')
@@ -946,6 +951,7 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		mode: 'connect',
 		sessionId: session.id,
 		reauthAppId,
+		setupStateId: setup.id,
 		name,
 		provider: provider.id,
 		ip
@@ -1024,14 +1030,23 @@ async function handleCallback (req, res, query) {
 				.map(appIdentityKey)
 		)
 		try {
-			db.logins.upsert({
-				userId: session.userId,
-				provider: provider.id,
-				account: cleanAccount,
-				allowUnscoped,
-				merge: oauthState.merge
+			db.transaction(() => {
+				if (oauthState.setupStateId && !db.tokens.consumeStateById(oauthState.setupStateId)) {
+					throw httpError(403, 'Access denied: invalid or expired setup code.')
+				}
+				db.logins.upsert({
+					userId: session.userId,
+					provider: provider.id,
+					account: cleanAccount,
+					allowUnscoped,
+					merge: oauthState.merge
+				})
 			})
 		} catch (err) {
+			if (err.status === 403) {
+				warnSendText(res, err.message, 403, `GET /oauth/callback (${provider.id} auth) rejected: invalid or expired setup code`)
+				return
+			}
 			if (err.status === 409) {
 				warnSendText(res, `${err.message}.`, 409, `GET /oauth/callback (${provider.id} auth) conflict: account already registered to another user`)
 				return
@@ -1085,8 +1100,9 @@ async function handleCallback (req, res, query) {
 		warnSendText(res, 'Access denied: admin session required.', 403, `GET /oauth/callback (${provider.id} connect) rejected: admin session required`)
 		return
 	}
+	let existingApp = null
 	if (oauthState.reauthAppId) {
-		const existingApp = getOwnedApp(session, oauthState.reauthAppId, { providerId: provider.id, type: 'oauth' })
+		existingApp = getOwnedApp(session, oauthState.reauthAppId, { providerId: provider.id, type: 'oauth' })
 		if (!existingApp) {
 			warnSendText(res, 'Access denied: unauthorized re-authentication request.', 403, `GET /oauth/callback (${provider.id} connect) rejected: unauthorized re-authentication request`)
 			return
@@ -1096,6 +1112,12 @@ async function handleCallback (req, res, query) {
 			warnSendText(res, `Re-authentication failed: expected account "${expectedAccount}", got "${account}".`, 409, `GET /oauth/callback (${provider.id} reauth=${existingApp.id}) failed: upstream account mismatch`)
 			return
 		}
+	}
+	if (oauthState.setupStateId && !db.tokens.consumeStateById(oauthState.setupStateId)) {
+		warnSendText(res, 'Access denied: invalid or expired setup code.', 403, `GET /oauth/callback (${provider.id} connect) rejected: invalid or expired setup code`)
+		return
+	}
+	if (existingApp) {
 		const updatedCreds = {
 			...existingApp.credentials,
 			accessToken,
