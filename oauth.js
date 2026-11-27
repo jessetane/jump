@@ -667,7 +667,7 @@ async function handleVerify (req, res, query) {
 		sendHtml(res, renderCardPage(
 			'jump verify',
 			`${actionVerb} session for <strong>${escapeHtml(displayAccount)}</strong>`,
-			`<form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${escapeHtml(code)}">${appsHtml}<button type="submit">Continue</button></form>`
+			`<form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${escapeHtml(code)}">${appsHtml}<button type="submit">${actionVerb} Session</button></form>`
 		))
 		return
 	}
@@ -1147,7 +1147,7 @@ async function handleCallback (req, res, query) {
 			scopes: scopes || existingApp.scopes
 		})
 		sendHtml(res, renderCardPage(
-			`${provider.name} Re-authenticated`,
+			`${provider.name} Updated`,
 			`${escapeHtml(provider.name)} credentials updated`,
 			`<p class="subtitle">Linked sessions will resume automatically.</p>`
 		))

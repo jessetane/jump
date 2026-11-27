@@ -167,7 +167,7 @@
 					</table>
 				</div>
 				<div id="auth-url-warning" role="alert"></div>
-				<button type="submit" id="submit-btn">Sign in with Google</button>
+				<button type="submit" id="submit-btn">Authorize with Google</button>
 			</form>
 		</div>
 		<script type="module">
@@ -203,7 +203,7 @@
 				const over = len > warningConfig.maxLength
 				warningEl.style.display = over ? 'block' : 'none'
 				warningEl.textContent = over
-					? 'Heads up: authorization URLs this long (' + len + ' chars) may cause ' + providerName + ' sign-in to hang or fail. If it stalls, try selecting fewer services or connecting separate apps per workflow.'
+					? 'Heads up: long URLs (' + len + ' chars) may cause ' + providerName + ' authorization to hang or fail. If it stalls, try selecting fewer services or connecting separate apps per workflow.'
 					: ''
 			}
 
@@ -272,10 +272,10 @@
 				const syncWarning = () => updateAuthUrlWarning(warningConfig, scopeByToken, warningEl, provider.name, impliedScopes)
 				document.title = 'jump connect'
 				if (formEl) formEl.action = '/providers/' + provider.id + '/consent'
+				if (submitEl) submitEl.textContent = 'Authorize with ' + provider.name
 				if (params.reauth_app_id) {
 					const nameGroup = document.getElementById('app-name-group')
 					if (subtitleEl) subtitleEl.textContent = 'Renew ' + provider.name + ' credentials'
-					if (submitEl) submitEl.textContent = 'Sign in with ' + provider.name
 					if (nameGroup) nameGroup.style.display = 'none'
 				} else {
 					if (subtitleEl) {
@@ -283,7 +283,6 @@
 							? 'Configure API services access'
 							: 'Connect ' + provider.name + ' account'
 					}
-					if (submitEl) submitEl.textContent = 'Sign in with ' + provider.name
 					if (params.app_name || params.name) {
 						const nameInput = document.getElementById('app-name')
 						if (nameInput) nameInput.value = params.app_name || params.name

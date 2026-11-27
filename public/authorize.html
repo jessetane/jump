@@ -95,7 +95,7 @@
 					btn.type = 'submit'
 					btn.name = 'provider'
 					btn.value = p.id
-					btn.textContent = 'Continue with ' + p.name
+					btn.textContent = 'Sign in with ' + p.name
 					btnContainer.appendChild(btn)
 				}
 				if (localAuth) {
@@ -109,7 +109,7 @@
 					const btn = document.createElement('button')
 					btn.type = 'submit'
 					btn.id = 'submit-btn'
-					btn.textContent = 'Continue with Token'
+					btn.textContent = 'Sign in with Token'
 					btnContainer.appendChild(btn)
 				}
 				const hiddenContainer = document.getElementById('hidden-inputs')
