@@ -70,7 +70,7 @@ function buildAdminTool () {
 				loginId: { type: 'string', description: 'Target login key ID (optional for unlink_login).' },
 				name: { type: 'string', description: 'Human-readable label for a session or upstream app.' },
 				account: { type: 'string', description: 'Login key account or recipient user account identifier (e.g. email, username, or "provider:account").' },
-				baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or static-credential providers (e.g. "https://api.stripe.com").' },
+				baseUrl: { type: 'string', description: 'Optional upstream base URL for custom or static-credential apps in connect_app and update_app (e.g. "https://api.stripe.com").' },
 				credentials: {
 					type: ['string', 'object'],
 					description: 'Upstream static credentials for connect_app and update_app (omit on connect_app to return a browser URL so the user can submit keys without exposing them to the model): pass a string shorthand "<token>" for Bearer auth, or a structured object { bearer?, basic?, headers?, query? } where bearer is "<token>", basic is "user:pass", headers is { [name]: value } (e.g. { "x-api-key": "sk-ant-..." }), and query is { [name]: value }.',
@@ -81,7 +81,7 @@ function buildAdminTool () {
 						query: { type: 'object', description: 'URL query parameters to attach on upstream requests (e.g. { ApiKey: "..." }).' }
 					}
 				},
-				provider: { type: 'string', description: 'Provider namespace / tool slug (e.g. "google", "stripe", "github"; exposes <provider>_api).' },
+				provider: { type: 'string', description: 'Upstream provider namespace / tool slug (e.g. "google", "stripe", "github"; exposes <provider>_api), sign-in OAuth provider (for share_app, unshare_app, link_login, unlink_login), or log filter (for list_logs).' },
 				type: { type: 'string', enum: ['oauth', 'static'], description: 'Optional auth type for connect_app. Defaults to "oauth" for built-in OAuth providers (when credentials are omitted) and "static" otherwise; set "static" to connect a static key or launch the browser credential form for an OAuth or unspecified provider.' },
 				services: {
 					type: 'array',
@@ -90,7 +90,7 @@ function buildAdminTool () {
 				},
 				policy: {
 					type: ['array', 'null'],
-					description: 'Ordered list of rules evaluated top-to-bottom (first match wins; unmatched requests are denied). Semantics: (1) null or omitted = unrestricted allow-all; [] = deny-all. (2) Within a rule, all present fields (methods, origin, path, query, body) are ANDed; omitted fields match anything. Place specific deny rules BEFORE broader allow rules. (3) On shared apps, the owner share_app policy acts as an immutable ceiling—both the share policy AND the recipient link_app policy must independently allow each request. (4) Prefer minimal allowlists over denylists.',
+					description: 'Ordered list of rules evaluated top-to-bottom (first match wins; unmatched requests are denied). Semantics: (1) null or omitted = unrestricted allow-all; [] = deny-all. (2) Within a rule, all present fields (methods, origin, path, query, body) are ANDed; omitted fields match anything. Place specific deny rules BEFORE broader allow rules. (3) Applies to create_session (with linkAppIds), link_app, and share_app; on shared apps, the owner share_app policy acts as an immutable ceiling—both the share policy AND the recipient link_app policy must independently allow each request. (4) Prefer minimal allowlists over denylists.',
 					items: {
 						type: 'object',
 						required: ['action'],
@@ -115,11 +115,11 @@ function buildAdminTool () {
 							},
 							query: {
 								type: 'object',
-								description: 'Non-empty map of URL query parameter names to expected primitive glob(s) or null. Matching is case-insensitive and "*" matches any character (including "/"). IMPORTANT: a string pattern requires the parameter to be PRESENT—use ["none", null] to allow a parameter to be either "none" or omitted, or null alone to require absence. Repeated parameters (?tag=a&tag=b) only match when EVERY value matches at least one pattern.'
+								description: 'Non-empty map of URL query parameter names to expected primitive glob(s) or null. Matching is case-insensitive and "*" matches any character (including "/"). IMPORTANT: a string pattern requires the parameter to be PRESENT—use ["none", null] to allow a parameter to be either "none" or omitted, or null alone to require absence. For repeated parameters (?tag=a&tag=b), "allow" rules require EVERY value to match while "deny" rules trigger if ANY value matches.'
 							},
 							body: {
 								type: ['object', 'string', 'array', 'null'],
-								description: 'Optional request body constraint (omit to pass body through uninspected): (a) field-map object: non-empty map of literal field keys (or nested plain objects mirroring JSON, e.g. { recipient: { email: "*@good.com" } }; use flat keys like "metadata[env]" for form) to primitive glob(s) or null—same presence/absence and array-every semantics as query; empty bodies evaluate as {}; (b) string or string[] of globs: case-insensitive full-body match where "*" crosses newlines (e.g. "*<DeleteDomain*" matches both "<DeleteDomain>" and "<DeleteDomain/>"); (c) null: requires an empty request body.'
+								description: 'Optional request body constraint (omit to pass body through uninspected): (a) field-map object: non-empty map of literal field keys (or nested plain objects mirroring JSON, e.g. { recipient: { email: "*@good.com" } }; use flat keys like "metadata[env]" for form) to primitive glob(s) or null—same presence/absence and array semantics ("allow" = every element, "deny" = any element) as query; empty bodies evaluate as {}; (b) string or string[] of globs: case-insensitive full-body match where "*" crosses newlines (e.g. "*<DeleteDomain*" matches both "<DeleteDomain>" and "<DeleteDomain/>"); (c) null: requires an empty request body.'
 							},
 							bodyType: {
 								type: 'string',
@@ -164,7 +164,7 @@ function buildProviderTool (providerName, providerLinks = []) {
 				},
 				method: {
 					type: 'string',
-					description: 'HTTP method (GET, POST, PUT, PATCH, DELETE). Defaults to GET.'
+					description: 'HTTP method (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS). Defaults to GET.'
 				},
 				body: {
 					type: ['object', 'string'],
@@ -315,7 +315,7 @@ function buildServerInstructions (session, base) {
 		`This server proxies upstream APIs using server-held credentials, enforced by the current session's linked apps and policies. Use <provider>_api tools for individual calls; if your environment can run code (and you have a bearer token), ${base}/api/<provider>/* also accepts direct HTTP requests ("Authorization: Bearer <token>", plus "X-Upstream-App: <id>" when multiple apps are linked) for complex workflows or large payloads.`
 	]
 	if (session?.admin) {
-		lines.push('Use admin to manage sessions, apps, shares, and policies; prefer minting scoped (admin: false) tokens via create_session with minimal linkAppIds and policy rules, passing ttl for temporary scripts or subagents (so explict revocation is not required) and omitting for persistent integrations.')
+		lines.push('Use admin to manage sessions, apps, shares, and policies; prefer minting scoped (admin: false) tokens via create_session with minimal linkAppIds and policy rules, passing ttl for temporary scripts or subagents (so explicit revocation is not required) and omitting for persistent integrations.')
 	}
 	return lines.join(' ')
 }
