@@ -11,6 +11,7 @@ export default {
 		userInfoUrl: 'https://www.googleapis.com/oauth2/v2/userinfo',
 		loginHintParam: 'login_hint',
 		verifiedEmail: true,
+		warnAuthUrlLength: 3500,
 		authParams: {
 			access_type: 'offline',
 			prompt: 'consent'

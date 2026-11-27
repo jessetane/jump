@@ -8,11 +8,24 @@
 		<style>
 			.subtitle,
 			#app-name-group,
+			#auth-url-warning,
 			#submit-btn {
 				width: 100%;
 				max-width: 432px;
 				margin-left: auto;
 				margin-right: auto;
+			}
+
+			#auth-url-warning {
+				display: none;
+				margin-bottom: 1rem;
+				padding: 10px 12px;
+				border: 1px solid #d97706;
+				border-radius: 6px;
+				background: #fffbeb;
+				color: #92400e;
+				font-size: 0.85rem;
+				line-height: 1.4;
 			}
 
 			.subtitle {
@@ -149,10 +162,12 @@
 						</tbody>
 					</table>
 				</div>
+				<div id="auth-url-warning" role="alert"></div>
 				<button type="submit" id="submit-btn">Sign in with Google</button>
 			</form>
 		</div>
-		<script>
+		<script type="module">
+			import { measureAuthUrlLength } from '/oauth-scopes.js'
 			const initData = {{INIT_DATA}}
 
 			function formatModeLabel (mode) {
@@ -173,7 +188,22 @@
 				return modes
 			}
 
-			function updateAllRowState (allModes) {
+			function updateAuthUrlWarning (warningConfig, scopeByToken, warningEl, providerName) {
+				if (!warningConfig || !warningEl) return
+				const scopeSet = new Set(warningConfig.baseScopes || [])
+				for (const box of document.querySelectorAll('input[name="services"]')) {
+					if (!box.checked) continue
+					for (const s of (scopeByToken.get(box.value) || [])) scopeSet.add(s)
+				}
+				const len = measureAuthUrlLength(warningConfig.templateUrl, scopeSet, warningConfig.impliedScopes)
+				const over = len > warningConfig.maxLength
+				warningEl.style.display = over ? 'block' : 'none'
+				warningEl.textContent = over
+					? 'Too many permissions selected \u2014 ' + providerName + ' often hangs or fails with authorization URLs this long (' + len + ' chars). Uncheck unused services or connect separate apps per workflow.'
+					: ''
+			}
+
+			function updateAllRowState (allModes, onUpdate) {
 				const allBoxes = document.querySelectorAll('input[name="services"]')
 				for (const mode of allModes) {
 					const allBox = document.getElementById('all_' + mode)
@@ -189,6 +219,7 @@
 					allBox.checked = total > 0 && checked === total
 					allBox.indeterminate = checked > 0 && checked < total
 				}
+				if (onUpdate) onUpdate()
 			}
 
 			function createModeCell (labelText, inputEl) {
@@ -214,7 +245,17 @@
 				const formEl = document.getElementById('connect-form')
 				const subtitleEl = document.getElementById('page-subtitle')
 				const submitEl = document.getElementById('submit-btn')
+				const warningEl = document.getElementById('auth-url-warning')
 				const wrapEl = document.getElementById('services-wrap')
+				const warningConfig = initData.authUrlWarning || null
+				const scopeByToken = new Map()
+				for (const s of services) {
+					if (!s.scopes) continue
+					for (const [mode, list] of Object.entries(s.scopes)) {
+						scopeByToken.set(s.id + ':' + mode, list)
+					}
+				}
+				const syncWarning = () => updateAuthUrlWarning(warningConfig, scopeByToken, warningEl, provider.name)
 				document.title = 'jump connect'
 				if (formEl) formEl.action = '/providers/' + provider.id + '/consent'
 				if (params.reauth_app_id) {
@@ -259,7 +300,7 @@
 							for (const box of document.querySelectorAll('input[name="services"]')) {
 								if (box.dataset.mode === mode) box.checked = checked
 							}
-							updateAllRowState(allModes)
+							updateAllRowState(allModes, syncWarning)
 						})
 						allRow.appendChild(createModeCell(labelText, allBox))
 					}
@@ -290,13 +331,13 @@
 							box.checked = selectedTokens.has(token)
 							box.setAttribute('aria-label', s.name + ' ' + labelText)
 							box.addEventListener('change', function () {
-								updateAllRowState(allModes)
+								updateAllRowState(allModes, syncWarning)
 							})
 							tr.appendChild(createModeCell(labelText, box))
 						}
 						tbody.appendChild(tr)
 					}
-					updateAllRowState(allModes)
+					updateAllRowState(allModes, syncWarning)
 				} else if (wrapEl) {
 					wrapEl.style.display = 'none'
 				}

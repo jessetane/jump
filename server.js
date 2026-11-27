@@ -12,6 +12,11 @@ export { server, bootstrapLocalAdmin }
 
 const INDEX_HTML = fs.readFileSync(new URL('./public/index.html', import.meta.url), 'utf8')
 const STYLE_CSS = fs.readFileSync(new URL('./public/style.css', import.meta.url), 'utf8')
+const OAUTH_SCOPES_JS = fs.readFileSync(new URL('./public/oauth-scopes.js', import.meta.url), 'utf8')
+const STATIC_ASSETS = new Map([
+	['/style.css', { type: 'text/css; charset=utf-8', body: STYLE_CSS }],
+	['/oauth-scopes.js', { type: 'application/javascript; charset=utf-8', body: OAUTH_SCOPES_JS }]
+])
 const corsOrigin = process.env.CORS_ORIGIN || '*'
 
 const CORS_OAUTH_PATHS = new Set(['/oauth/token', '/oauth/register', '/oauth/revoke'])
@@ -108,10 +113,11 @@ const server = http.createServer(async (req, res) => {
 			}
 			throw httpError(405, 'Method Not Allowed')
 		}
-		if (pathname === '/style.css' && (req.method === 'GET' || req.method === 'HEAD')) {
+		const staticAsset = STATIC_ASSETS.get(pathname)
+		if (staticAsset && (req.method === 'GET' || req.method === 'HEAD')) {
 			res.statusCode = 200
-			res.setHeader('content-type', 'text/css; charset=utf-8')
-			res.end(req.method === 'HEAD' ? undefined : STYLE_CSS)
+			res.setHeader('content-type', staticAsset.type)
+			res.end(req.method === 'HEAD' ? undefined : staticAsset.body)
 			return
 		}
 		if (pathname.startsWith('/api/')) {

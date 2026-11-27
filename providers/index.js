@@ -1,5 +1,6 @@
 import * as db from '../db/index.js'
 import { validateBaseUrl, hasUrlScheme, resolveTargetUrl, hasPathTraversal, positiveNumberEnv, getUserAgent, httpError } from '../util.js'
+import { dedupeImpliedScopes } from '../public/oauth-scopes.js'
 import googleConfig from './google.js'
 import githubConfig from './github.js'
 
@@ -180,24 +181,6 @@ function normalizeServiceSelections (services, entries = [], { strict = false, p
 	return normalized
 }
 
-function dedupeImpliedScopes (scopeSet, impliedScopes) {
-	if (!impliedScopes) return Array.from(scopeSet)
-	const suppressed = new Set()
-	const queue = Array.from(scopeSet)
-	for (let i = 0; i < queue.length; i++) {
-		const scope = queue[i]
-		const children = impliedScopes[scope]
-		if (!children) continue
-		for (const child of children) {
-			if (child !== scope && !suppressed.has(child)) {
-				suppressed.add(child)
-				queue.push(child)
-			}
-		}
-	}
-	return Array.from(scopeSet).filter(s => !suppressed.has(s))
-}
-
 function buildScopesFromSelection (services, baseScopes = [], selectedServices = [], impliedScopes = null) {
 	const scopeSet = new Set(baseScopes)
 	for (const token of normalizeServiceSelections(services, selectedServices)) {
@@ -320,6 +303,10 @@ function createProvider (config) {
 			}
 		}
 	}
+	const baseScopes = Array.isArray(oauth?.baseScopes) ? [...oauth.baseScopes] : []
+	const warnAuthUrlLength = Number.isFinite(oauth?.warnAuthUrlLength) && oauth.warnAuthUrlLength > 0
+		? oauth.warnAuthUrlLength
+		: null
 	const envPrefix = id.toUpperCase()
 	const verifiedEmail = Boolean(rawConfig.verifiedEmail || oauth?.verifiedEmail)
 	const supportsAuth = Boolean(oauth && oauth.userInfoUrl && oauth.extractAccount)
@@ -334,6 +321,8 @@ function createProvider (config) {
 		supportsApp,
 		...(services && { services }),
 		...(impliedScopes && { impliedScopes }),
+		...(baseScopes.length > 0 && { baseScopes }),
+		...(warnAuthUrlLength !== null && { warnAuthUrlLength }),
 		toolDescription () {
 			if (typeof rawConfig.toolDescription === 'string') return rawConfig.toolDescription
 			if (typeof rawConfig.toolDescription === 'function') return rawConfig.toolDescription()

@@ -890,6 +890,9 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 			resolvedParams.services = granted.flatMap(g => g.modes.map(m => `${g.id}:${m}`)).join(',')
 		}
 	}
+	const warnMax = provider.warnAuthUrlLength
+	const loginHint = existingApp?.credentials?.account || null
+	const maskedLoginHint = loginHint ? String(loginHint).replace(/[^\s@]/g, 'x') : null
 	const initData = {
 		params: resolvedParams,
 		provider: { id: provider.id, name: provider.name },
@@ -897,8 +900,22 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 			services: Object.values(provider.services).map(s => ({
 				id: s.id,
 				name: s.name,
-				modes: Object.keys(s.scopes || {})
+				modes: Object.keys(s.scopes || {}),
+				...(warnMax && { scopes: s.scopes })
 			}))
+		}),
+		...(warnMax && {
+			authUrlWarning: {
+				maxLength: warnMax,
+				templateUrl: provider.buildAuthUrl({
+					state: setup.id,
+					callbackUrl: `${getBaseUrl(req)}/oauth/callback`,
+					services: [],
+					loginHint: maskedLoginHint
+				}),
+				baseScopes: provider.baseScopes || [],
+				impliedScopes: provider.impliedScopes || null
+			}
 		})
 	}
 	sendInitHtml(res, CONNECT_HTML, initData)

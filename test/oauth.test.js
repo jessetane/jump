@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { measureAuthUrlLength } from '../public/oauth-scopes.js'
 import { useServer, baseUrl, createTestSession, withMockFetch, withEnv, mcp, req, db, providers, oauthMod, bootstrapLocalAdmin } from './helpers.js'
 
 useServer()
@@ -1168,4 +1169,48 @@ test('OAuth connect redirect and error responses emit safe [oauth] diagnostic lo
 		console.log = origLog
 		console.warn = origWarn
 	}
+})
+
+test('connect page serves /oauth-scopes.js and emits generic non-secret authUrlWarning matching buildAuthUrl length', async () => {
+	const { session } = createTestSession({ account: 'warn-owner@example.com', admin: 1 })
+	const app = db.tokens.create({
+		userId: session.userId,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Warn App',
+		credentials: { accessToken: 'tok', account: 'private-owner@example.com' }
+	})
+	await withEnv({ GOOGLE_CLIENT_ID: 'g-cid', GOOGLE_CLIENT_SECRET: 'g-sec', GITHUB_CLIENT_ID: 'gh-cid', GITHUB_CLIENT_SECRET: 'gh-sec' }, async () => {
+		const jsGet = await req('GET', '/oauth-scopes.js')
+		assert.equal(jsGet.status, 200)
+		assert.match(jsGet.headers.get('content-type') || '', /^application\/javascript\b/)
+		assert.equal((await req('HEAD', '/oauth-scopes.js')).status, 200)
+		const gSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'google', reauthAppId: app.id })
+		const gHtml = await req('GET', `/providers/google/connect?code=${gSetup}`)
+		assert.equal(gHtml.status, 200)
+		assert.ok(!gHtml.text.includes('private-owner@example.com'), 'connect page authUrlWarning must redact loginHint email')
+		const gInit = JSON.parse(gHtml.text.match(/const initData = (.*?)\n/)[1])
+		assert.equal(gInit.authUrlWarning.maxLength, 3500)
+		const allGoogleScopes = new Set(gInit.authUrlWarning.baseScopes)
+		for (const svc of gInit.services) {
+			for (const mode of svc.modes) {
+				for (const s of svc.scopes[mode]) allGoogleScopes.add(s)
+			}
+		}
+		const measuredAll = measureAuthUrlLength(gInit.authUrlWarning.templateUrl, allGoogleScopes, gInit.authUrlWarning.impliedScopes)
+		const builtAll = providers.google.buildAuthUrl({
+			state: gSetup,
+			callbackUrl: `${baseUrl()}/oauth/callback`,
+			services: gInit.services.flatMap(svc => svc.modes.map(m => `${svc.id}:${m}`)),
+			loginHint: 'private-owner@example.com'
+		}).length
+		assert.equal(measuredAll, builtAll, 'Frontend measureAuthUrlLength must match buildAuthUrl length exactly')
+		assert.ok(measuredAll > gInit.authUrlWarning.maxLength)
+		const ghSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'github' })
+		const ghHtml = await req('GET', `/providers/github/connect?code=${ghSetup}`)
+		assert.equal(ghHtml.status, 200)
+		const ghInit = JSON.parse(ghHtml.text.match(/const initData = (.*?)\n/)[1])
+		assert.equal(ghInit.authUrlWarning, undefined)
+		assert.equal(ghInit.services[0].scopes, undefined)
+	})
 })
