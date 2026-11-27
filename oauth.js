@@ -1033,7 +1033,7 @@ async function handleCallback (req, res, query) {
 			})
 		} catch (err) {
 			if (err.status === 409) {
-				warnSendText(res, `${err.message}.`, 409, `GET /oauth/callback (${provider.id} auth) conflict: ${err.message}`)
+				warnSendText(res, `${err.message}.`, 409, `GET /oauth/callback (${provider.id} auth) conflict: account already registered to another user`)
 				return
 			}
 			throw err

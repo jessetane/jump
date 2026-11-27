@@ -1115,6 +1115,21 @@ test('OAuth connect redirect and error responses emit safe [oauth] diagnostic lo
 			assert.ok(warns.some(line => line.includes('[oauth] GET /oauth/callback failed: upstream error=invalid_scope (Bad scope)')))
 			assert.equal((await req('GET', '/oauth/callback?code=c&state=missing-state')).status, 403)
 			assert.ok(warns.some(line => line.includes('[oauth] GET /oauth/callback rejected: invalid or expired OAuth state')))
+			createTestSession({ account: 'conflict-email@example.com' })
+			const conflictState = db.tokens.createState({ mode: 'auth', sessionId: session.id, provider: 'google', merge: false })
+			await withMockFetch(async (input, init, origFetch) => {
+				const u = typeof input === 'string' ? input : input.url
+				if (u === 'https://oauth2.googleapis.com/token') return Response.json({ access_token: 'tok', expires_in: 3600 })
+				if (u === 'https://www.googleapis.com/oauth2/v2/userinfo') return Response.json({ email: 'conflict-email@example.com', verified_email: true })
+				return origFetch(input, init)
+			}, async origFetch => {
+				const conflictRes = await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${conflictState}`)
+				assert.equal(conflictRes.status, 409)
+				assert.ok(warns.some(line =>
+					line.includes('[oauth] GET /oauth/callback (google auth) conflict: account already registered to another user') &&
+					!line.includes('conflict-email@example.com')
+				))
+			})
 		})
 	} finally {
 		console.log = origLog
