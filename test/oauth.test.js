@@ -1190,7 +1190,7 @@ test('connect page serves /oauth-scopes.js and emits generic non-secret authUrlW
 		assert.equal(gHtml.status, 200)
 		assert.ok(!gHtml.text.includes('private-owner@example.com'), 'connect page authUrlWarning must redact loginHint email')
 		const gInit = JSON.parse(gHtml.text.match(/const initData = (.*?)\n/)[1])
-		assert.equal(gInit.authUrlWarning.maxLength, 3500)
+		assert.equal(gInit.authUrlWarning.maxLength, 3000)
 		const allGoogleScopes = new Set(gInit.authUrlWarning.baseScopes)
 		for (const svc of gInit.services) {
 			for (const mode of svc.modes) {

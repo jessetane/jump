@@ -199,7 +199,7 @@
 				const over = len > warningConfig.maxLength
 				warningEl.style.display = over ? 'block' : 'none'
 				warningEl.textContent = over
-					? 'Too many permissions selected \u2014 ' + providerName + ' often hangs or fails with authorization URLs this long (' + len + ' chars). Uncheck unused services or connect separate apps per workflow.'
+					? 'Heads up: authorization URLs this long (' + len + ' chars) may cause ' + providerName + ' sign-in to hang or fail. If it stalls, try selecting fewer services or connecting separate apps per workflow.'
 					: ''
 			}
 
