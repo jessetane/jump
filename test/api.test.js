@@ -251,6 +251,8 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 		{ action: 'connect_app', provider: 'stripe', baseUrl: 'http://insecure.example.com' },
 		{ action: 'connect_app', provider: 'stripe', credentials: 'sk_test', baseUrl: 'https://api.stripe.com', account: 'acct_123' },
 		{ action: 'connect_app', credentials: 'sk_test', baseUrl: 'https://api.stripe.com' },
+		{ action: 'connect_app' },
+		{ action: 'connect_app', type: 'oauth' },
 		{ action: 'list_apps', provider: 'stripe' },
 		{ action: 'update_session' },
 		{ action: 'revoke_session', sessionId: '' },

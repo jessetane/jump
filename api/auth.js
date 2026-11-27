@@ -508,8 +508,7 @@ async function connectApp (token, opts = {}, appUrl) {
 		} else if (provider) {
 			appType = getProvider(provider)?.type === 'oauth' ? 'oauth' : 'static'
 		} else {
-			provider = 'google'
-			appType = 'oauth'
+			throw httpError(400, 'provider is required (or pass type: "static" for the browser setup form)')
 		}
 	}
 	if (appType === 'oauth') {
@@ -519,7 +518,9 @@ async function connectApp (token, opts = {}, appUrl) {
 		if (baseUrl !== undefined) {
 			throw httpError(400, 'baseUrl is only supported for static apps')
 		}
-		provider = provider || 'google'
+		if (!provider) {
+			throw httpError(400, 'provider is required for OAuth apps')
+		}
 		const providerDef = requireOauthProvider(provider, 'app')
 		let resolvedServices = null
 		if (services !== undefined) {
