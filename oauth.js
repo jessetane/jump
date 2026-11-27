@@ -41,11 +41,33 @@ const DISALLOWED_REDIRECT_SCHEMES = new Set([
 	'about:'
 ])
 
+function warnSendText (res, message, status = 403, logDetail = message) {
+	console.warn(`[oauth] ${logDetail}`)
+	sendText(res, message, status)
+}
+
+function logOauthRedirect (provider, flow, authUrl, { callbackUrl, reauthAppId = null, services = null, loginHint = null } = {}) {
+	const parsed = new URL(authUrl)
+	const rawScope = parsed.searchParams.get('scope') || ''
+	const scopeCount = rawScope ? rawScope.split(/\s+/).filter(Boolean).length : 0
+	const parts = [
+		`provider=${provider.id}`,
+		`flow=${flow}`,
+		...(flow === 'connect' ? [`reauth=${reauthAppId || false}`] : []),
+		`redirectUri=${callbackUrl}`,
+		...(Array.isArray(services) ? [`services=${services.join(',') || 'none'}`] : []),
+		`scopes=${scopeCount}`,
+		`urlLength=${authUrl.length}`,
+		...(flow === 'connect' ? [`loginHint=${Boolean(loginHint)}`] : [])
+	]
+	console.log(`[oauth] Redirecting ${parts.join(' ')}`)
+}
+
 function checkFormOrigin (req, res) {
 	const origin = req.headers.origin
 	if (!origin) return true
 	if (origin === 'null' || origin.toLowerCase() !== getBaseUrl(req).toLowerCase()) {
-		sendText(res, 'Forbidden: cross-origin form submission.', 403)
+		warnSendText(res, 'Forbidden: cross-origin form submission.', 403, `${req.method} ${req.url?.split('?')[0] || ''} rejected: cross-origin form submission`)
 		return false
 	}
 	return true
@@ -66,7 +88,7 @@ function enforceSso (res, fn) {
 		return true
 	} catch (err) {
 		if (err.status === 403) {
-			sendText(res, `${err.message}.`, 403)
+			warnSendText(res, `${err.message}.`, 403, `SSO rejected: ${err.message}`)
 			return false
 		}
 		throw err
@@ -333,7 +355,7 @@ async function handleAuthorize (req, res, query) {
 	if (query.code !== undefined) {
 		const ctx = loadSetupContext(query.code, { mode: 'setup_link' })
 		if (!ctx) {
-			sendText(res, 'Access denied: invalid or expired setup code.', 403)
+			warnSendText(res, 'Access denied: invalid or expired setup code.', 403, 'GET /oauth/authorize rejected: invalid or expired setup code')
 			return
 		}
 		const { setup, session } = ctx
@@ -487,13 +509,13 @@ async function handleAuthorizeConsent (req, res) {
 	const base = getBaseUrl(req)
 	if (!setupCode && localToken && !providerName) {
 		if (listOauthProviders('auth').length > 0) {
-			sendText(res, 'Access denied: local token sign-in is disabled when OAuth providers are configured.', 403)
+			warnSendText(res, 'Access denied: local token sign-in is disabled when OAuth providers are configured.', 403, 'POST /oauth/authorize/consent rejected: local token sign-in disabled')
 			return
 		}
 		const adminSession = db.tokens.getByToken(localToken)
 		const user = adminSession?.admin ? db.users.get(adminSession.userId) : null
 		if (!user) {
-			sendText(res, 'Access denied: valid admin bearer token required.', 403)
+			warnSendText(res, 'Access denied: valid admin bearer token required.', 403, 'POST /oauth/authorize/consent rejected: valid admin bearer token required')
 			return
 		}
 		redirectToVerifyOrComplete(req, res, base, {
@@ -534,13 +556,13 @@ async function handleAuthorizeConsent (req, res) {
 			}
 			if (err.status === 403) {
 				const msg = err.message.endsWith('.') ? err.message : `${err.message}.`
-				sendText(res, msg, 403)
+				warnSendText(res, msg, 403, `POST /oauth/authorize/consent rejected: ${msg}`)
 				return
 			}
 			throw err
 		}
 		if (!consumed) {
-			sendText(res, 'Access denied: invalid or expired setup code.', 403)
+			warnSendText(res, 'Access denied: invalid or expired setup code.', 403, 'POST /oauth/authorize/consent rejected: invalid or expired setup code')
 			return
 		}
 		linkSession = consumed.session
@@ -578,6 +600,7 @@ async function handleAuthorizeConsent (req, res) {
 		callbackUrl,
 		login: true
 	})
+	logOauthRedirect(provider, linkSession ? 'auth' : 'login', authUrl, { callbackUrl })
 	redirect(res, authUrl)
 }
 
@@ -606,12 +629,12 @@ async function handleVerify (req, res, query) {
 	if (req.method === 'GET') {
 		const code = query.code
 		if (!code || !/^[a-zA-Z0-9_-]+$/.test(code)) {
-			sendText(res, 'Invalid or expired verification code', 400)
+			warnSendText(res, 'Invalid or expired verification code', 400, 'GET /oauth/verify rejected: missing or malformed verification code')
 			return
 		}
 		const ctx = validateVerifyState(db.tokens.getState(code))
 		if (!ctx) {
-			sendText(res, 'Invalid or expired verification code', 400)
+			warnSendText(res, 'Invalid or expired verification code', 400, 'GET /oauth/verify rejected: invalid or expired verification code')
 			return
 		}
 		const { state, user: existingUser, targetSession } = ctx
@@ -647,12 +670,12 @@ async function handleVerify (req, res, query) {
 	if (!params) return
 	const code = params.get('code') || query.code
 	if (!code) {
-		sendText(res, 'Missing verification code.', 400)
+		warnSendText(res, 'Missing verification code.', 400, 'POST /oauth/verify rejected: missing verification code')
 		return
 	}
 	const ctx = db.tokens.consumeState(code, validateVerifyState)
 	if (!ctx) {
-		sendText(res, 'Invalid or expired verification code', 400)
+		warnSendText(res, 'Invalid or expired verification code', 400, 'POST /oauth/verify rejected: invalid or expired verification code')
 		return
 	}
 	const { state, user, targetSession } = ctx
@@ -701,11 +724,11 @@ function handleStaticConnectGet (res, query) {
 	const code = query.code || ''
 	const ctx = loadSetupContext(code, { mode: 'setup_static', appType: 'static' })
 	if (!ctx) {
-		sendText(res, 'Access denied: invalid or expired setup code.', 403)
+		warnSendText(res, 'Access denied: invalid or expired setup code.', 403, 'GET /apps/connect rejected: invalid or expired setup code')
 		return
 	}
 	if (ctx.unauthorizedApp) {
-		sendText(res, 'Access denied: unauthorized update request.', 403)
+		warnSendText(res, 'Access denied: unauthorized update request.', 403, 'GET /apps/connect rejected: unauthorized update request')
 		return
 	}
 	const { setup, existingApp } = ctx
@@ -834,11 +857,11 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 	}
 	const ctx = loadSetupContext(query.code || '', { mode: 'setup_connect', providerId: provider.id, appType: 'oauth' })
 	if (!ctx) {
-		sendText(res, 'Access denied: invalid or expired setup code.', 403)
+		warnSendText(res, 'Access denied: invalid or expired setup code.', 403, `GET /providers/${provider.id}/connect rejected: invalid or expired setup code`)
 		return
 	}
 	if (ctx.unauthorizedApp) {
-		sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
+		warnSendText(res, 'Access denied: unauthorized re-authentication request.', 403, `GET /providers/${provider.id}/connect rejected: unauthorized re-authentication request`)
 		return
 	}
 	provider.requireEnv()
@@ -900,13 +923,13 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		})
 	} catch (err) {
 		if (err.status === 403) {
-			sendText(res, err.message, 403)
+			warnSendText(res, err.message, 403, `POST /providers/${provider.id}/consent rejected: ${err.message}`)
 			return
 		}
 		throw err
 	}
 	if (!consumed) {
-		sendText(res, 'Access denied: admin session required.', 403)
+		warnSendText(res, 'Access denied: admin session required.', 403, `POST /providers/${provider.id}/consent rejected: invalid or expired setup code`)
 		return
 	}
 	const { setup, session, existingApp } = consumed
@@ -927,10 +950,17 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 		provider: provider.id,
 		ip
 	})
+	const normalizedServices = provider.services ? normalizeServiceSelections(provider.services, servicesList) : null
 	const authUrl = provider.buildAuthUrl({
 		state: stateToken,
 		callbackUrl,
 		services: servicesList,
+		loginHint
+	})
+	logOauthRedirect(provider, 'connect', authUrl, {
+		callbackUrl,
+		reauthAppId,
+		services: normalizedServices,
 		loginHint
 	})
 	redirect(res, authUrl)
@@ -940,18 +970,20 @@ async function handleCallback (req, res, query) {
 	const code = query.code
 	const rawState = query.state
 	if (!code) {
-		sendText(res, `OAuth Error: ${query.error || 'no code'}`, 400)
+		const errorName = query.error || 'no code'
+		const detail = query.error_description ? `${errorName} (${String(query.error_description).slice(0, 200)})` : errorName
+		warnSendText(res, `OAuth Error: ${errorName}`, 400, `GET /oauth/callback failed: upstream error=${detail}`)
 		return
 	}
 	const oauthState = db.tokens.consumeState(rawState)
 	if (!oauthState || (oauthState.mode !== null && oauthState.mode !== 'connect' && oauthState.mode !== 'auth' && oauthState.mode !== 'login')) {
-		sendText(res, 'Invalid or expired OAuth state (CSRF verification failed). Please try connecting again.', 403)
+		warnSendText(res, 'Invalid or expired OAuth state (CSRF verification failed). Please try connecting again.', 403, 'GET /oauth/callback rejected: invalid or expired OAuth state')
 		return
 	}
 	const provider = getProvider(oauthState.provider || 'google')
 	const callbackRole = (oauthState.mode === 'login' || oauthState.mode === 'auth') ? 'auth' : 'app'
 	if (!isOauthProviderAllowed(provider, callbackRole)) {
-		sendText(res, `Access denied: OAuth provider "${provider.id}" is disabled for ${callbackRole}.`, 403)
+		warnSendText(res, `Access denied: OAuth provider "${provider.id}" is disabled for ${callbackRole}.`, 403, `GET /oauth/callback rejected: provider=${provider.id} disabled for ${callbackRole}`)
 		return
 	}
 	const base = getBaseUrl(req)
@@ -969,7 +1001,7 @@ async function handleCallback (req, res, query) {
 	if (oauthState.mode === 'auth') {
 		const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
 		if (!session || !session.admin) {
-			sendText(res, 'Access denied: admin session required.', 403)
+			warnSendText(res, 'Access denied: admin session required.', 403, `GET /oauth/callback (${provider.id} auth) rejected: admin session required`)
 			return
 		}
 		const cleanAccount = String(account).trim().toLowerCase()
@@ -1001,7 +1033,7 @@ async function handleCallback (req, res, query) {
 			})
 		} catch (err) {
 			if (err.status === 409) {
-				sendText(res, `${err.message}.`, 409)
+				warnSendText(res, `${err.message}.`, 409, `GET /oauth/callback (${provider.id} auth) conflict: ${err.message}`)
 				return
 			}
 			throw err
@@ -1050,18 +1082,18 @@ async function handleCallback (req, res, query) {
 	}
 	const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
 	if (!session || !session.admin) {
-		sendText(res, 'Access denied: admin session required.', 403)
+		warnSendText(res, 'Access denied: admin session required.', 403, `GET /oauth/callback (${provider.id} connect) rejected: admin session required`)
 		return
 	}
 	if (oauthState.reauthAppId) {
 		const existingApp = getOwnedApp(session, oauthState.reauthAppId, { providerId: provider.id, type: 'oauth' })
 		if (!existingApp) {
-			sendText(res, 'Access denied: unauthorized re-authentication request.', 403)
+			warnSendText(res, 'Access denied: unauthorized re-authentication request.', 403, `GET /oauth/callback (${provider.id} connect) rejected: unauthorized re-authentication request`)
 			return
 		}
 		const expectedAccount = existingApp.credentials?.account
 		if (expectedAccount && String(account).trim().toLowerCase() !== String(expectedAccount).trim().toLowerCase()) {
-			sendText(res, `Re-authentication failed: expected account "${expectedAccount}", got "${account}".`, 409)
+			warnSendText(res, `Re-authentication failed: expected account "${expectedAccount}", got "${account}".`, 409, `GET /oauth/callback (${provider.id} reauth=${existingApp.id}) failed: upstream account mismatch`)
 			return
 		}
 		const updatedCreds = {

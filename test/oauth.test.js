@@ -1029,3 +1029,53 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		modeCase.verify(stored.credentials)
 	}
 })
+
+test('OAuth connect redirect and error responses emit safe [oauth] diagnostic logs without secrets', async () => {
+	const { session } = createTestSession({ account: 'log-owner@example.com', admin: 1 })
+	const app = db.tokens.create({
+		userId: session.userId,
+		provider: 'google',
+		type: 'oauth',
+		name: 'Google App',
+		credentials: { accessToken: 'tok', account: 'secret-email@example.com' }
+	})
+	const logs = []
+	const warns = []
+	const origLog = console.log
+	const origWarn = console.warn
+	console.log = (...args) => logs.push(args.join(' '))
+	console.warn = (...args) => warns.push(args.join(' '))
+	try {
+		await withEnv({ GOOGLE_CLIENT_ID: 'cid-123', GOOGLE_CLIENT_SECRET: 'csec-456' }, async () => {
+			const connectInfo = JSON.parse((await mcp(session.token, 'admin', { action: 'connect_app', appId: app.id })).content[0].text)
+			const setupCode = new URL(connectInfo.connectUrl).searchParams.get('code')
+			const consentRes = await fetch(`${baseUrl()}/providers/google/consent`, {
+				method: 'POST',
+				headers: { origin: baseUrl(), 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({ code: setupCode, services: 'gmail:write,calendar' }).toString(),
+				redirect: 'manual'
+			})
+			assert.equal(consentRes.status, 302)
+			const locationUrl = consentRes.headers.get('location')
+			assert.ok(logs.some(line =>
+				line.includes('[oauth] Redirecting provider=google flow=connect') &&
+				line.includes(`reauth=${app.id}`) &&
+				line.includes(`redirectUri=${baseUrl()}/oauth/callback`) &&
+				line.includes('services=gmail:write,calendar:read') &&
+				line.includes(`urlLength=${locationUrl.length}`) &&
+				line.includes('loginHint=true') &&
+				!line.includes('secret-email@example.com') &&
+				!line.includes(setupCode)
+			), `Expected safe consent redirect log, got: ${logs.join('\n')}`)
+			assert.equal((await req('GET', `/providers/google/connect?code=${setupCode}`)).status, 403)
+			assert.ok(warns.some(line => line.includes('[oauth] GET /providers/google/connect rejected: invalid or expired setup code')))
+			assert.equal((await req('GET', '/oauth/callback?error=invalid_scope&error_description=Bad+scope')).status, 400)
+			assert.ok(warns.some(line => line.includes('[oauth] GET /oauth/callback failed: upstream error=invalid_scope (Bad scope)')))
+			assert.equal((await req('GET', '/oauth/callback?code=c&state=missing-state')).status, 403)
+			assert.ok(warns.some(line => line.includes('[oauth] GET /oauth/callback rejected: invalid or expired OAuth state')))
+		})
+	} finally {
+		console.log = origLog
+		console.warn = origWarn
+	}
+})
