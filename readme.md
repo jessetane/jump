@@ -59,7 +59,7 @@ admin({
 // create a non-admin session for an embedded/untrusted agent (returns a bearer token)
 admin({ action: 'create_session', name: 'Untrusted Agent' })
 
-// link an app to that session with a path/method/query policy
+// link an app to that session with an origin/method/path/query policy
 admin({
 	action: 'link_app',
 	sessionId: '<session_id>',
@@ -68,10 +68,12 @@ admin({
 		{
 			action: 'allow',
 			methods: ['GET'],
+			origin: 'https://www.googleapis.com',
 			path: '/calendar/v3/calendars/team@group.calendar.google.com'
 		},
 		{
 			action: 'allow',
+			origin: 'https://www.googleapis.com',
 			path: '/calendar/v3/calendars/team@group.calendar.google.com/events/**',
 			query: {
 				sendUpdates: ['none', null]
@@ -113,12 +115,12 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 	* `whoami` - Current user, linked logins, session info and linked apps.
 	* `list_sessions` - List active sessions.
 	* `get_session` - Get a session and its linked apps and policies.
-	* `create_session` - Mint a new bearer session (with optional `ttl` in seconds and linked apps).
+	* `create_session` - Mint a new bearer session (with optional `admin`, `ttl` in seconds, linked apps, and `policy`).
 	* `update_session` - Rename a session, toggle `admin`, or rotate its token.
 	* `revoke_session` - Revoke the current session, a specific session, or `allOthers`.
 	* `list_apps` - List connected and shared apps.
 	* `connect_app` - Connect an OAuth or static-credential upstream app (returns a browser setup URL when `credentials` are omitted, or re-authenticates / rotates credentials for `appId`).
-	* `update_app` - Update an app's name or static credentials.
+	* `update_app` - Update an app's name, `baseUrl`, or static credentials.
 	* `disconnect_app` - Remove an app (and revoke its upstream OAuth token).
 	* `share_app` - Share an owned app with another user under an optional ceiling policy.
 	* `unshare_app` - Revoke an app share from a user.
@@ -174,7 +176,7 @@ DELETE /api/apps/:id                            # disconnect app (admin)
 POST   /api/links                               # link app to session (admin)
 DELETE /api/links?sessionId=...&appId=...       # unlink app from session (admin)
 POST   /api/shares                              # share app with user (admin)
-DELETE /api/shares?appId=...&account=...        # unshare app from user (admin)
+DELETE /api/shares?appId=...&account=...        # unshare app from user (optional provider, admin)
 
 # Audit & Upstream Proxy
 GET    /api/logs                                # list usage logs (sessionId, appId, provider, allowed, limit)
