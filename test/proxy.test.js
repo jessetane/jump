@@ -503,6 +503,16 @@ test('MCP buffered decompression/limits vs HTTP streaming, body-inspection guard
 			res.end(JSON.stringify({ error: 'upstream crash' }))
 			return
 		}
+		if (upReq.url === '/gzip-500') {
+			res.writeHead(500, { 'content-type': 'application/json', 'content-encoding': 'gzip' })
+			res.end(zlib.gzipSync(Buffer.from(JSON.stringify({ error: 'gz crash' }))))
+			return
+		}
+		if (upReq.url === '/binary-400') {
+			res.writeHead(400, { 'content-type': 'application/octet-stream' })
+			res.end(Buffer.from([0x00, 0xff, 0x10]))
+			return
+		}
 		res.writeHead(200, { 'content-type': 'application/json' })
 		res.end(JSON.stringify({ method: upReq.method }))
 	}, async ({ url: upstreamUrl }) => {
@@ -524,6 +534,10 @@ test('MCP buffered decompression/limits vs HTTP streaming, body-inspection guard
 			const http500 = await req('GET', '/api/comp/upstream-500', { token: session.token })
 			assert.equal(http500.status, 500)
 			assert.deepEqual(http500.data, { error: 'upstream crash' })
+			assert.equal(db.logs.listByUserId(user.id, { provider: 'comp' }).find(l => l.url.endsWith('/upstream-500')).error, '{"error":"upstream crash"}')
+			const bin400 = await req('GET', '/api/comp/binary-400', { token: session.token })
+			assert.equal(bin400.status, 400)
+			assert.equal(db.logs.listByUserId(user.id, { provider: 'comp' }).find(l => l.url.endsWith('/binary-400')).error, 'HTTP 400')
 			assert.equal((await mcp(session.token, 'comp_api', { url: '/ws-upgrade' })).isError, true)
 			assert.equal((await mcp(session.token, 'comp_api', { url: '/gzip', method: 'CONNECT' })).isError, true)
 			const httpLarge = await fetch(`${baseUrl()}/api/comp/large-stream`, { headers: { authorization: `Bearer ${session.token}` } })
@@ -566,6 +580,10 @@ test('MCP buffered decompression/limits vs HTTP streaming, body-inspection guard
 			assert.equal(httpGz.status, 200)
 			assert.equal(httpGz.headers['content-encoding'], 'gzip')
 			assert.deepEqual(JSON.parse(zlib.gunzipSync(httpGz.body).toString('utf8')), { ok: 'gz' })
+			const gz500 = await rawHttp('GET', '/api/comp/gzip-500', { token: session.token })
+			assert.equal(gz500.status, 500)
+			assert.deepEqual(JSON.parse(zlib.gunzipSync(gz500.body).toString('utf8')), { error: 'gz crash' })
+			assert.equal(db.logs.listByUserId(user.id, { provider: 'comp' }).find(l => l.url.endsWith('/gzip-500')).error, 'HTTP 500')
 			const httpChunked = await rawHttp('POST', '/api/comp/upload-stream', {
 				token: session.token,
 				headers: { 'content-type': 'text/plain' },

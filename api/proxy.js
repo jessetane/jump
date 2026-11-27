@@ -114,13 +114,24 @@ function createDecompressTransform (encoding) {
 	})
 }
 
-async function readResponseBody (source, maxBytes) {
-	if (!source) return Buffer.alloc(0)
-	const rawEncoding = source.headers?.['content-encoding']
-	const codings = (Array.isArray(rawEncoding) ? rawEncoding.join(',') : typeof rawEncoding === 'string' ? rawEncoding : '')
+function parseContentCodings (headers) {
+	const rawEncoding = headers?.['content-encoding']
+	return (Array.isArray(rawEncoding) ? rawEncoding.join(',') : typeof rawEncoding === 'string' ? rawEncoding : '')
 		.split(',')
 		.map(s => s.trim().toLowerCase())
 		.filter(s => s && s !== 'identity')
+}
+
+function isTextBodyMime (contentType) {
+	return contentType.startsWith('text/') ||
+		contentType === 'application/xml' ||
+		contentType.endsWith('+xml') ||
+		contentType === 'application/x-www-form-urlencoded'
+}
+
+async function readResponseBody (source, maxBytes) {
+	if (!source) return Buffer.alloc(0)
+	const codings = parseContentCodings(source.headers)
 	for (const coding of codings) {
 		if (!createDecompressor(coding)) {
 			source.destroy()
@@ -462,12 +473,7 @@ async function executeBufferedUpstream ({ credentials, url, method, body, baseHe
 		} catch {
 			result = str
 		}
-	} else if (
-		contentType.startsWith('text/') ||
-		contentType === 'application/xml' ||
-		contentType.endsWith('+xml') ||
-		contentType === 'application/x-www-form-urlencoded'
-	) {
+	} else if (isTextBodyMime(contentType)) {
 		try {
 			result = new TextDecoder(charset || 'utf-8').decode(buf)
 		} catch {
@@ -749,6 +755,10 @@ async function stream (opts = {}, auth, req, res) {
 		}
 		const errorChunks = []
 		let errorBytes = 0
+		const upstreamMime = parseMimeType(upstreamRes.headers['content-type'] || '')
+		const captureErrorBody = status >= 400 &&
+			parseContentCodings(upstreamRes.headers).length === 0 &&
+			(!upstreamMime || isJsonMime(upstreamMime) || isTextBodyMime(upstreamMime))
 		const drainAbort = new AbortController()
 		const onResClose = () => {
 			if (!upstreamRes.readableEnded) upstreamRes.destroy()
@@ -767,7 +777,7 @@ async function stream (opts = {}, auth, req, res) {
 				if (chunk.byteLength === 0) continue
 				if (drainAbort.signal.aborted) break
 				commitHeaders()
-				if (status >= 400 && errorBytes < 512) {
+				if (captureErrorBody && errorBytes < 512) {
 					const slice = chunk.subarray(0, 512 - errorBytes)
 					errorChunks.push(Buffer.from(slice))
 					errorBytes += slice.byteLength
