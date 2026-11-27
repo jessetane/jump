@@ -23,6 +23,20 @@ export default {
 			})
 		},
 		baseScopes: ['read:user'],
+		impliedScopes: {
+			repo: ['public_repo'],
+			'admin:org': ['write:org'],
+			'write:org': ['read:org'],
+			project: ['read:project'],
+			'write:discussion': ['read:discussion'],
+			user: ['user:email', 'read:user'],
+			'admin:gpg_key': ['write:gpg_key'],
+			'write:gpg_key': ['read:gpg_key'],
+			'admin:public_key': ['write:public_key'],
+			'write:public_key': ['read:public_key'],
+			'admin:repo_hook': ['write:repo_hook'],
+			'write:repo_hook': ['read:repo_hook']
+		},
 		services: {
 			repo: {
 				name: 'Repositories',

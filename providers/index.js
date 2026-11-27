@@ -180,7 +180,25 @@ function normalizeServiceSelections (services, entries = [], { strict = false, p
 	return normalized
 }
 
-function buildScopesFromSelection (services, baseScopes = [], selectedServices = []) {
+function dedupeImpliedScopes (scopeSet, impliedScopes) {
+	if (!impliedScopes) return Array.from(scopeSet)
+	const suppressed = new Set()
+	const queue = Array.from(scopeSet)
+	for (let i = 0; i < queue.length; i++) {
+		const scope = queue[i]
+		const children = impliedScopes[scope]
+		if (!children) continue
+		for (const child of children) {
+			if (child !== scope && !suppressed.has(child)) {
+				suppressed.add(child)
+				queue.push(child)
+			}
+		}
+	}
+	return Array.from(scopeSet).filter(s => !suppressed.has(s))
+}
+
+function buildScopesFromSelection (services, baseScopes = [], selectedServices = [], impliedScopes = null) {
 	const scopeSet = new Set(baseScopes)
 	for (const token of normalizeServiceSelections(services, selectedServices)) {
 		const [svcId, mode] = token.split(':')
@@ -188,7 +206,7 @@ function buildScopesFromSelection (services, baseScopes = [], selectedServices =
 			scopeSet.add(s)
 		}
 	}
-	return Array.from(scopeSet).join(' ')
+	return dedupeImpliedScopes(scopeSet, impliedScopes).join(' ')
 }
 
 function parseOAuthResponse (res, rawText, fallbackErrorMsg) {
@@ -293,6 +311,15 @@ function createProvider (config) {
 			services[key] = { id: key, name: svc.name, scopes }
 		}
 	}
+	let impliedScopes = null
+	if (oauth?.impliedScopes) {
+		impliedScopes = Object.create(null)
+		for (const [scope, list] of Object.entries(oauth.impliedScopes)) {
+			if (Array.isArray(list) && list.length > 0) {
+				impliedScopes[scope] = [...list]
+			}
+		}
+	}
 	const envPrefix = id.toUpperCase()
 	const verifiedEmail = Boolean(rawConfig.verifiedEmail || oauth?.verifiedEmail)
 	const supportsAuth = Boolean(oauth && oauth.userInfoUrl && oauth.extractAccount)
@@ -306,6 +333,7 @@ function createProvider (config) {
 		supportsAuth,
 		supportsApp,
 		...(services && { services }),
+		...(impliedScopes && { impliedScopes }),
 		toolDescription () {
 			if (typeof rawConfig.toolDescription === 'string') return rawConfig.toolDescription
 			if (typeof rawConfig.toolDescription === 'function') return rawConfig.toolDescription()
@@ -324,7 +352,7 @@ function createProvider (config) {
 				const { clientId } = requireOauthEnv(envPrefix)
 				const scopes = login
 					? (oauth.baseScopes || []).join(' ')
-					: buildScopesFromSelection(services, oauth.baseScopes, selectedServices)
+					: buildScopesFromSelection(services, oauth.baseScopes, selectedServices, impliedScopes)
 				const u = new URL(oauth.authUrl)
 				u.searchParams.set('client_id', clientId)
 				u.searchParams.set('redirect_uri', callbackUrl)

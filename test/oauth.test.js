@@ -1030,6 +1030,48 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	}
 })
 
+test('buildAuthUrl deduplicates implied weaker scopes without dropping distinct read scopes', async () => {
+	await withEnv({ GOOGLE_CLIENT_ID: 'g-cid', GOOGLE_CLIENT_SECRET: 'g-sec', GITHUB_CLIENT_ID: 'gh-cid', GITHUB_CLIENT_SECRET: 'gh-sec' }, async () => {
+		const googleUrl = new URL(providers.google.buildAuthUrl({
+			state: 'st-g',
+			callbackUrl: 'https://jump.example.com/oauth/callback',
+			services: ['drive:read', 'drive:write', 'gmail:read', 'gmail:write', 'youtube:read', 'youtube:write', 'photos:read', 'photos:write', 'meet:read', 'meet:write', 'apps_script:read', 'apps_script:write', 'admin:read', 'admin:write']
+		}))
+		const gScopes = googleUrl.searchParams.get('scope').split(' ')
+		assert.ok(gScopes.includes('https://www.googleapis.com/auth/drive'))
+		assert.ok(!gScopes.includes('https://www.googleapis.com/auth/drive.readonly'))
+		assert.ok(!gScopes.includes('https://www.googleapis.com/auth/drive.activity.readonly'))
+		assert.ok(gScopes.includes('https://mail.google.com/'))
+		assert.ok(!gScopes.includes('https://www.googleapis.com/auth/gmail.readonly'))
+		assert.ok(gScopes.includes('https://www.googleapis.com/auth/youtube'))
+		assert.ok(!gScopes.includes('https://www.googleapis.com/auth/youtube.readonly'))
+		assert.ok(gScopes.includes('https://www.googleapis.com/auth/yt-analytics.readonly'))
+		assert.ok(gScopes.includes('https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata'))
+		assert.ok(gScopes.includes('https://www.googleapis.com/auth/photoslibrary.appendonly'))
+		assert.ok(gScopes.includes('https://www.googleapis.com/auth/meetings.space.readonly'))
+		assert.ok(gScopes.includes('https://www.googleapis.com/auth/meetings.space.created'))
+		assert.ok(gScopes.includes('https://www.googleapis.com/auth/script.metrics'))
+		assert.ok(!gScopes.includes('https://www.googleapis.com/auth/script.projects.readonly'))
+		assert.ok(gScopes.includes('https://www.googleapis.com/auth/admin.reports.audit.readonly'))
+		assert.ok(!gScopes.includes('https://www.googleapis.com/auth/admin.directory.user.readonly'))
+		const readOnlyUrl = new URL(providers.google.buildAuthUrl({
+			state: 'st-g-ro',
+			callbackUrl: 'https://jump.example.com/oauth/callback',
+			services: ['drive:read', 'gmail:read']
+		}))
+		const roScopes = readOnlyUrl.searchParams.get('scope').split(' ')
+		assert.ok(roScopes.includes('https://www.googleapis.com/auth/drive.readonly'))
+		assert.ok(roScopes.includes('https://www.googleapis.com/auth/gmail.readonly'))
+		const ghUrl = new URL(providers.github.buildAuthUrl({
+			state: 'st-gh',
+			callbackUrl: 'https://jump.example.com/oauth/callback',
+			services: ['repo:read', 'repo:write', 'org:read', 'org:admin', 'user:write', 'packages:read', 'packages:write']
+		}))
+		const ghScopes = ghUrl.searchParams.get('scope').split(' ')
+		assert.deepEqual(ghScopes, ['repo', 'admin:org', 'user', 'read:packages', 'write:packages'])
+	})
+})
+
 test('OAuth connect redirect and error responses emit safe [oauth] diagnostic logs without secrets', async () => {
 	const { session } = createTestSession({ account: 'log-owner@example.com', admin: 1 })
 	const app = db.tokens.create({
