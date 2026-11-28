@@ -5,6 +5,7 @@ export {
 	hasBodyPolicy,
 	matchPattern,
 	parsePolicy,
+	serializePolicy,
 	validatePolicy
 }
 
@@ -500,4 +501,9 @@ function evaluatePolicy (policy, req = {}) {
 		}
 	}
 	return { allowed: false, reason: `Request did not match any allow rule for method "${reqMethod}" on "${req.url}"` }
+}
+
+function serializePolicy (policy) {
+	if (policy === undefined || policy === null) return null
+	return typeof policy === 'object' ? JSON.stringify(policy) : String(policy)
 }

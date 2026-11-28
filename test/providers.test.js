@@ -19,8 +19,8 @@ test('provider-specific hooks: google and github buildAuthUrl, extractAccount, a
 		assert.deepEqual(ghAuthUrl.searchParams.get('scope').split(' '), ['read:user', 'repo', 'admin:org', 'workflow'])
 	})
 	const { session } = createTestSession({ account: 'provider-hooks@example.com', admin: true })
-	const googleApp = db.tokens.create({ userId: session.userId, provider: 'google', type: 'oauth', credentials: { accessToken: 'ya29.rev', refreshToken: '1//rev', account: 'provider-hooks@example.com' } })
-	const ghApp = db.tokens.create({ userId: session.userId, provider: 'github', type: 'oauth', credentials: { accessToken: 'gho_rev', account: 'octo' } })
+	const googleApp = db.apps.create({ userId: session.userId, provider: 'google', type: 'oauth', account: 'provider-hooks@example.com', credentials: { accessToken: 'ya29.rev', refreshToken: '1//rev' } })
+	const ghApp = db.apps.create({ userId: session.userId, provider: 'github', type: 'oauth', account: 'octo', credentials: { accessToken: 'gho_rev' } })
 	let googleRevokeReq = null
 	const ghRevokeReqs = []
 	let ghMissingLogin = true

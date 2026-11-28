@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { APP_NAME, tightenFileMode } from './util.js'
@@ -8,6 +8,7 @@ export {
 	parseKey,
 	parseKeyList,
 	loadKeys,
+	hashSecret,
 	secretContext,
 	encryptSecret,
 	openSecret,
@@ -123,6 +124,11 @@ function getKeys () {
 		throw new Error('Encryption key is not initialized')
 	}
 	return activeKeys
+}
+
+function hashSecret (secret) {
+	if (!secret || typeof secret !== 'string') return null
+	return createHash('sha256').update(secret).digest('hex')
 }
 
 function secretContext (id, provider, type) {

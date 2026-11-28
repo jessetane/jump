@@ -87,7 +87,7 @@ function buildAdminTool () {
 				},
 				policy: {
 					type: ['array', 'null'],
-					description: 'Ordered list of rules evaluated top-to-bottom (first match wins; unmatched requests are denied). Semantics: (1) null or omitted = unrestricted allow-all; [] = deny-all. (2) Within a rule, all present fields (methods, origin, path, query, body) are ANDed; omitted fields match anything. Place specific deny rules BEFORE broader allow rules. (3) Applies to create_session (with linkAppIds), link_app, and share_app; on shared apps, the owner share_app policy acts as an immutable ceiling—both the share policy AND the recipient link_app policy must independently allow each request. (4) Prefer minimal allowlists over denylists.',
+					description: 'Ordered list of rules evaluated top-to-bottom (first match wins; unmatched requests are denied). Semantics: (1) null or omitted = unrestricted allow-all; [] = deny-all. (2) Within a rule, all present fields (methods, origin, path, query, body) are ANDed; omitted fields match anything. Place specific deny rules BEFORE broader allow rules. (3) Applies to connect_app, update_app, create_session (with linkAppIds), link_app, and share_app; every configured layer (upstream app policy, optional share_app ceiling, and session link_app policy) must independently allow each request. (4) Prefer minimal allowlists over denylists.',
 					items: {
 						type: 'object',
 						required: ['action'],
@@ -287,7 +287,7 @@ async function executeTool (name, args = {}, token, appUrl) {
 }
 
 function getAvailableTools (auth) {
-	const session = db.tokens.resolveSession(auth)
+	const session = db.sessions.resolve(auth)
 	if (!session) return []
 	const links = db.links.listBySessionId(session.id)
 	const list = []
@@ -297,7 +297,7 @@ function getAvailableTools (auth) {
 	const grouped = new Map()
 	for (const link of links) {
 		const p = link.app?.provider
-		if (!p || p === 'self') continue
+		if (!p) continue
 		if (!grouped.has(p)) grouped.set(p, [])
 		grouped.get(p).push(link)
 	}
@@ -356,7 +356,7 @@ const rpcMethods = Object.assign(Object.create(null), {
 
 async function handleMcp (req, res, token) {
 	const base = getBaseUrl(req)
-	const session = db.tokens.resolveSession(token)
+	const session = db.sessions.resolve(token)
 	if (!session) {
 		const rawPath = new URL(req.url || '/mcp', 'http://localhost').pathname.replace(/\/+$/, '') || '/'
 		const resourceSuffix = rawPath.startsWith('/mcp/') ? rawPath : ''

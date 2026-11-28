@@ -78,11 +78,11 @@ test('MCP JSON-RPC framing, method guards, and internal error masking', async ()
 	assert.ok(initRes.data.result.serverInfo.version)
 	assert.match(initRes.data.result.instructions, new RegExp(`${baseUrl().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/api/<provider>/\\*`))
 	assert.match(initRes.data.result.instructions, /create_session/)
-	const workerSess = db.tokens.create({ userId: session.userId, provider: 'self', admin: 0 })
+	const workerSess = db.sessions.create({ userId: session.userId, admin: 0 })
 	const workerInit = await req('POST', '/mcp', { token: workerSess.token, body: { jsonrpc: '2.0', id: 13, method: 'initialize', params: {} } })
 	assert.match(workerInit.data.result.instructions, /\/api\/<provider>\/\*/)
 	assert.doesNotMatch(workerInit.data.result.instructions, /create_session/)
-	db.tokens.remove(workerSess.id)
+	db.sessions.remove(workerSess.id)
 	const initDefault = await req('POST', '/mcp', { token: session.token, body: { jsonrpc: '2.0', id: 11, method: 'initialize', params: {} } })
 	assert.equal(initDefault.data.result.protocolVersion, '2024-11-05')
 	const pingRes = await req('POST', '/mcp', { token: session.token, body: { jsonrpc: '2.0', id: 12, method: 'ping', params: {} } })
@@ -131,7 +131,7 @@ test('canonical REST contract rejects method/payload smuggling, trailing slashes
 	assert.equal((await req('GET', '/api/whoami')).data.authenticated, false)
 	assert.equal((await req('GET', '/api/sessions')).status, 401)
 	assert.equal((await req('DELETE', '/api/sessions?allOthers=true')).status, 401)
-	const sess2 = db.tokens.create({ userId: session.userId, provider: 'self', admin: 0 })
+	const sess2 = db.sessions.create({ userId: session.userId, admin: 0 })
 	db.links.create({ sessionId: sess2.id, appId: app.id })
 	assert.equal((await req('GET', `/api/sessions/${sess2.id}`, { token: session.token })).data.session.token, undefined)
 	const rotated = await req('PATCH', `/api/sessions/${sess2.id}`, { token: session.token, body: { rotateToken: true } })
@@ -144,7 +144,7 @@ test('canonical REST contract rejects method/payload smuggling, trailing slashes
 	assert.equal((await req('DELETE', `/api/sessions/${sess2.id}`, { token: session.token })).status, 404)
 	assert.equal((await mcp(session.token, 'admin', { action: 'revoke_session', sessionId: sess2.id })).isError, true)
 	assert.equal((await req('GET', '/api/whoami', { token: rotated.data.session.token })).data.authenticated, false)
-	const sess3 = db.tokens.create({ userId: session.userId, provider: 'self', admin: 0 })
+	const sess3 = db.sessions.create({ userId: session.userId, admin: 0 })
 	assert.equal((await req('DELETE', '/api/sessions?allOthers=true', { token: session.token })).status, 200)
 	assert.equal((await req('GET', '/api/whoami', { token: session.token })).data.authenticated, true)
 	assert.equal((await req('GET', '/api/whoami', { token: sess3.token })).data.authenticated, false)
@@ -167,15 +167,15 @@ test('canonical REST contract rejects method/payload smuggling, trailing slashes
 	assert.equal(parseProviderTool('__proto___api'), null)
 	assert.equal((await req('POST', '/api/apps', { token: session.token, body: { provider: 'constructor', credentials: 'sk' } })).status, 400)
 	assert.equal((await req('DELETE', '/api/apps/%E0%A4%A', { token: session.token })).status, 400)
-	const specialApp = db.tokens.create({ id: 'app:sp/id%1', userId: session.userId, provider: 'stripe', type: 'static', credentials: { headers: { authorization: 'Bearer sk' }, baseUrl: 'https://api.stripe.com' } })
+	const specialApp = db.apps.create({ id: 'app:sp/id%1', userId: session.userId, provider: 'stripe', type: 'static', baseUrl: 'https://api.stripe.com', credentials: { headers: { authorization: 'Bearer sk' } } })
 	const patchStatic = await req('PATCH', `/api/apps/${encodeURIComponent(specialApp.id)}`, { token: session.token, body: { name: 'Renamed', credentials: 'sk_new', baseUrl: 'https://api.stripe.com/v1' } })
 	assert.equal(patchStatic.status, 200)
 	assert.equal('account' in patchStatic.data.app, false, 'Static app responses must omit account')
-	const updatedSpecial = db.tokens.get(specialApp.id)
+	const updatedSpecial = db.apps.get(specialApp.id)
 	assert.equal(updatedSpecial.name, 'Renamed')
 	assert.equal(updatedSpecial.credentials.headers.authorization, 'Bearer sk_new')
-	assert.equal(updatedSpecial.credentials.baseUrl, 'https://api.stripe.com/v1')
-	assert.equal(updatedSpecial.credentials.account, undefined)
+	assert.equal(updatedSpecial.baseUrl, 'https://api.stripe.com/v1')
+	assert.equal(updatedSpecial.account, null)
 	assert.equal((await req('PATCH', `/api/apps/${encodeURIComponent(specialApp.id)}`, { token: session.token, body: { account: 'biz@stripe.test' } })).status, 400)
 	for (const forbiddenOauthPatch of [{ credentials: 'bad' }, { baseUrl: 'https://www.googleapis.com' }, { account: 'x' }]) {
 		assert.equal((await req('PATCH', `/api/apps/${app.id}`, { token: session.token, body: forbiddenOauthPatch })).status, 400)
@@ -186,7 +186,7 @@ test('canonical REST contract rejects method/payload smuggling, trailing slashes
 
 test('strict input validation parity, requireBoolean, invalid credential rejection, and log retention pruning', async () => {
 	const { user, session, app } = createTestSession({ account: 'validation@example.com', admin: true })
-	const target = db.tokens.create({ userId: user.id, provider: 'self', admin: 1 })
+	const target = db.sessions.create({ userId: user.id, admin: 1 })
 	assert.equal((await req('PATCH', `/api/sessions/${target.id}`, { token: session.token, body: { admin: 'false' } })).data.session.admin, false)
 	assert.equal((await req('PATCH', `/api/sessions/${target.id}`, { token: session.token, body: { admin: 'not-a-bool' } })).status, 400)
 	assert.equal((await req('DELETE', '/api/sessions?allOthers=invalid', { token: session.token })).status, 400)
@@ -201,7 +201,7 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 			assert.match(res.content[0].text, new RegExp(`${key} must be a string`))
 		}
 	}
-	const nonAdmin = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+	const nonAdmin = db.sessions.create({ userId: user.id, admin: 0 })
 	const nonAdminBadType = await mcp(nonAdmin.token, 'admin', { action: 'list_logs', sessionId: 123 })
 	assert.equal(nonAdminBadType.isError, true)
 	assert.match(nonAdminBadType.content[0].text, /sessionId must be a string/)
@@ -220,7 +220,7 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	assert.equal(filteredLogs2.status, 200)
 	assert.deepEqual(filteredLogs2.data.logs.map(l => l.id), [l2.id])
 	db.sqlite.prepare('DELETE FROM logs WHERE id IN (?, ?)').run(l1.id, l2.id)
-	const staticStripe = db.tokens.create({ userId: user.id, provider: 'stripe', type: 'static', credentials: { headers: { authorization: 'Bearer sk_val' }, baseUrl: 'https://api.stripe.com' } })
+	const staticStripe = db.apps.create({ userId: user.id, provider: 'stripe', type: 'static', baseUrl: 'https://api.stripe.com', credentials: { headers: { authorization: 'Bearer sk_val' } } })
 	for (const bad of [
 		{ action: 'update_app', appId: app.id },
 		{ action: 'update_app', appId: app.id, name: 'X', apiKey: 'legacy' },
@@ -243,6 +243,8 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 		{ action: 'connect_app', appId: app.id, credentials: 'x' },
 		{ action: 'connect_app', appId: app.id, account: 'x@example.com' },
 		{ action: 'connect_app', appId: app.id, baseUrl: 'https://www.googleapis.com' },
+		{ action: 'connect_app', appId: app.id, policy: [] },
+		{ action: 'connect_app', provider: 'stripe', credentials: 'sk_test', baseUrl: 'https://api.stripe.com', policy: 'bad' },
 		{ action: 'connect_app', appId: staticStripe.id, type: 'oauth' },
 		{ action: 'connect_app', appId: staticStripe.id, name: 'X' },
 		{ action: 'connect_app', appId: staticStripe.id, credentials: 'x' },
@@ -285,7 +287,7 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	assert.equal(ttlRotated.data.session.expiresAt, ttlRes.data.session.expiresAt, 'rotateToken must preserve fixed TTL expiry')
 	const nullTtlRes = JSON.parse((await mcp(session.token, 'admin', { action: 'create_session', name: 'Persistent', ttl: null })).content[0].text)
 	assert.equal(nullTtlRes.session.expiresAt, null)
-	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id = ?').run(Date.now() - 1000, ttlRes.data.session.id)
+	db.sqlite.prepare('UPDATE sessions SET expires_at = ? WHERE id = ?').run(Date.now() - 1000, ttlRes.data.session.id)
 	assert.equal((await req('GET', '/api/whoami', { token: ttlRotated.data.session.token })).data.authenticated, false)
 	assert.equal((await req('POST', '/mcp', { token: ttlRotated.data.session.token, body: { jsonrpc: '2.0', id: 52, method: 'tools/list', params: {} } })).status, 401)
 	assert.equal((await req('GET', '/api/google/drive/v3/files', { token: ttlRotated.data.session.token })).status, 401)
@@ -298,16 +300,16 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	const bulkRevoke = await req('DELETE', '/api/sessions?allOthers=true', { token: session.token })
 	assert.equal(bulkRevoke.status, 200)
 	assert.equal(bulkRevoke.data.count, 3, 'Expired TTL session excluded from bulk revoke count')
-	const expOauthSess = db.tokens.create({ userId: user.id, provider: 'self', credentials: { refreshToken: 'rt_keep_until_dormant' }, expiresAt: Date.now() - 1000 })
+	const expOauthSess = db.sessions.create({ userId: user.id, refreshToken: 'rt_keep_until_dormant', expiresAt: Date.now() - 1000 })
 	const expOauthRotated = await req('PATCH', `/api/sessions/${expOauthSess.id}`, { token: session.token, body: { rotateToken: true } })
 	assert.equal(expOauthRotated.status, 200)
 	assert.ok(expOauthRotated.data.session.expiresAt > Date.now() + 3500 * 1000, 'rotateToken must extend expiresAt for refreshable OAuth session')
-	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id = ?').run(Date.now() - 1000, expOauthSess.id)
-	db.tokens.prune()
-	assert.equal(db.tokens.get(ttlRes.data.session.id), null)
-	assert.ok(db.tokens.get(expOauthSess.id), 'prune must preserve expired OAuth session while refreshToken is active')
-	db.tokens.remove(expOauthSess.id)
-	db.tokens.remove(nullTtlRes.session.id)
+	db.sqlite.prepare('UPDATE sessions SET expires_at = ? WHERE id = ?').run(Date.now() - 1000, expOauthSess.id)
+	db.sessions.prune()
+	assert.equal(db.sessions.get(ttlRes.data.session.id), null)
+	assert.ok(db.sessions.get(expOauthSess.id), 'prune must preserve expired OAuth session while refreshToken is active')
+	db.sessions.remove(expOauthSess.id)
+	db.sessions.remove(nullTtlRes.session.id)
 	assert.equal((await req('POST', '/api/sessions', { token: session.token, body: { linkAppIds: ['Test Google App'] } })).status, 404, 'admin appId requires canonical UUID without name fallback')
 	const adminTools = await req('POST', '/mcp', { token: session.token, body: { jsonrpc: '2.0', id: 51, method: 'tools/list', params: {} } })
 	const adminGoogleTool = adminTools.data.result.tools.find(t => t.name === 'google_api')
@@ -327,21 +329,21 @@ test('strict input validation parity, requireBoolean, invalid credential rejecti
 	}
 	const cookieAppRes = await req('POST', '/api/apps', { token: session.token, body: { provider: 'stripe', credentials: { headers: { Cookie: 'sid=abc123' } }, baseUrl: 'https://api.stripe.com' } })
 	assert.equal(cookieAppRes.status, 201)
-	assert.deepEqual(db.tokens.get(cookieAppRes.data.app.id).credentials.headers, { cookie: 'sid=abc123' })
+	assert.deepEqual(db.apps.get(cookieAppRes.data.app.id).credentials.headers, { cookie: 'sid=abc123' })
 	const spaceBasic = await req('POST', '/api/apps', { token: session.token, body: { provider: 'stripe', credentials: { basic: ' user:pass ' }, baseUrl: 'https://api.stripe.com' } })
 	assert.equal(spaceBasic.status, 201)
-	assert.equal(db.tokens.get(spaceBasic.data.app.id).credentials.headers.authorization, `Basic ${Buffer.from(' user:pass ').toString('base64')}`)
+	assert.equal(db.apps.get(spaceBasic.data.app.id).credentials.headers.authorization, `Basic ${Buffer.from(' user:pass ').toString('base64')}`)
 	await withEnv({ UPSTREAM_TIMEOUT_MS: undefined }, () => assert.equal(utilMod.positiveNumberEnv('UPSTREAM_TIMEOUT_MS', 60000), 60000))
 	await withEnv({ UPSTREAM_TIMEOUT_MS: '  ' }, () => assert.equal(utilMod.positiveNumberEnv('UPSTREAM_TIMEOUT_MS', 60000), 60000))
 	await withEnv({ UPSTREAM_TIMEOUT_MS: '25' }, () => assert.equal(utilMod.positiveNumberEnv('UPSTREAM_TIMEOUT_MS', 60000), 25))
 	for (const badEnv of ['0', '-5', 'Infinity', '10mb']) {
 		await withEnv({ UPSTREAM_TIMEOUT_MS: badEnv }, () => assert.throws(() => utilMod.positiveNumberEnv('UPSTREAM_TIMEOUT_MS', 60000), /Invalid UPSTREAM_TIMEOUT_MS/))
 	}
-	const upd = db.tokens.updateCredentials(app.id, { credentials: { accessToken: 'ya29.2', refreshToken: '1//r' }, expiresAt: null, scopes: null })
+	const upd = db.apps.update(app.id, { credentials: { accessToken: 'ya29.2', refreshToken: '1//r' }, expiresAt: null, scopes: null })
 	assert.equal(upd.expiresAt, null)
-	const mixedSess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
-	const ghOauth = db.tokens.create({ userId: user.id, provider: 'github', type: 'oauth', name: 'Personal', credentials: { accessToken: 'gho_1', account: 'octo' } })
-	const ghStatic = db.tokens.create({ userId: user.id, provider: 'github', type: 'static', name: 'Acme GHE', credentials: { headers: { authorization: 'Bearer ghp_1' }, baseUrl: 'https://github.acme.com/api/v3' } })
+	const mixedSess = db.sessions.create({ userId: user.id, admin: 0 })
+	const ghOauth = db.apps.create({ userId: user.id, provider: 'github', type: 'oauth', name: 'Personal', account: 'octo', credentials: { accessToken: 'gho_1' } })
+	const ghStatic = db.apps.create({ userId: user.id, provider: 'github', type: 'static', name: 'Acme GHE', baseUrl: 'https://github.acme.com/api/v3', credentials: { headers: { authorization: 'Bearer ghp_1' } } })
 	db.links.create({ sessionId: mixedSess.id, appId: ghOauth.id })
 	db.links.create({ sessionId: mixedSess.id, appId: ghStatic.id })
 	const mixedTools = await req('POST', '/mcp', { token: mixedSess.token, body: { jsonrpc: '2.0', id: 50, method: 'tools/list', params: {} } })

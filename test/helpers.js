@@ -72,17 +72,15 @@ function createTestSession (opts = {}) {
 		ua = 'TestClient/1.0'
 	} = opts
 	const user = db.logins.resolveUser(provider, account)
-	const session = db.tokens.create({
+	const session = db.sessions.create({
 		userId: user.id,
-		provider: 'self',
-		type: 'bearer',
 		name: 'Test Session',
 		admin: admin ? 1 : 0,
 		ip,
 		ua
 	})
 	if (!withApp) return { user, session, app: null }
-	const app = db.tokens.create({
+	const app = db.apps.create({
 		userId: user.id,
 		provider: 'google',
 		type: 'oauth',

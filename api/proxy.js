@@ -497,13 +497,13 @@ const STREAM_EXTRA_STRIPPED_HEADERS = new Set(['x-api-key', 'x-upstream-app'])
 function formatLinkedApps (providerLinks, provider, { includeBaseUrl = false } = {}) {
 	return providerLinks.map(l => {
 		const name = l.app?.name || ''
-		const acc = l.app?.credentials?.account || ''
-		const id = l.app?.id || ''
+		const acc = l.app?.account || ''
+		const id = l.targetId || ''
 		const label = name && acc ? `${name} (${acc})` : (name || acc || id)
 		if (!label) return ''
 		const meta = []
 		if (id && label !== id) meta.push(`id=${id}`)
-		const base = includeBaseUrl ? (l.app?.credentials?.baseUrl || provider.baseUrl) : null
+		const base = includeBaseUrl ? (l.app?.baseUrl || provider.baseUrl) : null
 		if (base) meta.push(base)
 		return meta.length > 0 ? `${label} [${meta.join(', ')}]` : label
 	}).filter(Boolean)
@@ -519,7 +519,7 @@ function resolveTargetLink (providerLinks, rawApp, provider) {
 		throw httpError(400, 'app must be a non-empty string')
 	}
 	const id = rawApp.trim()
-	const target = providerLinks.find(l => l.app?.id === id)
+	const target = providerLinks.find(l => l.targetId === id)
 	if (!target) {
 		throw httpError(404, `App not linked to session or not found: ${id}`)
 	}
@@ -544,21 +544,16 @@ function resolveUpstreamContext (session, provider, rawApp, url, baseHeaders) {
 		throw httpError(403, `No ${provider.name} app linked to session. ${hint}`)
 	}
 	const targetLink = resolveTargetLink(providerLinks, rawApp, provider)
-	let targetAppId = targetLink.app?.id || null
-	let upstreamApp = targetLink.app
-	if (upstreamApp?.type === 'share') {
-		targetAppId = upstreamApp.credentials?.appId || null
-		upstreamApp = db.tokens.get(targetAppId)
-		if (!db.tokens.isUpstreamApp(upstreamApp)) {
-			throw httpError(404, `Shared upstream app not found: ${targetLink.app.id}`)
-		}
-	}
+	const targetAppId = targetLink.appId || null
+	const upstreamApp = targetLink.app
 	const resolvedUrl = provider.normalizeTargetUrl(url, upstreamApp)
 	const contentType = baseHeaders['content-type'] || ''
 	const objectFormat = isFormContentType(contentType) ? 'form' : 'json'
-	const sharePolicy = targetLink.app?.type === 'share' ? targetLink.app.credentials?.policy : null
-	const inspectsBody = hasBodyPolicy(sharePolicy) || hasBodyPolicy(targetLink.policy)
+	const appPolicy = upstreamApp.policy || null
+	const sharePolicy = targetLink.share?.policy || null
+	const inspectsBody = hasBodyPolicy(appPolicy) || hasBodyPolicy(sharePolicy) || hasBodyPolicy(targetLink.policy)
 	const policies = [
+		[appPolicy, 'Operation not permitted by app policy'],
 		[sharePolicy, 'Operation not permitted by shared app policy'],
 		[targetLink.policy, 'Operation not permitted by session policy']
 	]
@@ -592,8 +587,8 @@ async function resolveUpstreamCredentials (session, provider, targetLink, upstre
 		if (err.status !== 400 && err.status !== 401) {
 			throw err
 		}
-		const hint = targetLink.app?.type === 'share'
-			? `Ask the app owner (${targetLink.app.sharedBy || 'admin'}) to re-authenticate.`
+		const hint = targetLink.share
+			? `Ask the app owner (${targetLink.share.sharedBy || 'admin'}) to re-authenticate.`
 			: session.admin
 				? `Use connect_app with appId "${upstreamApp.id}" to re-authenticate.`
 				: 'Ask an admin to re-authenticate.'
@@ -606,7 +601,7 @@ async function resolveUpstreamCredentials (session, provider, targetLink, upstre
 }
 
 async function runProxyCall ({ auth, providerName = 'google', url, method, app, headers, extraStrip = null }, fn) {
-	const session = db.tokens.resolveSession(auth)
+	const session = db.sessions.resolve(auth)
 	if (!session) {
 		throw httpError(401, 'Authentication required')
 	}

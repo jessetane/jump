@@ -10,20 +10,19 @@ import { useServer, testDbPath, createTestSession, withEnv, mcp, req, db, utilMo
 
 useServer()
 
-const TOKEN_DDL = `
-	CREATE TABLE tokens (
+const APP_DDL = `
+	CREATE TABLE apps (
 		id TEXT PRIMARY KEY,
 		user_id TEXT,
 		provider TEXT NOT NULL,
 		type TEXT NOT NULL,
 		name TEXT,
-		token TEXT UNIQUE,
+		account TEXT,
+		base_url TEXT,
 		credentials TEXT,
-		expires_at INTEGER,
 		scopes TEXT,
-		admin INTEGER DEFAULT 0,
-		ip TEXT,
-		ua TEXT,
+		expires_at INTEGER,
+		policy TEXT,
 		created TEXT NOT NULL,
 		updated TEXT NOT NULL
 	);
@@ -44,32 +43,33 @@ test('encryption at rest uses AES-256-GCM with per-write salt and strict AAD con
 	assert.equal(fs.existsSync(`${testDbPath}.key`), true)
 	assert.equal(fs.statSync(`${testDbPath}.key`).mode & 0o777, 0o600)
 	const { user, session } = createTestSession({ account: 'crypto-owner@example.com', admin: true })
-	const stripeApp = db.tokens.create({
+	const stripeApp = db.apps.create({
 		userId: user.id,
 		provider: 'stripe',
 		type: 'static',
 		name: 'Canary Stripe',
+		account: 'acct_canary',
+		baseUrl: 'https://api.stripe.com',
 		credentials: {
 			headers: { authorization: 'Bearer sk_live_CANARY_112233' },
-			query: { apiKey: 'qp_CANARY_998877' },
-			baseUrl: 'https://api.stripe.com',
-			account: 'acct_canary'
+			query: { apiKey: 'qp_CANARY_998877' }
 		}
 	})
-	const futureApp = db.tokens.create({
+	const futureApp = db.apps.create({
 		userId: user.id,
 		provider: 'future',
 		type: 'oauth',
-		credentials: { accessToken: 'tok_1', customSecret: 'fail_closed_canary', account: 'future@example.com' }
+		account: 'future@example.com',
+		credentials: { accessToken: 'tok_1', customSecret: 'fail_closed_canary' }
 	})
-	const rawStripe = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(stripeApp.id).credentials)
-	assert.deepEqual(Object.keys(rawStripe).sort(), ['account', 'baseUrl', 'secret'])
-	assert.match(rawStripe.secret, /^[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]+$/)
-	assert.equal(rawStripe.baseUrl, 'https://api.stripe.com')
-	assert.equal(rawStripe.account, 'acct_canary')
-	const rawFuture = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(futureApp.id).credentials)
-	assert.deepEqual(Object.keys(rawFuture).sort(), ['account', 'secret'], 'Unlisted credential fields are encrypted inside secret envelope')
-	assert.equal(db.tokens.get(futureApp.id).credentials.customSecret, 'fail_closed_canary')
+	const rawStripeRow = db.sqlite.prepare('SELECT account, base_url, credentials FROM apps WHERE id = ?').get(stripeApp.id)
+	assert.match(rawStripeRow.credentials, /^[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{22}:[A-Za-z0-9_-]+$/)
+	assert.equal(rawStripeRow.base_url, 'https://api.stripe.com')
+	assert.equal(rawStripeRow.account, 'acct_canary')
+	const rawFutureRow = db.sqlite.prepare('SELECT account, credentials FROM apps WHERE id = ?').get(futureApp.id)
+	assert.equal(rawFutureRow.account, 'future@example.com')
+	assert.match(rawFutureRow.credentials, /^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/)
+	assert.equal(db.apps.get(futureApp.id).credentials.customSecret, 'fail_closed_canary')
 	db.links.create({ sessionId: session.id, appId: stripeApp.id })
 	assert.deepEqual(db.links.get(session.id, stripeApp.id).app.credentials.headers, { authorization: 'Bearer sk_live_CANARY_112233' })
 	assert.deepEqual(db.links.get(session.id, stripeApp.id).app.credentials.query, { apiKey: 'qp_CANARY_998877' })
@@ -78,14 +78,15 @@ test('encryption at rest uses AES-256-GCM with per-write salt and strict AAD con
 	assert.equal(dbBytes.includes('sk_live_CANARY_112233'), false)
 	assert.equal(dbBytes.includes('qp_CANARY_998877'), false)
 	assert.equal(dbBytes.includes('fail_closed_canary'), false)
-	const dupApp = db.tokens.create({
+	const dupApp = db.apps.create({
 		userId: user.id,
 		provider: 'stripe',
 		type: 'static',
-		credentials: { headers: { authorization: 'Bearer sk_live_CANARY_112233' }, baseUrl: 'https://api.stripe.com' }
+		baseUrl: 'https://api.stripe.com',
+		credentials: { headers: { authorization: 'Bearer sk_live_CANARY_112233' } }
 	})
-	const ctA = rawStripe.secret
-	const ctB = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(dupApp.id).credentials).secret
+	const ctA = rawStripeRow.credentials
+	const ctB = db.sqlite.prepare('SELECT credentials FROM apps WHERE id = ?').get(dupApp.id).credentials
 	assert.notEqual(ctA, ctB, 'Identical plaintext must produce distinct ciphertexts')
 	assert.throws(() => cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(dupApp.id, 'stripe', 'static')), /unable to authenticate/i)
 	assert.throws(() => cryptoMod.decryptSecret(ctA, cryptoMod.secretContext(stripeApp.id, 'github', 'static')), /unable to authenticate/i)
@@ -100,21 +101,20 @@ test('encryption at rest uses AES-256-GCM with per-write salt and strict AAD con
 
 test('session tokens, refresh tokens, and ephemeral oauth codes/states are hashed at rest and masked on read', async () => {
 	const { session, app } = createTestSession({ account: 'hash-check@example.com', admin: true })
-	assert.match(db.tokens.hashSecret(session.token), /^[0-9a-f]{64}$/)
-	const rawSession = db.sqlite.prepare('SELECT token FROM tokens WHERE id = ?').get(session.id)
-	assert.equal(rawSession.token, db.tokens.hashSecret(session.token))
-	assert.equal(db.tokens.get(session.id).token, null, 'Read back session must never expose token hash')
-	assert.equal(db.tokens.getByToken(rawSession.token), null, 'Database hash stolen from SQLite must never authenticate')
-	const selfWithRefresh = db.tokens.create({ userId: session.userId, provider: 'self', credentials: { refreshToken: 'rt-init' } })
-	const updSelf = db.tokens.updateCredentials(selfWithRefresh.id, { credentials: { refreshToken: 'rt-rotated' } })
-	assert.equal(updSelf.credentials.refreshToken, 'rt-rotated')
-	const rawCreds = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(selfWithRefresh.id).credentials)
-	assert.equal(rawCreds.refreshToken, db.tokens.hashSecret('rt-rotated'))
-	assert.equal(db.tokens.refreshOauthSession(rawCreds.refreshToken), null, 'Refresh hash stolen from SQLite must never refresh')
-	const state = db.tokens.createState({ mode: 'setup_connect', provider: 'google', sessionId: session.id })
-	assert.equal(db.sqlite.prepare('SELECT 1 FROM tokens WHERE id = ? OR token = ?').get(state, state), undefined)
-	const stateRow = db.sqlite.prepare('SELECT id FROM tokens WHERE token = ?').get(db.tokens.hashSecret(state))
-	assert.equal(db.tokens.get(stateRow.id).token, null)
+	assert.match(cryptoMod.hashSecret(session.token), /^[0-9a-f]{64}$/)
+	const rawSession = db.sqlite.prepare('SELECT token_hash FROM sessions WHERE id = ?').get(session.id)
+	assert.equal(rawSession.token_hash, cryptoMod.hashSecret(session.token))
+	assert.equal(db.sessions.get(session.id).token, null, 'Read back session must never expose token hash')
+	assert.equal(db.sessions.getByToken(rawSession.token_hash), null, 'Database hash stolen from SQLite must never authenticate')
+	const selfWithRefresh = db.sessions.create({ userId: session.userId, refreshToken: 'rt-init' })
+	assert.equal(selfWithRefresh.refreshToken, 'rt-init')
+	const rawRefreshRow = db.sqlite.prepare('SELECT refresh_hash FROM sessions WHERE id = ?').get(selfWithRefresh.id)
+	assert.equal(rawRefreshRow.refresh_hash, cryptoMod.hashSecret('rt-init'))
+	assert.equal(db.sessions.refresh(rawRefreshRow.refresh_hash), null, 'Refresh hash stolen from SQLite must never refresh')
+	const state = db.states.createState({ mode: 'setup_connect', provider: 'google', sessionId: session.id })
+	assert.equal(db.sqlite.prepare('SELECT 1 FROM states WHERE id = ? OR token_hash = ?').get(state, state), undefined)
+	const stateRow = db.sqlite.prepare('SELECT id FROM states WHERE token_hash = ?').get(cryptoMod.hashSecret(state))
+	assert.ok(stateRow?.id)
 	const listed = JSON.parse((await mcp(session.token, 'admin', { action: 'list_apps' })).content[0].text).apps
 	const whoami = JSON.parse((await mcp(session.token, 'admin', { action: 'whoami' })).content[0].text).session.apps
 	for (const entry of [listed.find(a => a.id === app.id), whoami.find(a => a.id === app.id)]) {
@@ -122,13 +122,13 @@ test('session tokens, refresh tokens, and ephemeral oauth codes/states are hashe
 		assert.equal(entry.query, undefined)
 		assert.equal(entry.credentials, undefined)
 	}
-	const tamperApp = db.tokens.create({ userId: session.userId, provider: 'stripe', type: 'static', credentials: { bearer: 'sk_tamper' } })
-	const rawSecret = JSON.parse(db.sqlite.prepare('SELECT credentials FROM tokens WHERE id = ?').get(tamperApp.id).credentials)
-	const parts = rawSecret.secret.split(':')
+	const tamperApp = db.apps.create({ userId: session.userId, provider: 'stripe', type: 'static', credentials: { bearer: 'sk_tamper' } })
+	const rawSecret = db.sqlite.prepare('SELECT credentials FROM apps WHERE id = ?').get(tamperApp.id).credentials
+	const parts = rawSecret.split(':')
 	parts[3] = `${parts[3][0] === 'A' ? 'B' : 'A'}${parts[3].slice(1)}`
-	db.sqlite.prepare('UPDATE tokens SET credentials = ? WHERE id = ?').run(JSON.stringify({ secret: parts.join(':') }), tamperApp.id)
-	assert.throws(() => db.tokens.get(tamperApp.id), /unable to authenticate/i)
-	db.tokens.remove(tamperApp.id)
+	db.sqlite.prepare('UPDATE apps SET credentials = ? WHERE id = ?').run(parts.join(':'), tamperApp.id)
+	assert.throws(() => db.apps.get(tamperApp.id), /unable to authenticate/i)
+	db.apps.remove(tamperApp.id)
 })
 
 test('encryption key sources, rotation across restarts, and VACUUM scrubbing of old ciphertext', async () => {
@@ -140,21 +140,21 @@ test('encryption key sources, rotation across restarts, and VACUUM scrubbing of 
 		const diyDb = new DatabaseSync(diyPath)
 		try {
 			diyDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
-			diyDb.exec(TOKEN_DDL)
+			diyDb.exec(APP_DDL)
 			await withEnv({ ENCRYPTION_KEY: '', CREDENTIALS_DIRECTORY: undefined }, () => {
-				db.tokens.initKeys(diyDb)
+				db.apps.initKeys(diyDb)
 				assert.equal(fs.existsSync(`${diyPath}.key`), true)
 				fs.chmodSync(`${diyPath}.key`, 0o644)
-				db.tokens.initKeys(diyDb)
+				db.apps.initKeys(diyDb)
 				assert.equal(fs.statSync(`${diyPath}.key`).mode & 0o777, 0o600, 'initKeys tightens permissive .key permissions')
 				const ctOld = cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_diy_rot' } }), cryptoMod.secretContext('app-1', 'stripe', 'static'))
 				const now = new Date().toISOString()
-				diyDb.prepare("INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES ('app-1', 'stripe', 'static', ?, ?, ?)").run(JSON.stringify({ secret: ctOld }), now, now)
+				diyDb.prepare("INSERT INTO apps (id, user_id, provider, type, credentials, created, updated) VALUES ('app-1', 'u1', 'stripe', 'static', ?, ?, ?)").run(ctOld, now, now)
 				diyDb.exec('PRAGMA wal_checkpoint(FULL);')
 				assert.equal(fs.readFileSync(diyPath).includes(ctOld), true)
 				fs.renameSync(`${diyPath}.key`, `${diyPath}.key.old`)
 				fs.writeFileSync(`${diyPath}.key`, `${k2}\n`, { mode: 0o600 })
-				db.tokens.initKeys(diyDb)
+				db.apps.initKeys(diyDb)
 				diyDb.exec('PRAGMA wal_checkpoint(FULL);')
 				for (const f of [diyPath, `${diyPath}-wal`].filter(p => fs.existsSync(p))) {
 					assert.equal(fs.readFileSync(f).includes(ctOld), false, `VACUUM must scrub old ciphertext from ${f}`)
@@ -169,66 +169,67 @@ test('encryption key sources, rotation across restarts, and VACUUM scrubbing of 
 		const tpmDb = new DatabaseSync(tpmDbPath)
 		try {
 			tpmDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
-			tpmDb.exec(TOKEN_DDL)
+			tpmDb.exec(APP_DDL)
 			const credFile = `${utilMod.APP_NAME}.key`
 			const oldCredFile = `${utilMod.APP_NAME}.key.old`
 			await withEnv({ CREDENTIALS_DIRECTORY: credDir, ENCRYPTION_KEY: undefined }, () => {
-				assert.throws(() => db.tokens.initKeys(tpmDb), /Missing systemd credential/)
+				assert.throws(() => db.apps.initKeys(tpmDb), /Missing systemd credential/)
 				assert.equal(fs.existsSync(`${tpmDbPath}.key`), false)
 				fs.writeFileSync(path.join(credDir, credFile), `${k1}\n`, { mode: 0o600 })
-				db.tokens.initKeys(tpmDb)
+				db.apps.initKeys(tpmDb)
 				assert.equal(fs.existsSync(`${tpmDbPath}.key`), false)
 				const ctx = cryptoMod.secretContext('tpm-1', 'stripe', 'static')
 				const now = new Date().toISOString()
-				tpmDb.prepare("INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES ('tpm-1', 'stripe', 'static', ?, ?, ?)").run(
-					JSON.stringify({ secret: cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_tpm' } }), ctx) }),
+				tpmDb.prepare("INSERT INTO apps (id, user_id, provider, type, credentials, created, updated) VALUES ('tpm-1', 'u1', 'stripe', 'static', ?, ?, ?)").run(
+					cryptoMod.encryptSecret(JSON.stringify({ headers: { authorization: 'Bearer sk_tpm' } }), ctx),
 					now,
 					now
 				)
 				fs.renameSync(path.join(credDir, credFile), path.join(credDir, oldCredFile))
 				fs.writeFileSync(path.join(credDir, credFile), `${k2}\n`, { mode: 0o600 })
-				db.tokens.initKeys(tpmDb)
+				db.apps.initKeys(tpmDb)
 				fs.rmSync(path.join(credDir, oldCredFile))
-				db.tokens.initKeys(tpmDb)
-				const ctNew = JSON.parse(tpmDb.prepare("SELECT credentials FROM tokens WHERE id = 'tpm-1'").get().credentials).secret
+				db.apps.initKeys(tpmDb)
+				const ctNew = tpmDb.prepare("SELECT credentials FROM apps WHERE id = 'tpm-1'").get().credentials
 				assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(ctNew, ctx)), { headers: { authorization: 'Bearer sk_tpm' } })
 				fs.writeFileSync(path.join(credDir, credFile), `${k1}\n`, { mode: 0o600 })
-				assert.throws(() => db.tokens.initKeys(tpmDb), /unable to authenticate/i)
+				assert.throws(() => db.apps.initKeys(tpmDb), /unable to authenticate/i)
 			})
 		} finally {
 			tpmDb.close()
 		}
 		const memDb = new DatabaseSync(':memory:')
 		try {
-			memDb.exec(TOKEN_DDL)
+			memDb.exec(APP_DDL)
 			await withEnv({ CREDENTIALS_DIRECTORY: undefined, ENCRYPTION_KEY: undefined }, () => {
-				db.tokens.initKeys(memDb)
+				db.apps.initKeys(memDb)
 				assert.equal(fs.existsSync(':memory:.key'), false)
 				const now = new Date().toISOString()
-				memDb.prepare("INSERT INTO tokens (id, provider, type, credentials, created, updated) VALUES ('m1', 'google', 'oauth', ?, ?, ?)").run(
-					JSON.stringify({ secret: cryptoMod.encryptSecret(JSON.stringify({ accessToken: 'tok' }), cryptoMod.secretContext('m1', 'google', 'oauth')) }),
+				memDb.prepare("INSERT INTO apps (id, user_id, provider, type, credentials, created, updated) VALUES ('m1', 'u1', 'google', 'oauth', ?, ?, ?)").run(
+					cryptoMod.encryptSecret(JSON.stringify({ accessToken: 'tok' }), cryptoMod.secretContext('m1', 'google', 'oauth')),
 					now,
 					now
 				)
-				assert.throws(() => db.tokens.initKeys(memDb), /Missing encryption key for encrypted in-memory database/)
+				assert.throws(() => db.apps.initKeys(memDb), /Missing encryption key for encrypted in-memory database/)
 			})
 		} finally {
 			memDb.close()
 		}
 		cryptoMod.loadKeys({ dbPath: testDbPath, encrypted: true })
 		const { user } = createTestSession({ account: 'env-rot@example.com' })
-		const envApp = db.tokens.create({
+		const envApp = db.apps.create({
 			userId: user.id,
 			provider: 'stripe',
 			type: 'static',
-			credentials: { headers: { authorization: 'Bearer sk_env_rot_canary' }, baseUrl: 'https://api.stripe.com' }
+			baseUrl: 'https://api.stripe.com',
+			credentials: { headers: { authorization: 'Bearer sk_env_rot_canary' } }
 		})
 		const sharedKey = fs.readFileSync(`${testDbPath}.key`, 'utf8').trim()
 		await withEnv({ CREDENTIALS_DIRECTORY: undefined, ENCRYPTION_KEY: `${k2},${sharedKey}` }, () => {
 			db.init()
 			process.env.ENCRYPTION_KEY = k2
 			db.init()
-			assert.deepEqual(db.tokens.get(envApp.id).credentials.headers, { authorization: 'Bearer sk_env_rot_canary' })
+			assert.deepEqual(db.apps.get(envApp.id).credentials.headers, { authorization: 'Bearer sk_env_rot_canary' })
 			process.env.ENCRYPTION_KEY = `${sharedKey},${k2}`
 			db.init()
 		})

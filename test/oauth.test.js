@@ -96,17 +96,17 @@ test('DCR RFC 7591 ignores caller-supplied client secrets/IDs, preserves client_
 	assert.equal(tok.status, 200)
 	assert.equal(tok.data.refresh_token, undefined)
 	assert.equal(tok.data.expires_in, undefined)
-	assert.equal(db.tokens.getByToken(tok.data.access_token).expiresAt, null)
+	assert.equal(db.sessions.getByToken(tok.data.access_token).expiresAt, null)
 })
 
 test('PKCE authorize validation, CSRF Origin guard, single-use setup codes, and unconsumed missing CLIENT_SECRET check', async () => {
 	assert.equal((await req('GET', '/oauth/authorize?code_challenge=xyz&code_challenge_method=plain')).status, 400)
 	assert.equal((await req('GET', '/oauth/authorize?redirect_uri=https://evil.com/cb&code_challenge=xyz&code_challenge_method=S256')).status, 400)
 	assert.equal((await req('GET', '/oauth/authorize?redirect_uri=https://chatgpt.com/callback')).status, 400)
-	const statesBefore = db.sqlite.prepare("SELECT COUNT(*) AS n FROM tokens WHERE type = 'oauth_state'").get().n
+	const statesBefore = db.sqlite.prepare("SELECT COUNT(*) AS n FROM states WHERE type = 'state'").get().n
 	const okAuth = await req('GET', '/oauth/authorize?redirect_uri=https://chatgpt.com/callback&state=s1&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256')
 	assert.equal(okAuth.status, 200)
-	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS n FROM tokens WHERE type = 'oauth_state'").get().n, statesBefore, 'GET /oauth/authorize must stay stateless')
+	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS n FROM states WHERE type = 'state'").get().n, statesBefore, 'GET /oauth/authorize must stay stateless')
 	const crossOrigin = await req('POST', '/oauth/authorize/consent', {
 		headers: { origin: 'https://evil.example.com', 'content-type': 'application/x-www-form-urlencoded' },
 		body: 'provider=google'
@@ -114,13 +114,13 @@ test('PKCE authorize validation, CSRF Origin guard, single-use setup codes, and 
 	assert.equal(crossOrigin.status, 403)
 	const { session: adminSess } = createTestSession({ account: 'oauth-setup@example.com', admin: true })
 	const { session: workerSess, app: nonSelf } = createTestSession({ account: 'oauth-worker@example.com', admin: false })
-	const expAdmin = db.tokens.create({ userId: adminSess.userId, provider: 'self', admin: 1, expiresAt: Date.now() - 5000 })
+	const expAdmin = db.sessions.create({ userId: adminSess.userId, admin: 1, expiresAt: Date.now() - 5000 })
 	for (const badState of [
 		'',
-		db.tokens.createState({ mode: 'setup_connect', sessionId: nonSelf.id, provider: 'google' }),
-		db.tokens.createState({ mode: 'setup_connect', sessionId: workerSess.id, provider: 'google' }),
-		db.tokens.createState({ mode: 'setup_link', sessionId: adminSess.id, provider: 'google' }),
-		db.tokens.createState({ mode: 'setup_connect', sessionId: expAdmin.id, provider: 'google' })
+		db.states.createState({ mode: 'setup_connect', sessionId: nonSelf.id, provider: 'google' }),
+		db.states.createState({ mode: 'setup_connect', sessionId: workerSess.id, provider: 'google' }),
+		db.states.createState({ mode: 'setup_link', sessionId: adminSess.id, provider: 'google' }),
+		db.states.createState({ mode: 'setup_connect', sessionId: expAdmin.id, provider: 'google' })
 	]) {
 		const r = await req('POST', '/providers/google/consent', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -145,7 +145,7 @@ test('PKCE authorize validation, CSRF Origin guard, single-use setup codes, and 
 			redirect: 'manual'
 		})
 		assert.equal(unconfiguredConsent.status, 400)
-		const setupCode = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSess.id, provider: 'github' })
+		const setupCode = db.states.createState({ mode: 'setup_connect', sessionId: adminSess.id, provider: 'github' })
 		const missingSecretRes = await req('POST', '/providers/github/consent', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({ code: setupCode }).toString(),
@@ -153,8 +153,8 @@ test('PKCE authorize validation, CSRF Origin guard, single-use setup codes, and 
 		})
 		assert.equal(missingSecretRes.status, 500)
 		assert.doesNotMatch(missingSecretRes.text, /GITHUB_CLIENT_SECRET/)
-		assert.ok(db.tokens.getState(setupCode), 'Upfront missing CLIENT_SECRET check must not burn setupCode')
-		const cbMissingSecretState = db.tokens.createState({ mode: 'login', provider: 'github' })
+		assert.ok(db.states.getState(setupCode), 'Upfront missing CLIENT_SECRET check must not burn setupCode')
+		const cbMissingSecretState = db.states.createState({ mode: 'login', provider: 'github' })
 		const cbMissingSecretRes = await req('GET', `/oauth/callback?code=c&state=${cbMissingSecretState}`)
 		assert.equal(cbMissingSecretRes.status, 500)
 		assert.doesNotMatch(cbMissingSecretRes.text, /GITHUB_CLIENT_SECRET/)
@@ -166,7 +166,7 @@ test('PKCE authorize validation, CSRF Origin guard, single-use setup codes, and 
 		})
 		assert.equal(okConsent.status, 302)
 		const firstState = new URL(okConsent.headers.get('location')).searchParams.get('state')
-		assert.ok(db.tokens.getState(setupCode), 'setupCode stays usable across consent until callback completes')
+		assert.ok(db.states.getState(setupCode), 'setupCode stays usable across consent until callback completes')
 		const retryConsent = await req('POST', '/providers/github/consent', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({ code: setupCode }).toString(),
@@ -198,21 +198,21 @@ test('PKCE code exchange, client_id binding, refresh rotation, 60s dedup, /oauth
 	const { session, app } = createTestSession({ account: 'pkce-refresh@example.com', admin: true })
 	const verifier = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
 	const challenge = createHash('sha256').update(verifier).digest('base64url')
-	const badCode = db.tokens.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
+	const badCode = db.states.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
 	assert.equal((await req('POST', '/oauth/token', { headers: { 'content-type': 'application/json' }, body: '{bad' })).status, 400)
 	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'client_credentials' } })).status, 400)
 	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: badCode, redirect_uri: 'https://chatgpt.com/callback', client_id: 'client_a' } })).status, 400, 'Missing code_verifier')
-	const shortVerifierCode = db.tokens.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
+	const shortVerifierCode = db.states.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
 	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: shortVerifierCode, redirect_uri: 'https://chatgpt.com/callback', client_id: 'client_a', code_verifier: 'too-short' } })).status, 400)
-	const wrongVerifierCode = db.tokens.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
+	const wrongVerifierCode = db.states.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
 	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: wrongVerifierCode, redirect_uri: 'https://chatgpt.com/callback', client_id: 'client_a', code_verifier: 'a'.repeat(43) } })).status, 400)
-	const wrongClientCode = db.tokens.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback' })
+	const wrongClientCode = db.states.createAuthCode({ userId: session.userId, clientId: 'client_a', clientRedirectUri: 'https://chatgpt.com/callback' })
 	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: wrongClientCode, redirect_uri: 'https://chatgpt.com/callback', client_id: 'client_bearer_spoof' } })).status, 400)
-	const mismatchRedirectCode = db.tokens.createAuthCode({ userId: session.userId, clientRedirectUri: 'https://chatgpt.com/callback' })
+	const mismatchRedirectCode = db.states.createAuthCode({ userId: session.userId, clientRedirectUri: 'https://chatgpt.com/callback' })
 	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: mismatchRedirectCode, redirect_uri: 'https://evil.com/cb' } })).status, 400)
-	const orphanCode = db.tokens.createAuthCode({ userId: null, clientRedirectUri: 'https://chatgpt.com/callback' })
+	const orphanCode = db.states.createAuthCode({ userId: null, clientRedirectUri: 'https://chatgpt.com/callback' })
 	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: orphanCode, redirect_uri: 'https://chatgpt.com/callback' } })).status, 400)
-	const unboundCode = db.tokens.createAuthCode({ userId: session.userId, appIds: [app.id], clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
+	const unboundCode = db.states.createAuthCode({ userId: session.userId, appIds: [app.id], clientRedirectUri: 'https://chatgpt.com/callback', codeChallenge: challenge, codeChallengeMethod: 'S256' })
 	const exchange = await req('POST', '/oauth/token', {
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
 		body: new URLSearchParams({ grant_type: 'authorization_code', code: unboundCode, redirect_uri: 'https://chatgpt.com/callback', code_verifier: verifier, client_id: 'client_bearer_downgrade_attempt' }).toString()
@@ -220,9 +220,9 @@ test('PKCE code exchange, client_id binding, refresh rotation, 60s dedup, /oauth
 	assert.equal(exchange.status, 200)
 	assert.equal(exchange.headers.get('cache-control'), 'no-store')
 	assert.ok(exchange.data.refresh_token, 'Unbound code must not allow client_bearer_ downgrade')
-	assert.equal(db.tokens.consumeAuthCode(unboundCode), null, 'Auth code must be single-use')
-	const oauthSess = db.tokens.getByToken(exchange.data.access_token)
-	db.sqlite.prepare('UPDATE tokens SET expires_at = ? WHERE id = ?').run(Date.now() - 1000, oauthSess.id)
+	assert.equal(db.states.consumeAuthCode(unboundCode), null, 'Auth code must be single-use')
+	const oauthSess = db.sessions.getByToken(exchange.data.access_token)
+	db.sqlite.prepare('UPDATE sessions SET expires_at = ? WHERE id = ?').run(Date.now() - 1000, oauthSess.id)
 	assert.equal((await req('GET', '/api/sessions', { token: exchange.data.access_token })).status, 401, 'Expired access_token must return 401')
 	const ref1 = await req('POST', '/oauth/token', { body: { grant_type: 'refresh_token', refresh_token: exchange.data.refresh_token } })
 	assert.equal(ref1.status, 200)
@@ -230,21 +230,22 @@ test('PKCE code exchange, client_id binding, refresh rotation, 60s dedup, /oauth
 	assert.equal(ref1.data.refresh_token, exchange.data.refresh_token)
 	const refConcurrent = await req('POST', '/oauth/token', { body: { grant_type: 'refresh_token', refresh_token: exchange.data.refresh_token } })
 	assert.equal(refConcurrent.data.access_token, ref1.data.access_token, 'Concurrent refresh within 60s returns cached rotated token')
-	const expSessionForRevoke = db.tokens.create({ userId: session.userId, provider: 'self', credentials: { refreshToken: 'rt_revoke_exp' }, expiresAt: Date.now() - 5000 })
+	const expSessionForRevoke = db.sessions.create({ userId: session.userId, refreshToken: 'rt_revoke_exp', expiresAt: Date.now() - 5000 })
 	const revokeByRefresh = await req('POST', '/oauth/revoke', { body: { token: 'rt_revoke_exp' } })
 	assert.equal(revokeByRefresh.status, 200)
-	assert.equal(db.tokens.get(expSessionForRevoke.id), null)
-	assert.ok(db.tokens.get(app.id), 'Revoking session must never delete upstream app')
+	assert.equal(db.sessions.get(expSessionForRevoke.id), null)
+	assert.ok(db.apps.get(app.id), 'Revoking session must never delete upstream app')
 	assert.equal((await req('POST', '/oauth/revoke', { body: { token: 123 } })).status, 400)
-	const staticSess = db.tokens.create({ userId: session.userId, provider: 'self', expiresAt: null })
+	const staticSess = db.sessions.create({ userId: session.userId, expiresAt: null })
 	const dormantDate = new Date(Date.now() - 35 * 86400 * 1000).toISOString()
-	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id IN (?, ?, ?)').run(dormantDate, oauthSess.id, staticSess.id, app.id)
-	assert.equal(db.tokens.getByToken(ref1.data.access_token), null, 'Dormant OAuth session excluded at read time')
+	db.sqlite.prepare('UPDATE sessions SET updated = ? WHERE id IN (?, ?)').run(dormantDate, oauthSess.id, staticSess.id)
+	db.sqlite.prepare('UPDATE apps SET updated = ? WHERE id = ?').run(dormantDate, app.id)
+	assert.equal(db.sessions.getByToken(ref1.data.access_token), null, 'Dormant OAuth session excluded at read time')
 	assert.equal((await req('POST', '/oauth/token', { body: { grant_type: 'refresh_token', refresh_token: exchange.data.refresh_token } })).status, 400)
-	db.tokens.prune(30 * 86400 * 1000)
-	assert.equal(db.tokens.get(oauthSess.id), null)
-	assert.ok(db.tokens.get(staticSess.id), 'Static bearer session exempt from dormancy pruning')
-	assert.ok(db.tokens.get(app.id), 'Upstream app exempt from dormancy pruning')
+	db.sessions.prune(30 * 86400 * 1000)
+	assert.equal(db.sessions.get(oauthSess.id), null)
+	assert.ok(db.sessions.get(staticSess.id), 'Static bearer session exempt from dormancy pruning')
+	assert.ok(db.apps.get(app.id), 'Upstream app exempt from dormancy pruning')
 })
 
 test('parseGrantedServices and summarizeScopes handle delimiters, mixed modes, counts, and subset fallback', () => {
@@ -305,18 +306,18 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 		account: 'verify-flow@example.com',
 		scopes: 'https://mail.google.com/ https://www.googleapis.com/auth/calendar.readonly'
 	})
-	const extraApp = db.tokens.create({ userId: user.id, provider: 'stripe', type: 'static', name: 'Extra Stripe', credentials: { bearer: 'sk_extra' } })
-	const newApp = db.tokens.create({ userId: user.id, provider: 'linear', type: 'static', name: 'New Linear', credentials: { bearer: 'lin_new' } })
+	const extraApp = db.apps.create({ userId: user.id, provider: 'stripe', type: 'static', name: 'Extra Stripe', credentials: { bearer: 'sk_extra' } })
+	const newApp = db.apps.create({ userId: user.id, provider: 'linear', type: 'static', name: 'New Linear', credentials: { bearer: 'lin_new' } })
 	const { session: otherSess, app: foreignApp } = createTestSession({ account: 'verify-other@example.com' })
-	const badVerify = db.tokens.createState({ mode: 'verify', userId: null })
+	const badVerify = db.states.createState({ mode: 'verify', userId: null })
 	assert.equal((await req('GET', `/oauth/verify?code=${badVerify}`)).status, 400)
-	const wrongMode = db.tokens.createState({ mode: 'login', userId: user.id })
+	const wrongMode = db.states.createState({ mode: 'login', userId: user.id })
 	assert.equal((await req('GET', `/oauth/verify?code=${wrongMode}`)).status, 400)
-	const missingSessVerify = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: 'missing-session' })
+	const missingSessVerify = db.states.createState({ mode: 'verify', userId: user.id, sessionId: 'missing-session' })
 	assert.equal((await req('GET', `/oauth/verify?code=${missingSessVerify}`)).status, 400)
-	const crossUserSessVerify = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: otherSess.id })
+	const crossUserSessVerify = db.states.createState({ mode: 'verify', userId: user.id, sessionId: otherSess.id })
 	assert.equal((await req('GET', `/oauth/verify?code=${crossUserSessVerify}`)).status, 400)
-	const existingSessVerify = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: session.id, admin: 1, newAppIds: [newApp.id], name: 'Linked Session' })
+	const existingSessVerify = db.states.createState({ mode: 'verify', userId: user.id, sessionId: session.id, admin: 1, newAppIds: [newApp.id], name: 'Linked Session' })
 	const getExistingVerify = await req('GET', `/oauth/verify?code=${existingSessVerify}`)
 	assert.equal(getExistingVerify.status, 200)
 	assert.ok(getExistingVerify.text.includes('Test Google App · calendar (read), gmail (write)'), 'Verify page renders app scope summary')
@@ -334,11 +335,11 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 	})
 	assert.equal(postExistingVerify.status, 200)
 	assert.deepEqual(db.links.listBySessionId(session.id).map(l => l.appId), [extraApp.id], 'Existing-session /oauth/verify unlinks unchecked apps and drops cross-user/invalid app_ids')
-	const verifyCode = db.tokens.createState({ mode: 'verify', userId: user.id, name: 'Verify App', clientRedirectUri: 'https://antigravity.google/oauth-callback', clientState: 'st1' })
+	const verifyCode = db.states.createState({ mode: 'verify', userId: user.id, name: 'Verify App', clientRedirectUri: 'https://antigravity.google/oauth-callback', clientState: 'st1' })
 	const getVerify = await req('GET', `/oauth/verify?code=${verifyCode}`)
 	assert.equal(getVerify.status, 200)
 	assert.ok(getVerify.text.includes('<button type="submit">Activate Session</button>'))
-	assert.ok(db.tokens.getState(verifyCode), 'GET /oauth/verify must not consume state (scanner-safe)')
+	assert.ok(db.states.getState(verifyCode), 'GET /oauth/verify must not consume state (scanner-safe)')
 	const postVerifyBody = new URLSearchParams({ code: verifyCode })
 	postVerifyBody.append('app_id', app.id)
 	postVerifyBody.append('app_id', foreignApp.id)
@@ -349,12 +350,12 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 		redirect: 'manual'
 	})
 	assert.equal(postVerify.status, 302)
-	assert.equal(db.tokens.getState(verifyCode), null)
+	assert.equal(db.states.getState(verifyCode), null)
 	assert.equal(db.sqlite.prepare("SELECT COUNT(*) AS n FROM links WHERE app_id = ?").get(app.id).n, 0, 'Unlinked app has no links until /oauth/token exchanges auth code')
 	const authCode = new URL(postVerify.headers.get('location')).searchParams.get('code')
 	const tokenRes = await req('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: authCode, redirect_uri: 'https://antigravity.google/oauth-callback' } })
 	assert.equal(tokenRes.status, 200)
-	const verifySess = db.tokens.getByToken(tokenRes.data.access_token)
+	const verifySess = db.sessions.getByToken(tokenRes.data.access_token)
 	assert.deepEqual(db.links.listBySessionId(verifySess.id).map(l => l.appId), [app.id], 'Fresh-login /oauth/verify drops cross-user/invalid app_ids')
 	assert.equal((await req('PUT', '/oauth/verify')).status, 405)
 	assert.equal((await req('POST', '/oauth/verify', {
@@ -368,7 +369,7 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 	await withEnv({ GITHUB_CLIENT_ID: 'gh-e2e-id', GITHUB_CLIENT_SECRET: 'gh-e2e-sec' }, async () => {
 		const { session: ownerAdmin } = createTestSession({ account: 'e2e-link-owner@example.com', admin: true })
 		const ghOwner = db.logins.resolveUser('github', 'e2e-gh-user')
-		const ghMergedApp = db.tokens.create({ userId: ghOwner.id, provider: 'linear', type: 'static', name: 'GH Merged Linear', credentials: { bearer: 'lin_gh' } })
+		const ghMergedApp = db.apps.create({ userId: ghOwner.id, provider: 'linear', type: 'static', name: 'GH Merged Linear', credentials: { bearer: 'lin_gh' } })
 		assert.equal((await req('GET', '/oauth/authorize?code=invalid-setup-code')).status, 403)
 		const linkRes = JSON.parse((await mcp(ownerAdmin.token, 'admin', { action: 'link_login', provider: 'github', merge: true })).content[0].text)
 		const setupCode = new URL(linkRes.connectUrl).searchParams.get('code')
@@ -411,8 +412,8 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 	await withEnv({ GOOGLE_CLIENT_ID: undefined, GITHUB_CLIENT_ID: undefined }, async () => {
 		assert.deepEqual(providers.listOauthProviders('auth'), [])
 		const localUser = db.users.create()
-		const localAdmin = db.tokens.create({ userId: localUser.id, provider: 'self', admin: 1 })
-		const localWorker = db.tokens.create({ userId: localUser.id, provider: 'self', admin: 0 })
+		const localAdmin = db.sessions.create({ userId: localUser.id, admin: 1 })
+		const localWorker = db.sessions.create({ userId: localUser.id, admin: 0 })
 		assert.equal((await req('POST', '/oauth/authorize/consent', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({ token: localWorker.token }).toString()
@@ -423,8 +424,8 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 		})
 		assert.equal(okLocal.status, 200)
 		assert.match(okLocal.text, /user:\s*localhost/)
-		db.sqlite.exec("DELETE FROM tokens WHERE provider = 'self'")
-		db.tokens.create({ userId: localUser.id, provider: 'self', admin: 0 })
+		db.sqlite.exec('DELETE FROM sessions')
+		db.sessions.create({ userId: localUser.id, admin: 0 })
 		const bootstrapped = bootstrapLocalAdmin()
 		assert.ok(bootstrapped?.admin)
 		assert.equal(bootstrapLocalAdmin(), null)
@@ -434,8 +435,9 @@ test('two-step /oauth/verify flow, local token fallback gating, and bootstrapLoc
 test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, revoke, and OAUTH_TIMEOUT_MS', async () => {
 	let { session: adminSess, app } = createTestSession({ account: 'reauth-owner@example.com', admin: true, expiresAt: Date.now() - 1000 })
 	const { session: workerSess } = createTestSession({ account: 'reauth-worker@example.com', admin: false, withApp: false })
-	app = db.tokens.updateCredentials(app.id, {
-		credentials: { accessToken: 'ya29.old', refreshToken: '1//old-r', account: 'reauth-owner@example.com' },
+	app = db.apps.update(app.id, {
+		account: 'reauth-owner@example.com',
+		credentials: { accessToken: 'ya29.old', refreshToken: '1//old-r' },
 		expiresAt: Date.now() - 1000,
 		scopes: 'https://mail.google.com/ https://www.googleapis.com/auth/calendar.readonly'
 	})
@@ -467,7 +469,7 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		assert.equal(refreshCalls, 1, 'Concurrent upstream token refreshes must deduplicate')
 		assert.equal(t1.headers.authorization, 'Bearer ya29.fresh_1')
 		assert.equal(t2.headers.authorization, 'Bearer ya29.fresh_1')
-		const noExpiryApp = db.tokens.updateCredentials(app.id, { credentials: { ...db.tokens.get(app.id).credentials, accessToken: 'ya29.noexp' }, expiresAt: null })
+		const noExpiryApp = db.apps.update(app.id, { credentials: { ...db.apps.get(app.id).credentials, accessToken: 'ya29.noexp' }, expiresAt: null })
 		assert.equal((await providers.google.resolveCredentials(noExpiryApp)).headers.authorization, 'Bearer ya29.noexp')
 		assert.equal(refreshCalls, 1, 'OAuth token without expiresAt must not refresh on every request')
 		returnedEmail = 'UNVERIFIED'
@@ -475,17 +477,17 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		returnedEmail = 'FAIL_401'
 		await assert.rejects(() => providers.google.exchangeCode({ code: 'code', callbackUrl: 'http://localhost/cb' }), err => err.status === 502 && err.message === 'bad token')
 		returnedEmail = 'wrong@example.com'
-		const mismatchState = db.tokens.createState({ sessionId: adminSess.id, reauthAppId: app.id, provider: 'google' })
+		const mismatchState = db.states.createState({ sessionId: adminSess.id, reauthAppId: app.id, provider: 'google' })
 		const mismatchRes = await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${mismatchState}`)
 		assert.equal(mismatchRes.status, 409, 'Re-auth returning different upstream account must fail with 409')
-		assert.equal(db.tokens.get(app.id).credentials.account, 'reauth-owner@example.com')
+		assert.equal(db.apps.get(app.id).account, 'reauth-owner@example.com')
 		returnedEmail = 'reauth-owner@example.com'
-		const okState = db.tokens.createState({ sessionId: adminSess.id, reauthAppId: app.id, provider: 'google' })
+		const okState = db.states.createState({ sessionId: adminSess.id, reauthAppId: app.id, provider: 'google' })
 		const okRes = await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${okState}`)
 		assert.equal(okRes.status, 200)
-		assert.equal(db.tokens.get(app.id).credentials.accessToken, 'ya29.cb')
-		assert.equal(db.tokens.getByToken(adminSess.token)?.id, adminSess.id, 'Session token preserved across re-auth')
-		const nonAdminState = db.tokens.createState({ sessionId: workerSess.id, reauthAppId: app.id, provider: 'google' })
+		assert.equal(db.apps.get(app.id).credentials.accessToken, 'ya29.cb')
+		assert.equal(db.sessions.getByToken(adminSess.token)?.id, adminSess.id, 'Session token preserved across re-auth')
+		const nonAdminState = db.states.createState({ sessionId: workerSess.id, reauthAppId: app.id, provider: 'google' })
 		assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${nonAdminState}`)).status, 403)
 		const reauthConnect = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'google', appId: app.id })).content[0].text)
 		const reauthUrl = new URL(reauthConnect.connectUrl)
@@ -539,12 +541,12 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 		const consentState = consentLocation.searchParams.get('state')
 		returnedEmail = 'connected-ui@example.com'
 		assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${consentState}`)).status, 200)
-		const createdApp = db.tokens.listByUserId(adminSess.userId).find(t => t.type === 'oauth' && t.name === 'Work Google')
-		assert.equal(createdApp?.credentials?.account, 'connected-ui@example.com')
+		const createdApp = db.apps.listByUserId(adminSess.userId).find(t => t.type === 'oauth' && t.name === 'Work Google')
+		assert.equal(createdApp?.account, 'connected-ui@example.com')
 		assert.ok(db.links.listBySessionId(adminSess.id).some(l => l.appId === createdApp.id), 'connect flow auto-links new OAuth app')
 	})
 	await withEnv({ OAUTH_TIMEOUT_MS: '25' }, async () => {
-		const expiredApp = db.tokens.updateCredentials(app.id, { credentials: { ...db.tokens.get(app.id).credentials }, expiresAt: Date.now() - 1000 })
+		const expiredApp = db.apps.update(app.id, { expiresAt: Date.now() - 1000 })
 		await withEnv({ GOOGLE_CLIENT_SECRET: undefined }, async () => {
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 500)
 		})
@@ -588,13 +590,13 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			}
 			return origFetch(input, init)
 		}, async origFetch => {
-			const beforeCreds = db.tokens.get(expiredApp.id)
+			const beforeCreds = db.apps.get(expiredApp.id)
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 504)
 			refreshMode = 'missing_token_json'
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 502)
 			refreshMode = 'missing_token_text'
 			assert.equal((await req('GET', '/api/google/gmail/v1/users/me/profile', { token: adminSess.token, headers: { 'x-upstream-app': expiredApp.id } })).status, 502)
-			const afterCreds = db.tokens.get(expiredApp.id)
+			const afterCreds = db.apps.get(expiredApp.id)
 			assert.equal(afterCreds.credentials.accessToken, beforeCreds.credentials.accessToken, 'Missing access_token in 200 OK refresh response must not overwrite stored accessToken')
 			assert.equal(afterCreds.expiresAt, beforeCreds.expiresAt, 'Missing access_token in 200 OK refresh response must not overwrite expiresAt')
 			refreshMode = 'body_stall'
@@ -610,17 +612,17 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 			refreshMode = 'exchange_missing_token'
 			await assert.rejects(() => providers.google.exchangeCode({ code: 'empty', callbackUrl: 'http://localhost/cb' }), { status: 502, message: /missing access_token/ })
 			assert.equal(userInfoCalls, 0, 'Missing access_token from token endpoint must fail before querying userinfo')
-			const emptyTokState = db.tokens.createState({ mode: 'login', provider: 'google' })
+			const emptyTokState = db.states.createState({ mode: 'login', provider: 'google' })
 			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=empty&state=${emptyTokState}`)).status, 502)
 			refreshMode = 'exchange'
 			await assert.rejects(() => providers.google.exchangeCode({ code: 'slow', callbackUrl: 'http://localhost/cb' }), { status: 504, message: /timed out/i })
-			const slowCbState = db.tokens.createState({ mode: 'login', provider: 'google' })
+			const slowCbState = db.states.createState({ mode: 'login', provider: 'google' })
 			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=slow&state=${slowCbState}`)).status, 504)
 			refreshMode = 'exchange_userinfo_slow'
-			const slowUiState = db.tokens.createState({ mode: 'login', provider: 'google' })
+			const slowUiState = db.states.createState({ mode: 'login', provider: 'google' })
 			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=ui-slow&state=${slowUiState}`)).status, 504)
 			refreshMode = 'exchange_net_err'
-			const netErrState = db.tokens.createState({ mode: 'login', provider: 'google' })
+			const netErrState = db.states.createState({ mode: 'login', provider: 'google' })
 			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=net&state=${netErrState}`)).status, 502)
 		})
 	})
@@ -628,25 +630,21 @@ test('upstream OAuth re-auth account continuity, verified_email, refresh dedup, 
 
 test('getActiveSession allows in-flight setup/verify for refreshable OAuth sessions past 1h access expiry but rejects expired non-refreshable sessions', async () => {
 	const { user, app } = createTestSession({ account: 'midflow@example.com', admin: true })
-	const refreshableSess = db.tokens.create({
+	const refreshableSess = db.sessions.create({
 		userId: user.id,
-		provider: 'self',
-		type: 'bearer',
 		admin: 1,
 		expiresAt: Date.now() - 1000,
-		credentials: { refreshToken: 'rt_midflow' }
+		refreshToken: 'rt_midflow'
 	})
-	const hardExpiredSess = db.tokens.create({
+	const hardExpiredSess = db.sessions.create({
 		userId: user.id,
-		provider: 'self',
-		type: 'bearer',
 		admin: 1,
 		expiresAt: Date.now() - 1000
 	})
-	assert.equal(db.tokens.resolveSession(refreshableSess.token), null)
-	assert.ok(db.tokens.getActiveSession(refreshableSess.id))
-	assert.equal(db.tokens.getActiveSession(hardExpiredSess.id), null)
-	const verifyRefreshable = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: refreshableSess.id, admin: true, newAppIds: [app.id] })
+	assert.equal(db.sessions.resolve(refreshableSess.token), null)
+	assert.ok(db.sessions.getActive(refreshableSess.id))
+	assert.equal(db.sessions.getActive(hardExpiredSess.id), null)
+	const verifyRefreshable = db.states.createState({ mode: 'verify', userId: user.id, sessionId: refreshableSess.id, admin: true, newAppIds: [app.id] })
 	const verifyGet = await req('GET', `/oauth/verify?code=${verifyRefreshable}`)
 	assert.equal(verifyGet.status, 200)
 	const verifyPost = await req('POST', '/oauth/verify', {
@@ -655,28 +653,30 @@ test('getActiveSession allows in-flight setup/verify for refreshable OAuth sessi
 	})
 	assert.equal(verifyPost.status, 200)
 	assert.ok(db.links.listBySessionId(refreshableSess.id).some(l => l.appId === app.id))
-	const setupState = db.tokens.createState({ mode: 'setup_link', sessionId: refreshableSess.id })
+	const setupState = db.states.createState({ mode: 'setup_link', sessionId: refreshableSess.id })
 	assert.equal((await req('GET', `/oauth/authorize?code=${encodeURIComponent(setupState)}`)).status, 200)
-	const verifyHardExpired = db.tokens.createState({ mode: 'verify', userId: user.id, sessionId: hardExpiredSess.id, admin: true, newAppIds: [app.id] })
+	const verifyHardExpired = db.states.createState({ mode: 'verify', userId: user.id, sessionId: hardExpiredSess.id, admin: true, newAppIds: [app.id] })
 	assert.equal((await req('GET', `/oauth/verify?code=${verifyHardExpired}`)).status, 400)
 	const staleUpdated = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString()
-	db.sqlite.prepare('UPDATE tokens SET updated = ? WHERE id = ?').run(staleUpdated, refreshableSess.id)
-	assert.equal(db.tokens.getActiveSession(refreshableSess.id), null)
+	db.sqlite.prepare('UPDATE sessions SET updated = ? WHERE id = ?').run(staleUpdated, refreshableSess.id)
+	assert.equal(db.sessions.getActive(refreshableSess.id), null)
 })
 
 test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login, share_app, connect_app, and callback', async () => {
 	const { session: adminSess } = createTestSession({ account: 'oauth-roles@example.com', admin: true })
-	const stripeApp = db.tokens.create({
+	const stripeApp = db.apps.create({
 		userId: adminSess.userId,
 		provider: 'stripe',
 		type: 'static',
-		credentials: { bearer: 'sk_test', baseUrl: 'https://api.stripe.com' }
+		baseUrl: 'https://api.stripe.com',
+		credentials: { bearer: 'sk_test' }
 	})
-	const ghExistingApp = db.tokens.create({
+	const ghExistingApp = db.apps.create({
 		userId: adminSess.userId,
 		provider: 'github',
 		type: 'oauth',
-		credentials: { accessToken: 'gho_reauth', account: 'octo-reauth' }
+		account: 'octo-reauth',
+		credentials: { accessToken: 'gho_reauth' }
 	})
 	await withEnv({ GITHUB_CLIENT_ID: 'gh-id', GITHUB_CLIENT_SECRET: 'gh-sec', OAUTH_PROVIDERS: 'google,github:app' }, async () => {
 		assert.deepEqual(providers.listOauthProviders('auth').map(p => p.id), ['google'])
@@ -730,9 +730,9 @@ test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login,
 		}, async origFetch => {
 			assert.equal((await origFetch(`${baseUrl()}/oauth/callback?code=c&state=${ghAuthRedirect.searchParams.get('state')}`)).status, 200)
 		})
-		const createdGh = db.tokens.listByUserId(adminSess.userId).find(t => t.provider === 'github' && t.name === 'Preset GitHub')
+		const createdGh = db.apps.listByUserId(adminSess.userId).find(t => t.provider === 'github' && t.name === 'Preset GitHub')
 		assert.equal(createdGh?.scopes, 'read:user,delete:packages,admin:org')
-		const clearedNameCode = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSess.id, provider: 'github', name: 'Temporary Label' })
+		const clearedNameCode = db.states.createState({ mode: 'setup_connect', sessionId: adminSess.id, provider: 'github', name: 'Temporary Label' })
 		const clearedConsent = await req('POST', '/providers/github/consent', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({ code: clearedNameCode, app_name: '' }).toString(),
@@ -740,14 +740,14 @@ test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login,
 		})
 		assert.equal(clearedConsent.status, 302)
 		const clearedState = new URL(clearedConsent.headers.get('location')).searchParams.get('state')
-		assert.equal(db.tokens.getState(clearedState).name, null, 'Clearing app_name to "" overrides preset setup.name')
+		assert.equal(db.states.getState(clearedState).name, null, 'Clearing app_name to "" overrides preset setup.name')
 		const ghReauthConnect = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', appId: createdGh.id })).content[0].text)
 		const ghReauthUrl = new URL(ghReauthConnect.connectUrl)
 		const ghReauthHtml = await req('GET', `${ghReauthUrl.pathname}${ghReauthUrl.search}`)
 		assert.equal(JSON.parse(ghReauthHtml.text.match(/const initData = (\{[^\n]+\})/)[1]).params.services, 'packages:delete,org:admin')
-		const loginCbState = db.tokens.createState({ mode: 'login', provider: 'github' })
+		const loginCbState = db.states.createState({ mode: 'login', provider: 'github' })
 		assert.equal((await req('GET', `/oauth/callback?code=c&state=${loginCbState}`)).status, 403)
-		const linkCbState = db.tokens.createState({ mode: 'auth', sessionId: adminSess.id, provider: 'github' })
+		const linkCbState = db.states.createState({ mode: 'auth', sessionId: adminSess.id, provider: 'github' })
 		assert.equal((await req('GET', `/oauth/callback?code=c&state=${linkCbState}`)).status, 403)
 	})
 	await withEnv({ GITHUB_CLIENT_ID: 'gh-id', GITHUB_CLIENT_SECRET: 'gh-sec', OAUTH_PROVIDERS: 'google,github:auth' }, async () => {
@@ -763,9 +763,9 @@ test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login,
 		assert.equal((await mcp(adminSess.token, 'admin', { action: 'connect_app', appId: ghExistingApp.id })).isError, true)
 		assert.equal((await req('GET', '/providers/github/connect')).status, 404)
 		assert.equal((await req('POST', '/providers/github/consent')).status, 404)
-		const connectCbState = db.tokens.createState({ mode: 'connect', sessionId: adminSess.id, provider: 'github' })
+		const connectCbState = db.states.createState({ mode: 'connect', sessionId: adminSess.id, provider: 'github' })
 		assert.equal((await req('GET', `/oauth/callback?code=c&state=${connectCbState}`)).status, 403)
-		const legacyCbState = db.tokens.createState({ mode: null, sessionId: adminSess.id, provider: 'github' })
+		const legacyCbState = db.states.createState({ mode: null, sessionId: adminSess.id, provider: 'github' })
 		assert.equal((await req('GET', `/oauth/callback?code=c&state=${legacyCbState}`)).status, 403)
 		const staticGh = await mcp(adminSess.token, 'admin', { action: 'connect_app', provider: 'github', credentials: 'ghp_static_pat' })
 		assert.equal(staticGh.isError, undefined)
@@ -789,7 +789,7 @@ test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login,
 		assert.equal(localConsent.status, 302)
 		assert.match(localConsent.headers.get('location'), /^https?:\/\/[^/]+\/oauth\/verify\?code=/)
 		assert.equal((await mcp(adminSess.token, 'admin', { action: 'link_login' })).isError, true)
-		db.sqlite.exec("DELETE FROM tokens WHERE provider = 'self'")
+		db.sqlite.exec('DELETE FROM sessions')
 		const bootstrapped = bootstrapLocalAdmin()
 		assert.ok(bootstrapped?.admin)
 	})
@@ -798,7 +798,7 @@ test('OAUTH_PROVIDERS separates auth and app roles across authorize, link_login,
 test('static app browser connect flow supports pre-filled metadata, custom providers, OAuth-provider static tokens, JSON credentials, and credential rotation without exposing keys to agents', async () => {
 	const parseInit = html => JSON.parse(html.match(/const initData = (\{[^\n]+\})/)[1])
 	const { session: adminSess } = createTestSession({ account: 'static-ui@example.com', admin: true })
-	const nonAdmin = db.tokens.create({ userId: adminSess.userId, provider: 'self', admin: 0 })
+	const nonAdmin = db.sessions.create({ userId: adminSess.userId, admin: 0 })
 	const toolsRes = await req('POST', '/mcp', { token: adminSess.token, body: { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} } })
 	const adminSchema = toolsRes.data.result.tools.find(t => t.name === 'admin').inputSchema
 	assert.deepEqual(adminSchema.properties.type.enum, ['oauth', 'static'])
@@ -814,39 +814,39 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	assert.equal((await req('GET', '/apps/connect')).status, 403)
 	assert.equal((await req('GET', '/apps/connect?code=bogus')).status, 403)
 	assert.equal((await req('PUT', `/apps/connect?code=${encodeURIComponent(setupCode)}`)).status, 405)
-	const oauthSetupCode = db.tokens.createState({ mode: 'setup_connect', sessionId: adminSess.id, provider: 'google' })
+	const oauthSetupCode = db.states.createState({ mode: 'setup_connect', sessionId: adminSess.id, provider: 'google' })
 	assert.equal((await req('GET', `/apps/connect?code=${encodeURIComponent(oauthSetupCode)}`)).status, 403)
 	assert.equal((await req('POST', '/apps/connect', {
 		headers: { 'content-type': 'application/json', origin: baseUrl() },
 		body: { code: oauthSetupCode, provider: 'stripe', baseUrl: 'https://api.stripe.com', credentials: 'sk_wrong_mode' }
 	})).status, 403)
-	assert.ok(db.tokens.getState(oauthSetupCode), 'POST /apps/connect must not consume wrong-mode setup code')
+	assert.ok(db.states.getState(oauthSetupCode), 'POST /apps/connect must not consume wrong-mode setup code')
 	const foreignUser = db.users.create()
-	const foreignStatic = db.tokens.create({ userId: foreignUser.id, provider: 'stripe', type: 'static', credentials: { headers: { authorization: 'Bearer sk_foreign' }, baseUrl: 'https://api.stripe.com' } })
-	const ownOauth = db.tokens.create({ userId: adminSess.userId, provider: 'google', type: 'oauth', credentials: { accessToken: 'ya29.own', account: 'own@example.com' } })
+	const foreignStatic = db.apps.create({ userId: foreignUser.id, provider: 'stripe', type: 'static', baseUrl: 'https://api.stripe.com', credentials: { headers: { authorization: 'Bearer sk_foreign' } } })
+	const ownOauth = db.apps.create({ userId: adminSess.userId, provider: 'google', type: 'oauth', account: 'own@example.com', credentials: { accessToken: 'ya29.own' } })
 	for (const badReauth of [foreignStatic, ownOauth]) {
-		const badReauthCode = db.tokens.createState({ mode: 'setup_static', sessionId: adminSess.id, provider: badReauth.provider, reauthAppId: badReauth.id })
+		const badReauthCode = db.states.createState({ mode: 'setup_static', sessionId: adminSess.id, provider: badReauth.provider, reauthAppId: badReauth.id })
 		assert.equal((await req('GET', `/apps/connect?code=${encodeURIComponent(badReauthCode)}`)).status, 403)
 		assert.equal((await req('POST', '/apps/connect', {
 			headers: { 'content-type': 'application/json', origin: baseUrl() },
 			body: { code: badReauthCode, baseUrl: 'https://api.stripe.com', credentials: 'sk_hijack' }
 		})).status, 403)
 	}
-	assert.equal(db.tokens.get(foreignStatic.id).credentials.headers.authorization, 'Bearer sk_foreign')
+	assert.equal(db.apps.get(foreignStatic.id).credentials.headers.authorization, 'Bearer sk_foreign')
 	assert.equal((await req('GET', `/providers/google/connect?code=${encodeURIComponent(setupCode)}`)).status, 403)
 	const wrongConsentRes = await req('POST', '/providers/google/consent', {
 		headers: { 'content-type': 'application/x-www-form-urlencoded', origin: baseUrl() },
 		body: new URLSearchParams({ code: setupCode }).toString()
 	})
 	assert.equal(wrongConsentRes.status, 403)
-	assert.ok(db.tokens.getState(setupCode), 'POST /providers/:provider/consent must not consume wrong-mode setup code')
+	assert.ok(db.states.getState(setupCode), 'POST /providers/:provider/consent must not consume wrong-mode setup code')
 	const wrongVerifyRes = await req('POST', '/oauth/verify', {
 		headers: { 'content-type': 'application/x-www-form-urlencoded', origin: baseUrl() },
 		body: new URLSearchParams({ code: setupCode }).toString()
 	})
 	assert.equal(wrongVerifyRes.status, 400)
-	assert.ok(db.tokens.getState(setupCode), 'POST /oauth/verify must not consume wrong-mode setup code')
-	const nonAdminStatic = db.tokens.createState({ mode: 'setup_static', sessionId: nonAdmin.id, provider: 'stripe' })
+	assert.ok(db.states.getState(setupCode), 'POST /oauth/verify must not consume wrong-mode setup code')
+	const nonAdminStatic = db.states.createState({ mode: 'setup_static', sessionId: nonAdmin.id, provider: 'stripe' })
 	assert.equal((await req('GET', `/apps/connect?code=${encodeURIComponent(nonAdminStatic)}`)).status, 403)
 	const pageRes = await req('GET', `/apps/connect?code=${encodeURIComponent(setupCode)}`)
 	assert.equal(pageRes.status, 200)
@@ -895,12 +895,12 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	assert.equal(okSubmit.data.connected, true)
 	assert.equal(okSubmit.data.updated, false)
 	assert.equal(JSON.stringify(okSubmit.data).includes('sk_live_browser_secret'), false)
-	const createdStripe = db.tokens.get(okSubmit.data.appId)
+	const createdStripe = db.apps.get(okSubmit.data.appId)
 	assert.equal(createdStripe.type, 'static')
 	assert.equal(createdStripe.provider, 'stripe')
 	assert.equal(createdStripe.name, 'Billing Prod')
-	assert.equal(createdStripe.credentials.baseUrl, 'https://api.stripe.com')
-	assert.equal(createdStripe.credentials.account, undefined)
+	assert.equal(createdStripe.baseUrl, 'https://api.stripe.com')
+	assert.equal(createdStripe.account, null)
 	assert.equal(createdStripe.credentials.headers.authorization, 'Bearer sk_live_browser_secret')
 	assert.ok(db.links.listBySessionId(adminSess.id).some(l => l.appId === createdStripe.id), 'static browser connect auto-links new app to requesting session')
 	assert.equal((await req('POST', '/apps/connect', {
@@ -933,8 +933,8 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	assert.equal(rotatePreserve.status, 200)
 	assert.equal(rotatePreserve.data.updated, true)
 	assert.equal(rotatePreserve.data.appId, createdStripe.id)
-	assert.equal(db.tokens.get(createdStripe.id).name, 'Billing Prod', 'Omitting name on rotation preserves existing app name')
-	assert.equal(db.tokens.get(createdStripe.id).credentials.baseUrl, 'https://api.stripe.com', 'Omitting baseUrl on rotation preserves existing baseUrl')
+	assert.equal(db.apps.get(createdStripe.id).name, 'Billing Prod', 'Omitting name on rotation preserves existing app name')
+	assert.equal(db.apps.get(createdStripe.id).baseUrl, 'https://api.stripe.com', 'Omitting baseUrl on rotation preserves existing baseUrl')
 	const rotateClearStart = JSON.parse((await mcp(adminSess.token, 'admin', { action: 'connect_app', appId: createdStripe.id })).content[0].text)
 	const rotateClearCode = new URL(rotateClearStart.connectUrl).searchParams.get('code')
 	const rotateSubmit = await req('POST', '/apps/connect', {
@@ -950,10 +950,10 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 	assert.equal(rotateSubmit.status, 200)
 	assert.equal(rotateSubmit.data.updated, true)
 	assert.equal(rotateSubmit.data.appId, createdStripe.id)
-	const updatedStripe = db.tokens.get(createdStripe.id)
+	const updatedStripe = db.apps.get(createdStripe.id)
 	assert.equal(updatedStripe.name, 'Stripe', 'Explicit empty name resets app name to provider default')
-	assert.equal(updatedStripe.credentials.baseUrl, 'https://api.stripe.com/v2')
-	assert.equal(updatedStripe.credentials.account, undefined)
+	assert.equal(updatedStripe.baseUrl, 'https://api.stripe.com/v2')
+	assert.equal(updatedStripe.account, null)
 	assert.equal(updatedStripe.credentials.headers['x-api-key'], 'sk_rotated')
 	assert.equal(updatedStripe.credentials.headers.authorization, undefined)
 	assert.equal(updatedStripe.credentials.query.api_version, '2026-01-01')
@@ -983,7 +983,7 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		}
 	})
 	assert.equal(blankSubmit.status, 200)
-	const createdAnthropic = db.tokens.get(blankSubmit.data.appId)
+	const createdAnthropic = db.apps.get(blankSubmit.data.appId)
 	assert.equal(createdAnthropic.provider, 'anthropic')
 	assert.equal(createdAnthropic.credentials.headers['anthropic-version'], '2023-06-01')
 	await withEnv({ GITHUB_CLIENT_ID: 'gh-id', GITHUB_CLIENT_SECRET: 'gh-sec' }, async () => {
@@ -998,7 +998,7 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 			body: new URLSearchParams({ code: ghStaticCode, provider: 'github', credentials: 'ghp_form_secret' }).toString()
 		})
 		assert.equal(nonJsonSubmit.status, 415)
-		assert.ok(db.tokens.getState(ghStaticCode), 'Non-JSON submission must not consume setupCode')
+		assert.ok(db.states.getState(ghStaticCode), 'Non-JSON submission must not consume setupCode')
 		const ghJsonSubmit = await req('POST', '/apps/connect', {
 			headers: { 'content-type': 'application/json', origin: baseUrl() },
 			body: {
@@ -1013,8 +1013,8 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		assert.equal(ghJsonSubmit.data.title, 'GitHub Connected')
 		assert.equal(ghJsonSubmit.data.subtitle, 'Connected GitHub PAT')
 		assert.equal(JSON.stringify(ghJsonSubmit.data).includes('ghp_form_secret'), false)
-		const createdGhStatic = db.tokens.listByUserId(adminSess.userId).find(t => t.provider === 'github' && t.type === 'static' && t.name === 'GitHub PAT')
-		assert.equal(createdGhStatic.credentials.baseUrl, 'https://api.github.com')
+		const createdGhStatic = db.apps.listByUserId(adminSess.userId).find(t => t.provider === 'github' && t.type === 'static' && t.name === 'GitHub PAT')
+		assert.equal(createdGhStatic.baseUrl, 'https://api.github.com')
 		assert.equal(createdGhStatic.credentials.headers.authorization, 'Bearer ghp_form_secret')
 	})
 	for (const modeCase of [
@@ -1043,13 +1043,13 @@ test('static app browser connect flow supports pre-filled metadata, custom provi
 		}
 	]) {
 		const modeProv = `custom_${modeCase.tag}`
-		const modeCode = db.tokens.createState({ mode: 'setup_static', sessionId: adminSess.id, provider: modeProv, baseUrl: 'https://api.example.com' })
+		const modeCode = db.states.createState({ mode: 'setup_static', sessionId: adminSess.id, provider: modeProv, baseUrl: 'https://api.example.com' })
 		const modeRes = await req('POST', '/apps/connect', {
 			headers: { 'content-type': 'application/json', origin: baseUrl() },
 			body: { code: modeCode, provider: modeProv, baseUrl: 'https://api.example.com', credentials: modeCase.credentials }
 		})
 		assert.equal(modeRes.status, 200)
-		const stored = db.tokens.listByUserId(adminSess.userId).find(t => t.provider === modeProv)
+		const stored = db.apps.listByUserId(adminSess.userId).find(t => t.provider === modeProv)
 		modeCase.verify(stored.credentials)
 	}
 })
@@ -1098,12 +1098,13 @@ test('buildAuthUrl deduplicates implied weaker scopes without dropping distinct 
 
 test('OAuth connect redirect and error responses emit safe [oauth] diagnostic logs without secrets', async () => {
 	const { session } = createTestSession({ account: 'log-owner@example.com', admin: 1 })
-	const app = db.tokens.create({
+	const app = db.apps.create({
 		userId: session.userId,
 		provider: 'google',
 		type: 'oauth',
 		name: 'Google App',
-		credentials: { accessToken: 'tok', account: 'secret-email@example.com' }
+		account: 'secret-email@example.com',
+		credentials: { accessToken: 'tok' }
 	})
 	const logs = []
 	const warns = []
@@ -1153,7 +1154,7 @@ test('OAuth connect redirect and error responses emit safe [oauth] diagnostic lo
 			assert.equal((await req('GET', '/oauth/callback?code=c&state=missing-state')).status, 403)
 			assert.ok(warns.some(line => line.includes('[oauth] GET /oauth/callback rejected: invalid or expired OAuth state')))
 			createTestSession({ account: 'conflict-email@example.com' })
-			const conflictState = db.tokens.createState({ mode: 'auth', sessionId: session.id, provider: 'google', merge: false })
+			const conflictState = db.states.createState({ mode: 'auth', sessionId: session.id, provider: 'google', merge: false })
 			await withMockFetch(async (input, init, origFetch) => {
 				const u = typeof input === 'string' ? input : input.url
 				if (u === 'https://oauth2.googleapis.com/token') return Response.json({ access_token: 'tok', expires_in: 3600 })
@@ -1176,19 +1177,20 @@ test('OAuth connect redirect and error responses emit safe [oauth] diagnostic lo
 
 test('connect page serves /oauth-scopes.js and emits generic non-secret authUrlWarning matching buildAuthUrl length', async () => {
 	const { session } = createTestSession({ account: 'warn-owner@example.com', admin: 1 })
-	const app = db.tokens.create({
+	const app = db.apps.create({
 		userId: session.userId,
 		provider: 'google',
 		type: 'oauth',
 		name: 'Warn App',
-		credentials: { accessToken: 'tok', account: 'private-owner@example.com' }
+		account: 'private-owner@example.com',
+		credentials: { accessToken: 'tok' }
 	})
 	await withEnv({ GOOGLE_CLIENT_ID: 'g-cid', GOOGLE_CLIENT_SECRET: 'g-sec', GITHUB_CLIENT_ID: 'gh-cid', GITHUB_CLIENT_SECRET: 'gh-sec' }, async () => {
 		const jsGet = await req('GET', '/oauth-scopes.js')
 		assert.equal(jsGet.status, 200)
 		assert.match(jsGet.headers.get('content-type') || '', /^application\/javascript\b/)
 		assert.equal((await req('HEAD', '/oauth-scopes.js')).status, 200)
-		const gSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'google', reauthAppId: app.id })
+		const gSetup = db.states.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'google', reauthAppId: app.id })
 		const gHtml = await req('GET', `/providers/google/connect?code=${gSetup}`)
 		assert.equal(gHtml.status, 200)
 		assert.ok(!gHtml.text.includes('private-owner@example.com'), 'connect page authUrlWarning must redact loginHint email')
@@ -1209,7 +1211,7 @@ test('connect page serves /oauth-scopes.js and emits generic non-secret authUrlW
 		}).length
 		assert.equal(measuredAll, builtAll, 'Frontend measureAuthUrlLength must match buildAuthUrl length exactly')
 		assert.ok(measuredAll > gInit.authUrlWarning.maxLength)
-		const ghSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'github' })
+		const ghSetup = db.states.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'github' })
 		const ghHtml = await req('GET', `/providers/github/connect?code=${ghSetup}`)
 		assert.equal(ghHtml.status, 200)
 		const ghInit = JSON.parse(ghHtml.text.match(/const initData = (.*?)\n/)[1])
@@ -1221,16 +1223,17 @@ test('connect page serves /oauth-scopes.js and emits generic non-secret authUrlW
 
 test('findSubsumedTokens derives forced subsumed modes generically for Google, GitHub, and reauth connect pages', async () => {
 	const { session } = createTestSession({ account: 'subsumed-owner@example.com', admin: 1 })
-	const app = db.tokens.create({
+	const app = db.apps.create({
 		userId: session.userId,
 		provider: 'google',
 		type: 'oauth',
 		name: 'Subsumed App',
+		account: 'subsumed@example.com',
 		scopes: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/drive.activity https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/yt-analytics.readonly',
-		credentials: { accessToken: 'tok', account: 'subsumed@example.com' }
+		credentials: { accessToken: 'tok' }
 	})
 	await withEnv({ GOOGLE_CLIENT_ID: 'g-cid', GOOGLE_CLIENT_SECRET: 'g-sec', GITHUB_CLIENT_ID: 'gh-cid', GITHUB_CLIENT_SECRET: 'gh-sec' }, async () => {
-		const gSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'google', reauthAppId: app.id })
+		const gSetup = db.states.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'google', reauthAppId: app.id })
 		const gHtml = await req('GET', `/providers/google/connect?code=${gSetup}`)
 		assert.equal(gHtml.status, 200)
 		const gInit = JSON.parse(gHtml.text.match(/const initData = (.*?)\n/)[1])
@@ -1253,7 +1256,7 @@ test('findSubsumedTokens derives forced subsumed modes generically for Google, G
 		assert.ok(!gAllWrite.has('photos:read'))
 		assert.ok(!gAllWrite.has('apps_script:read'))
 		assert.ok(!gAllWrite.has('admin:read'))
-		const ghSetup = db.tokens.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'github' })
+		const ghSetup = db.states.createState({ mode: 'setup_connect', sessionId: session.id, provider: 'github' })
 		const ghInit = JSON.parse((await req('GET', `/providers/github/connect?code=${ghSetup}`)).text.match(/const initData = (.*?)\n/)[1])
 		const ghSubsumed = findSubsumedTokens(ghInit.services, ['org:admin', 'repo:write', 'packages:write'], ghInit.impliedScopes)
 		assert.ok(ghSubsumed.has('org:write'))

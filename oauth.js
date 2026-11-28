@@ -299,7 +299,7 @@ function validateAuthorizeParams (query) {
 function resolveSetupState (setup, expectedMode, expectedProvider = null) {
 	if (!setup || setup.mode !== expectedMode) return null
 	if (expectedProvider && setup.provider && setup.provider !== expectedProvider) return null
-	const session = setup.sessionId ? db.tokens.getActiveSession(setup.sessionId) : null
+	const session = setup.sessionId ? db.sessions.getActive(setup.sessionId) : null
 	if (!session || !session.admin) return null
 	return session
 }
@@ -316,14 +316,14 @@ function buildSetupContext (setup, { mode, providerId = null, appType = null } =
 
 function loadSetupContext (code, opts = {}, validate = null) {
 	if (!code) return null
-	const ctx = buildSetupContext(db.tokens.getState(code), opts)
+	const ctx = buildSetupContext(db.states.getState(code), opts)
 	if (!ctx) return null
 	return validate ? validate(ctx) : ctx
 }
 
 function consumeSetupContext (code, opts = {}, validate = null) {
 	if (!code) return null
-	return db.tokens.consumeState(code, setup => {
+	return db.states.consumeState(code, setup => {
 		const ctx = buildSetupContext(setup, opts)
 		if (!ctx) return null
 		return validate ? validate(ctx) : ctx
@@ -386,22 +386,35 @@ async function handleAuthorize (req, res, query) {
 	sendInitHtml(res, AUTHORIZE_HTML, initData)
 }
 
-function filterValidAppIds (userId, appIds = []) {
+function listUserApps (userId) {
+	return [
+		...db.apps.listByUserId(userId),
+		...db.shares.listByUserId(userId)
+	]
+}
+
+function filterValidTargets (userId, appIds = []) {
 	const valid = []
-	for (const appId of appIds) {
-		const app = db.tokens.get(appId)
-		if (app && app.userId === userId && db.tokens.isUpstreamApp(app, { allowShare: true })) {
-			valid.push(app.id)
+	for (const id of appIds) {
+		const app = db.apps.get(id)
+		if (app && app.userId === userId) {
+			valid.push({ targetId: app.id, appId: app.id, shareId: null })
+			continue
+		}
+		const share = db.shares.get(id)
+		if (share && share.userId === userId) {
+			valid.push({ targetId: share.id, appId: share.appId, shareId: share.id })
 		}
 	}
 	return valid
 }
 
 function linkSessionApps (sessionId, userId, appIds = []) {
-	for (const appId of filterValidAppIds(userId, appIds)) {
+	for (const target of filterValidTargets(userId, appIds)) {
 		db.links.create({
 			sessionId,
-			appId
+			appId: target.appId,
+			shareId: target.shareId
 		})
 	}
 }
@@ -411,13 +424,13 @@ function completeLogin (req, res, { user, clientId, clientRedirectUri, clientSta
 	const name = rawName || (admin ? 'Admin Session' : 'Default Session')
 	const clientIp = ip || getClientIp(req)
 	if (clientRedirectUri) {
-		const authCode = db.tokens.createAuthCode({
+		const authCode = db.states.createAuthCode({
 			userId: user.id,
 			name,
 			admin: admin ? 1 : 0,
 			ip: clientIp,
 			ua,
-			appIds: filterValidAppIds(user.id, appIds),
+			appIds: filterValidTargets(user.id, appIds).map(t => t.targetId),
 			clientId,
 			clientRedirectUri,
 			codeChallenge,
@@ -429,10 +442,8 @@ function completeLogin (req, res, { user, clientId, clientRedirectUri, clientSta
 		redirect(res, target.toString())
 		return
 	}
-	const session = db.tokens.create({
+	const session = db.sessions.create({
 		userId: user.id,
-		provider: 'self',
-		type: 'bearer',
 		name,
 		admin: admin ? 1 : 0,
 		ip: clientIp,
@@ -444,12 +455,12 @@ function completeLogin (req, res, { user, clientId, clientRedirectUri, clientSta
 }
 
 function redirectToVerifyOrComplete (req, res, base, opts) {
-	const userApps = db.tokens.listByUserId(opts.user.id).filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
+	const userApps = listUserApps(opts.user.id)
 	if (userApps.length === 0) {
 		completeLogin(req, res, opts)
 		return
 	}
-	const verifyCode = db.tokens.createState({
+	const verifyCode = db.states.createState({
 		mode: 'verify',
 		userId: opts.user.id,
 		provider: opts.provider || null,
@@ -509,7 +520,7 @@ async function handleAuthorizeConsent (req, res) {
 			warnSendText(res, 'Access denied: local token sign-in is disabled when OAuth providers are configured.', 403, 'POST /oauth/authorize/consent rejected: local token sign-in disabled')
 			return
 		}
-		const adminSession = db.tokens.getByToken(localToken)
+		const adminSession = db.sessions.getByToken(localToken)
 		const user = adminSession?.admin ? db.users.get(adminSession.userId) : null
 		if (!user) {
 			warnSendText(res, 'Access denied: valid admin bearer token required.', 403, 'POST /oauth/authorize/consent rejected: valid admin bearer token required')
@@ -580,7 +591,7 @@ async function handleAuthorizeConsent (req, res) {
 		}
 	}
 	const callbackUrl = `${base}/oauth/callback`
-	const stateToken = db.tokens.createState({
+	const stateToken = db.states.createState({
 		mode: linkSession ? 'auth' : 'login',
 		provider: provider.id,
 		clientId,
@@ -613,14 +624,14 @@ function renderAuthResult (res, merged, account) {
 }
 
 function appIdentityKey (app) {
-	return app.type === 'share' ? `share:${app.credentials?.appId || app.id}` : `app:${app.id}`
+	return app.type === 'share' ? `share:${app.appId}` : `app:${app.id}`
 }
 
 function validateVerifyState (state) {
 	const user = state?.mode === 'verify' && state.userId ? db.users.get(state.userId) : null
 	if (!user) return null
 	if (!state.sessionId) return { state, user, targetSession: null }
-	const targetSession = db.tokens.getActiveSession(state.sessionId)
+	const targetSession = db.sessions.getActive(state.sessionId)
 	if (!targetSession || targetSession.userId !== user.id) return null
 	return { state, user, targetSession }
 }
@@ -632,25 +643,25 @@ async function handleVerify (req, res, query) {
 			warnSendText(res, 'Invalid or expired verification code', 400, 'GET /oauth/verify rejected: missing or malformed verification code')
 			return
 		}
-		const ctx = validateVerifyState(db.tokens.getState(code))
+		const ctx = validateVerifyState(db.states.getState(code))
 		if (!ctx) {
 			warnSendText(res, 'Invalid or expired verification code', 400, 'GET /oauth/verify rejected: invalid or expired verification code')
 			return
 		}
 		const { state, user: existingUser, targetSession } = ctx
-		const userApps = db.tokens.listByUserId(existingUser.id).filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
+		const userApps = listUserApps(existingUser.id)
 		let appsHtml = ''
 		if (userApps.length > 0) {
-			const linkedIds = targetSession ? new Set(db.links.listBySessionId(targetSession.id).map(l => l.appId)) : null
+			const linkedTargetIds = targetSession ? new Set(db.links.listBySessionId(targetSession.id).map(l => l.targetId)) : null
 			const newIds = targetSession ? new Set(state.newAppIds || []) : null
 			const items = userApps.map(app => {
 				const provider = getProvider(app.provider)
-				const account = app.credentials?.account || ''
+				const account = app.type === 'share' ? (app.appAccount || '') : (app.account || '')
 				const scopeSummary = summarizeScopes(app.scopes, provider?.services)
 				const baseName = app.name || provider?.name || `${app.provider} app`
 				const label = scopeSummary ? `${baseName} · ${scopeSummary}` : baseName
 				const isChecked = targetSession
-					? (linkedIds.has(app.id) || (Boolean(state.admin) && newIds.has(app.id)))
+					? (linkedTargetIds.has(app.id) || (Boolean(state.admin) && newIds.has(app.id)))
 					: Boolean(state.admin)
 				const checkedAttr = isChecked ? ' checked' : ''
 				return `<label class="app-item"><input type="checkbox" name="app_id" value="${escapeHtml(app.id)}"${checkedAttr}><span>${escapeHtml(label)}</span>${account ? `<span class="app-meta">${escapeHtml(account)}</span>` : ''}</label>`
@@ -673,22 +684,23 @@ async function handleVerify (req, res, query) {
 		warnSendText(res, 'Missing verification code.', 400, 'POST /oauth/verify rejected: missing verification code')
 		return
 	}
-	const ctx = db.tokens.consumeState(code, validateVerifyState)
+	const ctx = db.states.consumeState(code, validateVerifyState)
 	if (!ctx) {
 		warnSendText(res, 'Invalid or expired verification code', 400, 'POST /oauth/verify rejected: invalid or expired verification code')
 		return
 	}
 	const { state, user, targetSession } = ctx
 	if (targetSession) {
-		const selectedIds = new Set(filterValidAppIds(user.id, params.getAll('app_id')))
-		const existingLinkedIds = new Set(db.links.listBySessionId(targetSession.id).map(l => l.appId))
-		for (const appId of selectedIds) {
-			if (!existingLinkedIds.has(appId)) {
-				db.links.create({ sessionId: targetSession.id, appId })
+		const selectedTargets = filterValidTargets(user.id, params.getAll('app_id'))
+		const selectedAppIds = new Set(selectedTargets.map(t => t.appId))
+		const existingLinkedAppIds = new Set(db.links.listBySessionId(targetSession.id).map(l => l.appId))
+		for (const target of selectedTargets) {
+			if (!existingLinkedAppIds.has(target.appId)) {
+				db.links.create({ sessionId: targetSession.id, appId: target.appId, shareId: target.shareId })
 			}
 		}
-		for (const appId of existingLinkedIds) {
-			if (!selectedIds.has(appId)) {
+		for (const appId of existingLinkedAppIds) {
+			if (!selectedAppIds.has(appId)) {
 				db.links.remove(targetSession.id, appId)
 			}
 		}
@@ -711,7 +723,7 @@ async function handleVerify (req, res, query) {
 
 function getOwnedApp (session, appId, { providerId = null, type = null } = {}) {
 	if (!session?.admin || !appId) return null
-	const app = db.tokens.get(appId)
+	const app = db.apps.get(appId)
 	if (!app || app.userId !== session.userId) return null
 	if (providerId && app.provider !== providerId) return null
 	if (type && app.type !== type) return null
@@ -739,7 +751,7 @@ function handleStaticConnectGet (res, query) {
 		updateMode: Boolean(existingApp),
 		provider: providerId,
 		name: existingApp ? (existingApp.name || '') : (setup.name || ''),
-		baseUrl: existingApp ? (existingApp.credentials?.baseUrl || providerDef?.baseUrl || '') : (setup.baseUrl || providerDef?.baseUrl || '')
+		baseUrl: existingApp ? (existingApp.baseUrl || providerDef?.baseUrl || '') : (setup.baseUrl || providerDef?.baseUrl || '')
 	}
 	sendInitHtml(res, STATIC_CONNECT_HTML, initData)
 }
@@ -763,13 +775,13 @@ function validateStaticSubmission (body, setup, existingApp) {
 	const cleanBaseUrl = body.baseUrl !== undefined ? optionalString(body.baseUrl, 'baseUrl') : undefined
 	const rawBaseUrl = cleanBaseUrl !== undefined
 		? (cleanBaseUrl || providerDef?.baseUrl || null)
-		: (existingApp?.credentials?.baseUrl || setup.baseUrl || providerDef?.baseUrl || null)
-	const creds = api.auth.buildStaticCredentials({
+		: (existingApp?.baseUrl || setup.baseUrl || providerDef?.baseUrl || null)
+	const { credentials, baseUrl } = api.auth.buildStaticCredentials({
 		credentials: body.credentials,
 		baseUrl: rawBaseUrl,
 		providerDef
 	})
-	return { providerDef, cleanName, creds }
+	return { providerDef, cleanName, credentials, baseUrl }
 }
 
 async function handleStaticConnectPost (req, res) {
@@ -805,22 +817,24 @@ async function handleStaticConnectPost (req, res) {
 		return
 	}
 	const { setup, session: activeSession, existingApp: target, validated } = consumed
-	const { providerDef, cleanName, creds } = validated
+	const { providerDef, cleanName, credentials, baseUrl } = validated
 	const isUpdate = Boolean(target)
 	let appId
 	let appName
 	if (isUpdate) {
 		appName = cleanName !== undefined ? (cleanName || providerDef.name) : (target.name || providerDef.name)
-		db.tokens.updateCredentials(target.id, { name: appName, credentials: creds })
+		db.apps.update(target.id, { name: appName, baseUrl, credentials })
 		appId = target.id
 	} else {
 		appName = (cleanName !== undefined ? cleanName : setup.name) || providerDef.name
-		const created = db.tokens.create({
+		const created = db.apps.create({
 			userId: activeSession.userId,
 			provider: providerDef.id,
 			type: 'static',
 			name: appName,
-			credentials: creds
+			baseUrl,
+			credentials,
+			policy: setup.policy ?? null
 		})
 		db.links.create({ sessionId: activeSession.id, appId: created.id })
 		appId = created.id
@@ -886,7 +900,7 @@ async function handleProviderConnect (req, res, query, providerName = 'google', 
 		}
 	}
 	const warnMax = provider.warnAuthUrlLength
-	const loginHint = existingApp?.credentials?.account || null
+	const loginHint = existingApp?.account || null
 	const maskedLoginHint = loginHint ? String(loginHint).replace(/[^\s@]/g, 'x') : null
 	const initData = {
 		params: resolvedParams,
@@ -957,14 +971,15 @@ async function handleProviderConsent (req, res, providerName = 'google') {
 	const name = rawAppName ? String(rawAppName).trim() : null
 	const base = getBaseUrl(req)
 	const callbackUrl = `${base}/oauth/callback`
-	const loginHint = existingApp?.credentials?.account || null
+	const loginHint = existingApp?.account || null
 	const ip = getClientIp(req)
-	const stateToken = db.tokens.createState({
+	const stateToken = db.states.createState({
 		mode: 'connect',
 		sessionId: session.id,
 		reauthAppId,
 		setupStateId: setup.id,
 		name,
+		policy: setup.policy ?? null,
 		provider: provider.id,
 		ip
 	})
@@ -993,7 +1008,7 @@ async function handleCallback (req, res, query) {
 		warnSendText(res, `OAuth Error: ${errorName}`, 400, `GET /oauth/callback failed: upstream error=${detail}`)
 		return
 	}
-	const oauthState = db.tokens.consumeState(rawState)
+	const oauthState = db.states.consumeState(rawState)
 	if (!oauthState || (oauthState.mode !== null && oauthState.mode !== 'connect' && oauthState.mode !== 'auth' && oauthState.mode !== 'login')) {
 		warnSendText(res, 'Invalid or expired OAuth state (CSRF verification failed). Please try connecting again.', 403, 'GET /oauth/callback rejected: invalid or expired OAuth state')
 		return
@@ -1017,7 +1032,7 @@ async function handleCallback (req, res, query) {
 	}
 	const { accessToken, refreshToken, expiresAt, scopes, account } = exchanged
 	if (oauthState.mode === 'auth') {
-		const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
+		const session = oauthState.sessionId ? db.sessions.getActive(oauthState.sessionId) : null
 		if (!session || !session.admin) {
 			warnSendText(res, 'Access denied: admin session required.', 403, `GET /oauth/callback (${provider.id} auth) rejected: admin session required`)
 			return
@@ -1036,14 +1051,10 @@ async function handleCallback (req, res, query) {
 			}
 		})) return
 		const allowUnscoped = shouldClaimUnscoped(provider.id, cleanAccount, { verifiedEmail: provider.verifiedEmail })
-		const beforeAppKeys = new Set(
-			db.tokens.listByUserId(session.userId)
-				.filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
-				.map(appIdentityKey)
-		)
+		const beforeAppKeys = new Set(listUserApps(session.userId).map(appIdentityKey))
 		try {
 			db.transaction(() => {
-				if (oauthState.setupStateId && !db.tokens.consumeStateById(oauthState.setupStateId)) {
+				if (oauthState.setupStateId && !db.states.consumeStateById(oauthState.setupStateId)) {
 					throw httpError(403, 'Access denied: invalid or expired setup code.')
 				}
 				db.logins.upsert({
@@ -1065,13 +1076,11 @@ async function handleCallback (req, res, query) {
 			}
 			throw err
 		}
-		const updatedSession = db.tokens.getActiveSession(session.id)
-		const afterApps = updatedSession
-			? db.tokens.listByUserId(updatedSession.userId).filter(t => db.tokens.isUpstreamApp(t, { allowShare: true }))
-			: []
+		const updatedSession = db.sessions.getActive(session.id)
+		const afterApps = updatedSession ? listUserApps(updatedSession.userId) : []
 		const newAppIds = afterApps.filter(a => !beforeAppKeys.has(appIdentityKey(a))).map(a => a.id)
 		if (updatedSession && newAppIds.length > 0) {
-			const verifyCode = db.tokens.createState({
+			const verifyCode = db.states.createState({
 				mode: 'verify',
 				userId: updatedSession.userId,
 				sessionId: updatedSession.id,
@@ -1107,7 +1116,7 @@ async function handleCallback (req, res, query) {
 		})
 		return
 	}
-	const session = oauthState.sessionId ? db.tokens.getActiveSession(oauthState.sessionId) : null
+	const session = oauthState.sessionId ? db.sessions.getActive(oauthState.sessionId) : null
 	if (!session || !session.admin) {
 		warnSendText(res, 'Access denied: admin session required.', 403, `GET /oauth/callback (${provider.id} connect) rejected: admin session required`)
 		return
@@ -1119,25 +1128,23 @@ async function handleCallback (req, res, query) {
 			warnSendText(res, 'Access denied: unauthorized re-authentication request.', 403, `GET /oauth/callback (${provider.id} connect) rejected: unauthorized re-authentication request`)
 			return
 		}
-		const expectedAccount = existingApp.credentials?.account
+		const expectedAccount = existingApp.account
 		if (expectedAccount && String(account).trim().toLowerCase() !== String(expectedAccount).trim().toLowerCase()) {
 			warnSendText(res, `Re-authentication failed: expected account "${expectedAccount}", got "${account}".`, 409, `GET /oauth/callback (${provider.id} reauth=${existingApp.id}) failed: upstream account mismatch`)
 			return
 		}
 	}
-	if (oauthState.setupStateId && !db.tokens.consumeStateById(oauthState.setupStateId)) {
+	if (oauthState.setupStateId && !db.states.consumeStateById(oauthState.setupStateId)) {
 		warnSendText(res, 'Access denied: invalid or expired setup code.', 403, `GET /oauth/callback (${provider.id} connect) rejected: invalid or expired setup code`)
 		return
 	}
 	if (existingApp) {
-		const updatedCreds = {
-			...existingApp.credentials,
-			accessToken,
-			refreshToken: refreshToken || existingApp.credentials?.refreshToken || null,
-			account
-		}
-		db.tokens.updateCredentials(existingApp.id, {
-			credentials: updatedCreds,
+		db.apps.update(existingApp.id, {
+			credentials: {
+				accessToken,
+				refreshToken: refreshToken || existingApp.credentials?.refreshToken || null
+			},
+			account,
 			expiresAt,
 			scopes: scopes || existingApp.scopes
 		})
@@ -1149,22 +1156,23 @@ async function handleCallback (req, res, query) {
 		return
 	}
 	const appName = oauthState.name || provider.name
-	const appToken = db.tokens.create({
+	const appRecord = db.apps.create({
 		userId: session.userId,
 		provider: provider.id,
 		type: 'oauth',
 		name: appName,
+		account,
 		credentials: {
 			accessToken,
-			refreshToken: refreshToken || null,
-			account
+			refreshToken: refreshToken || null
 		},
 		expiresAt,
-		scopes: scopes || null
+		scopes: scopes || null,
+		policy: oauthState.policy ?? null
 	})
 	db.links.create({
 		sessionId: session.id,
-		appId: appToken.id
+		appId: appRecord.id
 	})
 	sendHtml(res, renderCardPage(
 		`${provider.name} Connected`,
@@ -1208,7 +1216,7 @@ async function handleToken (req, res) {
 			sendJson(res, { error: 'invalid_request', error_description: 'Missing refresh_token' }, 400)
 			return
 		}
-		const session = db.tokens.refreshOauthSession(refreshToken)
+		const session = db.sessions.refresh(refreshToken)
 		if (!session) {
 			console.warn('[oauth] Token refresh failed: Invalid or expired refresh token')
 			sendJson(res, { error: 'invalid_grant', error_description: 'Invalid or expired refresh token' }, 400)
@@ -1217,7 +1225,7 @@ async function handleToken (req, res) {
 		const expiresIn = session.expiresAt ? Math.max(1, Math.ceil((session.expiresAt - Date.now()) / 1000)) : 3600
 		sendJson(res, {
 			access_token: session.token,
-			refresh_token: session.credentials?.refreshToken,
+			refresh_token: session.refreshToken,
 			token_type: 'Bearer',
 			expires_in: expiresIn,
 			scope: 'mcp'
@@ -1232,7 +1240,7 @@ async function handleToken (req, res) {
 		sendJson(res, { error: 'invalid_request', error_description: 'Missing code' }, 400)
 		return
 	}
-	const authCode = db.tokens.consumeAuthCode(code)
+	const authCode = db.states.consumeAuthCode(code)
 	if (!authCode) {
 		console.warn('[oauth] Token exchange failed: Invalid or expired authorization code')
 		sendJson(res, { error: 'invalid_grant', error_description: 'Invalid or expired authorization code' }, 400)
@@ -1272,12 +1280,10 @@ async function handleToken (req, res) {
 		return
 	}
 	const withRefresh = !authCode.clientId?.startsWith('client_bearer_')
-	const session = db.tokens.create({
+	const session = db.sessions.create({
 		userId: user.id,
-		provider: 'self',
-		type: 'bearer',
 		name: authCode.name || (authCode.admin ? 'Admin Session' : 'Default Session'),
-		credentials: withRefresh ? { refreshToken: randomUUID() } : null,
+		refreshToken: withRefresh ? randomUUID() : null,
 		expiresAt: withRefresh ? Date.now() + 3600 * 1000 : null,
 		admin: authCode.admin ? 1 : 0,
 		ip: authCode.ip || getClientIp(req),
@@ -1294,7 +1300,7 @@ async function handleToken (req, res) {
 	}
 	sendJson(res, {
 		access_token: session.token,
-		refresh_token: session.credentials?.refreshToken,
+		refresh_token: session.refreshToken,
 		token_type: 'Bearer',
 		expires_in: 3600,
 		scope: 'mcp'
@@ -1319,9 +1325,9 @@ async function handleRevoke (req, res) {
 		sendJson(res, { error: 'invalid_request', error_description: 'Missing token parameter' }, 400)
 		return
 	}
-	const session = db.tokens.findRevocable(token)
+	const session = db.sessions.findRevocable(token)
 	if (session) {
-		db.tokens.remove(session.id)
+		db.sessions.remove(session.id)
 	}
 	sendJson(res, { status: 'ok' })
 }

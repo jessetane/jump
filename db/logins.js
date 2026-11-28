@@ -1,6 +1,6 @@
 import { sqlite, transaction } from './index.js'
 import * as users from './users.js'
-import * as tokens from './tokens.js'
+import * as shares from './shares.js'
 import { parseAccountSpec, httpError } from '../util.js'
 import { randomUUID } from 'node:crypto'
 
@@ -90,31 +90,30 @@ function mergeUsers (userIdA, userIdB) {
 	if (uA.id === uB.id) return uA.id
 	const [surviving, absorbed] = uB.created < uA.created ? [uB, uA] : [uA, uB]
 	sqlite.prepare('UPDATE logins SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
-	sqlite.prepare('UPDATE tokens SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
+	sqlite.prepare('UPDATE apps SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
+	sqlite.prepare('UPDATE sessions SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
+	sqlite.prepare('UPDATE shares SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
+	sqlite.prepare('UPDATE states SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
 	sqlite.prepare('UPDATE logs SET user_id = ? WHERE user_id = ?').run(surviving.id, absorbed.id)
 	sqlite.prepare(`
-		DELETE FROM tokens
-		WHERE user_id = ? AND type = 'share'
-			AND EXISTS (
-				SELECT 1 FROM tokens AS owned
-				WHERE owned.id = json_extract(tokens.credentials, '$.appId') AND owned.user_id = ?
-			)
+		DELETE FROM shares
+		WHERE user_id = ?
+			AND EXISTS (SELECT 1 FROM apps WHERE apps.id = shares.app_id AND apps.user_id = ?)
 	`).run(surviving.id, surviving.id)
-	const shares = sqlite.prepare(`
-		SELECT id, json_extract(credentials, '$.appId') AS app_id, json_extract(credentials, '$.policy') AS policy
-		FROM tokens
-		WHERE user_id = ? AND type = 'share'
+	const dupShares = sqlite.prepare(`
+		SELECT id, app_id, policy
+		FROM shares
+		WHERE user_id = ?
 		ORDER BY created ASC, rowid ASC
 	`).all(surviving.id)
 	const seenApps = new Map()
-	for (const s of shares) {
-		if (!s.app_id) continue
+	for (const s of dupShares) {
 		const kept = seenApps.get(s.app_id)
 		if (kept) {
 			if ((kept.policy ?? null) === (s.policy ?? null)) {
-				sqlite.prepare('UPDATE links SET app_id = ? WHERE app_id = ? AND session_id NOT IN (SELECT session_id FROM links WHERE app_id = ?)').run(kept.id, s.id, kept.id)
+				sqlite.prepare('UPDATE links SET share_id = ? WHERE share_id = ?').run(kept.id, s.id)
 			}
-			sqlite.prepare('DELETE FROM tokens WHERE id = ?').run(s.id)
+			sqlite.prepare('DELETE FROM shares WHERE id = ?').run(s.id)
 		} else {
 			seenApps.set(s.app_id, { id: s.id, policy: s.policy ?? null })
 		}
@@ -134,10 +133,10 @@ function upsert ({ id = randomUUID(), userId, provider, account, allowUnscoped =
 					throw httpError(409, `Account ${cleanAccount} is already registered to another user. Re-run link_login with merge: true to merge both accounts`)
 				}
 				const survivingId = mergeUsers(userId, existing.user_id)
-				tokens.claimPendingShares({ userId: survivingId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
+				shares.claimPending({ userId: survivingId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
 				return get(existing.id)
 			}
-			tokens.claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
+			shares.claimPending({ userId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
 			return formatLogin(existing)
 		}
 		const now = new Date().toISOString()
@@ -145,7 +144,7 @@ function upsert ({ id = randomUUID(), userId, provider, account, allowUnscoped =
 			INSERT INTO logins (id, user_id, provider, account, created)
 			VALUES (?, ?, ?, ?, ?)
 		`).run(id, userId, cleanProvider, cleanAccount, now)
-		tokens.claimPendingShares({ userId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
+		shares.claimPending({ userId, provider: cleanProvider, account: cleanAccount, allowUnscoped })
 		return get(id)
 	})
 }
@@ -187,7 +186,7 @@ function resolveUser (provider, account, { createIfMissing = true, allowUnscoped
 	return transaction(() => {
 		const row = sqlite.prepare('SELECT user_id FROM logins WHERE provider = ? AND account = ?').get(cleanProvider, cleanAccount)
 		if (row) {
-			tokens.claimPendingShares({ userId: row.user_id, provider: cleanProvider, account: cleanAccount, allowUnscoped })
+			shares.claimPending({ userId: row.user_id, provider: cleanProvider, account: cleanAccount, allowUnscoped })
 			return users.get(row.user_id)
 		}
 		if (!createIfMissing) return null

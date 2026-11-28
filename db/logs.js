@@ -125,19 +125,18 @@ function listByUserId (userId, opts = {}) {
 			CASE
 				WHEN logs.user_id = ? THEN ${userAccountSql('logs.user_id')}
 				ELSE (
-					SELECT rs.name
-					FROM tokens AS rs
+					SELECT rs.account
+					FROM shares AS rs
 					WHERE rs.user_id = logs.user_id
-						AND rs.type = 'share'
-						AND json_extract(rs.credentials, '$.appId') = logs.app_id
+						AND rs.app_id = logs.app_id
 					LIMIT 1
 				)
 			END AS account,
 			COALESCE(owned.id, share.id) AS resolved_app_id
 		FROM logs
 		JOIN users ON logs.user_id = users.id
-		LEFT JOIN tokens AS owned ON owned.id = logs.app_id AND owned.user_id = ? AND owned.type != 'share'
-		LEFT JOIN tokens AS share ON share.user_id = ? AND share.type = 'share' AND json_extract(share.credentials, '$.appId') = logs.app_id
+		LEFT JOIN apps AS owned ON owned.id = logs.app_id AND owned.user_id = ?
+		LEFT JOIN shares AS share ON share.user_id = ? AND share.app_id = logs.app_id
 		WHERE (logs.user_id = ? OR owned.id IS NOT NULL)
 			AND logs.created >= ?
 	`

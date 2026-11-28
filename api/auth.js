@@ -35,27 +35,69 @@ function formatLogin (login) {
 	}
 }
 
-function formatApp (app, { sharesByAppId } = {}) {
-	const item = {
+function formatUpstreamMeta (app) {
+	const isShare = app.type === 'share'
+	const appType = isShare ? app.appType : app.type
+	const account = isShare ? app.appAccount : app.account
+	return {
 		id: app.id,
 		provider: app.provider,
 		type: app.type,
 		name: app.name,
-		...(app.type !== 'static' ? { account: app.credentials?.account || null } : {}),
-		...(app.credentials?.baseUrl ? { baseUrl: app.credentials.baseUrl } : {}),
+		...(appType !== 'static' ? { account: account || null } : {}),
+		...(app.baseUrl ? { baseUrl: app.baseUrl } : {}),
 		scopes: app.scopes,
 		expiresAt: app.expiresAt,
 		created: app.created,
 		updated: app.updated
 	}
+}
+
+function formatApp (app, { sharesByAppId } = {}) {
+	const item = formatUpstreamMeta(app)
 	if (app.type === 'share') {
+		const appPolicy = parsePolicy(app.appPolicy)
 		item.sharedBy = app.sharedBy || null
-		item.policy = parsePolicy(app.credentials?.policy)
-	} else if (sharesByAppId) {
-		const shares = sharesByAppId.get(app.id)
+		if (appPolicy !== null) item.appPolicy = appPolicy
+		item.policy = parsePolicy(app.policy)
+	} else {
+		item.policy = parsePolicy(app.policy)
+		const shares = sharesByAppId?.get(app.id)
 		if (shares) item.shares = shares
 	}
 	return item
+}
+
+function formatLinkApp (link) {
+	const appPolicy = parsePolicy(link.app.policy)
+	const linkPolicy = parsePolicy(link.policy)
+	if (link.share) {
+		const sharePolicy = parsePolicy(link.share.policy)
+		return {
+			...formatUpstreamMeta({
+				id: link.share.id,
+				provider: link.app.provider,
+				type: 'share',
+				appType: link.app.type,
+				name: link.app.name,
+				appAccount: link.app.account,
+				baseUrl: link.app.baseUrl,
+				scopes: link.app.scopes,
+				expiresAt: link.app.expiresAt,
+				created: link.share.created,
+				updated: link.share.updated
+			}),
+			sharedBy: link.share.sharedBy || null,
+			...(appPolicy !== null ? { appPolicy } : {}),
+			...(sharePolicy !== null ? { sharePolicy } : {}),
+			policy: linkPolicy
+		}
+	}
+	return {
+		...formatUpstreamMeta(link.app),
+		...(appPolicy !== null ? { appPolicy } : {}),
+		policy: linkPolicy
+	}
 }
 
 function formatSession (s, currentSessionId) {
@@ -71,10 +113,7 @@ function formatSession (s, currentSessionId) {
 		created: s.created,
 		updated: s.updated,
 		...(currentSessionId !== undefined ? { isCurrent: s.id === currentSessionId } : {}),
-		apps: links.filter(l => l.app).map(l => ({
-			...formatApp(l.app),
-			policy: parsePolicy(l.policy)
-		}))
+		apps: links.map(formatLinkApp)
 	}
 }
 
@@ -84,7 +123,7 @@ function resolveOrigin (appUrl) {
 
 async function whoami (token, opts = {}, appUrl) {
 	assertKeys(opts, [])
-	const session = db.tokens.resolveSession(token)
+	const session = db.sessions.resolve(token)
 	if (!session) {
 		return {
 			authenticated: false,
@@ -105,7 +144,7 @@ async function whoami (token, opts = {}, appUrl) {
 }
 
 function requireSession (token) {
-	const session = db.tokens.resolveSession(token)
+	const session = db.sessions.resolve(token)
 	if (!session) {
 		throw httpError(401, 'Authentication required')
 	}
@@ -122,16 +161,22 @@ function requireAdmin (token, message = 'Access denied: app administration requi
 
 function requireApp (userId, appId, { allowShare = true } = {}) {
 	appId = requireNonEmptyString(appId, 'appId')
-	const targetApp = db.tokens.get(appId)
-	if (!targetApp || targetApp.userId !== userId || !db.tokens.isUpstreamApp(targetApp, { allowShare })) {
-		throw httpError(404, `App not found: ${appId}`)
+	const app = db.apps.get(appId)
+	if (app && app.userId === userId) {
+		return { ...app, appId: app.id, shareId: null }
 	}
-	return targetApp
+	if (allowShare) {
+		const share = db.shares.get(appId)
+		if (share && share.userId === userId) {
+			return { ...share, shareId: share.id }
+		}
+	}
+	throw httpError(404, `App not found: ${appId}`)
 }
 
 function requireTargetSession (userId, sessionId) {
 	sessionId = requireNonEmptyString(sessionId, 'sessionId')
-	const targetSession = db.tokens.getActiveSession(sessionId)
+	const targetSession = db.sessions.getActive(sessionId)
 	if (!targetSession || targetSession.userId !== userId) {
 		throw httpError(404, `Session not found: ${sessionId}`)
 	}
@@ -156,7 +201,7 @@ function requireShareTarget (token, opts = {}, allowedKeys = ['appId', 'account'
 async function listSessions (token, opts = {}) {
 	const session = requireAdmin(token, 'Access denied: session administration requires admin privileges')
 	assertKeys(opts, [])
-	const rawSessions = db.tokens.listByUserId(session.userId, { provider: 'self' })
+	const rawSessions = db.sessions.listByUserId(session.userId)
 	return { sessions: rawSessions.map(s => formatSession(s, session.id)) }
 }
 
@@ -205,10 +250,8 @@ async function createSession (token, opts = {}) {
 	for (const appId of linkAppIds) {
 		appsToLink.push(requireApp(session.userId, appId))
 	}
-	const newSession = db.tokens.create({
+	const newSession = db.sessions.create({
 		userId: session.userId,
-		provider: 'self',
-		type: 'bearer',
 		name: cleanName,
 		expiresAt,
 		admin: isAdmin ? 1 : 0
@@ -216,7 +259,8 @@ async function createSession (token, opts = {}) {
 	for (const app of appsToLink) {
 		db.links.create({
 			sessionId: newSession.id,
-			appId: app.id,
+			appId: app.appId,
+			shareId: app.shareId,
 			policy: policyCheck.policy
 		})
 	}
@@ -243,10 +287,10 @@ async function revokeSession (token, opts = {}) {
 		if (!session.admin) {
 			throw httpError(403, 'Access denied: revoking other sessions requires admin privileges')
 		}
-		const userSessions = db.tokens.listByUserId(session.userId, { provider: 'self' })
+		const userSessions = db.sessions.listByUserId(session.userId)
 		const others = userSessions.filter(s => s.id !== session.id)
 		for (const s of others) {
-			db.tokens.remove(s.id)
+			db.sessions.remove(s.id)
 		}
 		return {
 			revoked: true,
@@ -259,7 +303,7 @@ async function revokeSession (token, opts = {}) {
 			throw httpError(403, 'Access denied: revoking other sessions requires admin privileges')
 		}
 		const targetSession = requireTargetSession(session.userId, sessionId)
-		db.tokens.remove(targetSession.id)
+		db.sessions.remove(targetSession.id)
 		return {
 			revoked: true,
 			sessionId: targetSession.id,
@@ -267,7 +311,7 @@ async function revokeSession (token, opts = {}) {
 			message: 'Session revoked.'
 		}
 	}
-	db.tokens.remove(session.id)
+	db.sessions.remove(session.id)
 	return {
 		revoked: true,
 		sessionId: session.id,
@@ -279,21 +323,23 @@ async function revokeSession (token, opts = {}) {
 async function listApps (token, opts = {}) {
 	const session = requireAdmin(token)
 	assertKeys(opts, [])
-	const allTokens = db.tokens.listByUserId(session.userId)
-	const ownedShares = db.tokens.listSharesByOwnerId(session.userId)
+	const ownedApps = db.apps.listByUserId(session.userId)
+	const sharedApps = db.shares.listByUserId(session.userId)
+	const ownedShares = db.shares.listByOwnerId(session.userId)
 	const sharesByAppId = new Map()
 	for (const s of ownedShares) {
-		const targetAppId = s.credentials?.appId
-		if (!targetAppId) continue
-		if (!sharesByAppId.has(targetAppId)) sharesByAppId.set(targetAppId, [])
-		sharesByAppId.get(targetAppId).push({
+		if (!sharesByAppId.has(s.appId)) sharesByAppId.set(s.appId, [])
+		sharesByAppId.get(s.appId).push({
 			userId: s.userId,
 			account: s.account,
-			...(s.credentials?.authProvider ? { provider: s.credentials.authProvider } : {}),
-			policy: parsePolicy(s.credentials?.policy)
+			...(s.authProvider ? { provider: s.authProvider } : {}),
+			policy: parsePolicy(s.policy)
 		})
 	}
-	const apps = allTokens.filter(t => t.provider !== 'self').map(a => formatApp(a, { sharesByAppId }))
+	const apps = [
+		...ownedApps.map(a => formatApp(a, { sharesByAppId })),
+		...sharedApps.map(s => formatApp(s))
+	]
 	return { apps }
 }
 
@@ -340,7 +386,7 @@ function buildStaticCredentials ({ credentials, auth, baseUrl, providerDef }) {
 	const rawBase = baseUrl !== undefined ? baseUrl : (providerDef?.baseUrl || null)
 	const normalizedBaseUrl = requireValidBaseUrl(rawBase)
 	return {
-		...normalizedAuth,
+		credentials: normalizedAuth,
 		baseUrl: normalizedBaseUrl
 	}
 }
@@ -480,11 +526,18 @@ function normalizeCredentials (raw) {
 
 async function connectApp (token, opts = {}, appUrl) {
 	const session = requireAdmin(token)
-	assertKeys(opts, ['provider', 'type', 'name', 'credentials', 'baseUrl', 'appId', 'services'])
-	let { provider, type, name, credentials, baseUrl, appId, services } = opts || {}
+	assertKeys(opts, ['provider', 'type', 'name', 'credentials', 'baseUrl', 'appId', 'services', 'policy'])
+	let { provider, type, name, credentials, baseUrl, appId, services, policy } = opts || {}
 	provider = provider === undefined || provider === null ? null : requireValidProviderId(provider)
 	let appType = requireAppType(type)
 	const cleanName = optionalString(name, 'name')
+	let policyCheck = null
+	if (policy !== undefined) {
+		policyCheck = validatePolicy(policy)
+		if (!policyCheck.valid) {
+			throw httpError(400, policyCheck.error)
+		}
+	}
 	let existingApp = null
 	if (appId !== undefined) {
 		existingApp = requireApp(session.userId, appId, { allowShare: false })
@@ -495,8 +548,8 @@ async function connectApp (token, opts = {}, appUrl) {
 		if (appType && appType !== existingApp.type) {
 			throw httpError(400, `App ${appId} has type "${existingApp.type}", not "${appType}"`)
 		}
-		if (name !== undefined || credentials !== undefined || baseUrl !== undefined) {
-			throw httpError(400, 'Cannot pass name, credentials, or baseUrl with appId in connect_app; use update_app instead')
+		if (name !== undefined || credentials !== undefined || baseUrl !== undefined || policy !== undefined) {
+			throw httpError(400, 'Cannot pass name, credentials, baseUrl, or policy with appId in connect_app; use update_app instead')
 		}
 		provider = existingApp.provider
 		appType = existingApp.type
@@ -511,6 +564,7 @@ async function connectApp (token, opts = {}, appUrl) {
 			throw httpError(400, 'provider is required (or pass type: "static" for the browser setup form)')
 		}
 	}
+	const appPolicy = policyCheck ? policyCheck.policy : null
 	if (appType === 'oauth') {
 		if (normalizedAuth) {
 			throw httpError(400, 'credentials cannot be used with OAuth apps')
@@ -532,13 +586,14 @@ async function connectApp (token, opts = {}, appUrl) {
 				throw httpError(400, 'services must contain at least one service')
 			}
 		}
-		const setupCode = db.tokens.createState({
+		const setupCode = db.states.createState({
 			mode: 'setup_connect',
 			sessionId: session.id,
 			provider: providerDef.id,
 			reauthAppId: appId || null,
 			name: cleanName,
 			services: resolvedServices,
+			policy: appPolicy,
 			ttl: 10 * 60 * 1000
 		})
 		return {
@@ -552,13 +607,14 @@ async function connectApp (token, opts = {}, appUrl) {
 	if (!normalizedAuth) {
 		const cleanBaseUrl = optionalString(baseUrl, 'baseUrl')
 		const validatedBase = cleanBaseUrl ? requireValidBaseUrl(cleanBaseUrl) : null
-		const setupCode = db.tokens.createState({
+		const setupCode = db.states.createState({
 			mode: 'setup_static',
 			sessionId: session.id,
 			provider,
 			reauthAppId: appId || null,
 			name: existingApp ? existingApp.name : cleanName,
-			baseUrl: existingApp ? (existingApp.credentials?.baseUrl || null) : validatedBase,
+			baseUrl: existingApp ? (existingApp.baseUrl || null) : validatedBase,
+			policy: appPolicy,
 			ttl: 10 * 60 * 1000
 		})
 		return {
@@ -570,17 +626,19 @@ async function connectApp (token, opts = {}, appUrl) {
 		throw httpError(400, 'provider is required for static apps')
 	}
 	const providerDef = getProvider(provider)
-	const creds = buildStaticCredentials({
+	const { credentials: creds, baseUrl: resolvedBaseUrl } = buildStaticCredentials({
 		auth: normalizedAuth,
 		baseUrl,
 		providerDef
 	})
-	const app = db.tokens.create({
+	const app = db.apps.create({
 		userId: session.userId,
 		provider,
 		type: 'static',
 		name: cleanName || providerDef.name,
-		credentials: creds
+		baseUrl: resolvedBaseUrl,
+		credentials: creds,
+		policy: appPolicy
 	})
 	return {
 		connected: true,
@@ -594,13 +652,20 @@ async function disconnectApp (token, opts = {}) {
 	const { appId, revoke } = opts || {}
 	const targetApp = requireApp(session.userId, appId)
 	const shouldRevoke = requireBoolean(revoke, 'revoke', true)
+	if (targetApp.type === 'share') {
+		db.shares.remove(targetApp.id)
+		return {
+			disconnected: true,
+			appId: targetApp.id
+		}
+	}
 	if (shouldRevoke) {
 		const providerDef = getProvider(targetApp.provider)
 		if (providerDef?.revokeToken) {
 			await providerDef.revokeToken(targetApp)
 		}
 	}
-	db.tokens.remove(targetApp.id)
+	db.apps.remove(targetApp.id)
 	return {
 		disconnected: true,
 		appId: targetApp.id
@@ -619,13 +684,14 @@ async function linkApp (token, opts = {}) {
 	const targetApp = requireApp(session.userId, appId)
 	const link = db.links.create({
 		sessionId: targetSession.id,
-		appId: targetApp.id,
+		appId: targetApp.appId,
+		shareId: targetApp.shareId,
 		policy: policyCheck.policy
 	})
 	return {
 		linked: true,
 		sessionId: link.sessionId,
-		appId: link.appId,
+		appId: link.targetId,
 		policy: parsePolicy(link.policy)
 	}
 }
@@ -636,7 +702,7 @@ async function unlinkApp (token, opts = {}) {
 	const { sessionId, appId } = opts || {}
 	const targetSession = requireTargetSession(session.userId, sessionId)
 	const targetApp = requireApp(session.userId, appId)
-	const removed = db.links.remove(targetSession.id, targetApp.id)
+	const removed = db.links.remove(targetSession.id, targetApp.appId)
 	return {
 		unlinked: removed,
 		sessionId: targetSession.id,
@@ -659,7 +725,7 @@ async function linkLogin (token, opts = {}, appUrl) {
 	} else if (listOauthProviders('auth').length === 0) {
 		throw httpError(400, 'No OAuth sign-in providers are configured')
 	}
-	const setupCode = db.tokens.createState({
+	const setupCode = db.states.createState({
 		mode: 'setup_link',
 		sessionId: session.id,
 		provider: resolvedProvider,
@@ -695,11 +761,11 @@ async function unlinkLogin (token, opts = {}) {
 
 async function updateApp (token, opts = {}) {
 	const session = requireAdmin(token)
-	assertKeys(opts, ['appId', 'name', 'baseUrl', 'credentials'])
-	const { appId, name, baseUrl, credentials } = opts || {}
+	assertKeys(opts, ['appId', 'name', 'baseUrl', 'credentials', 'policy'])
+	const { appId, name, baseUrl, credentials, policy } = opts || {}
 	const targetApp = requireApp(session.userId, appId, { allowShare: false })
-	if (name === undefined && baseUrl === undefined && credentials === undefined) {
-		throw httpError(400, 'At least one of name, baseUrl, or credentials is required')
+	if (name === undefined && baseUrl === undefined && credentials === undefined && policy === undefined) {
+		throw httpError(400, 'At least one of name, baseUrl, credentials, or policy is required')
 	}
 	if ((baseUrl !== undefined || credentials !== undefined) && targetApp.type !== 'static') {
 		throw httpError(400, 'baseUrl and credentials can only be updated on static apps')
@@ -707,20 +773,18 @@ async function updateApp (token, opts = {}) {
 	const cleanName = name !== undefined ? optionalString(name, 'name') : undefined
 	const normalizedAuth = credentials !== undefined ? normalizeCredentials(credentials) : undefined
 	const normalizedBaseUrl = baseUrl !== undefined ? requireValidBaseUrl(baseUrl) : undefined
-	const hasCredChanges = normalizedBaseUrl !== undefined || normalizedAuth !== undefined
-	let updatedCreds = undefined
-	if (hasCredChanges) {
-		const existingCreds = targetApp.credentials || {}
-		const { headers: _h, query: _q, account: _a, ...metaCreds } = existingCreds
-		updatedCreds = {
-			...(normalizedAuth !== undefined ? { ...metaCreds, ...normalizedAuth } : existingCreds),
-			...(normalizedBaseUrl !== undefined && { baseUrl: normalizedBaseUrl })
+	let policyCheck = null
+	if (policy !== undefined) {
+		policyCheck = validatePolicy(policy)
+		if (!policyCheck.valid) {
+			throw httpError(400, policyCheck.error)
 		}
-		delete updatedCreds.account
 	}
-	const updated = db.tokens.updateCredentials(targetApp.id, {
-		...(cleanName !== undefined ? { name: cleanName } : {}),
-		...(updatedCreds !== undefined ? { credentials: updatedCreds } : {})
+	const updated = db.apps.update(targetApp.id, {
+		...(cleanName !== undefined && { name: cleanName }),
+		...(normalizedBaseUrl !== undefined && { baseUrl: normalizedBaseUrl }),
+		...(normalizedAuth !== undefined && { credentials: normalizedAuth }),
+		...(policyCheck && { policy: policyCheck.policy })
 	})
 	return {
 		updated: true,
@@ -755,15 +819,14 @@ async function shareApp (token, opts = {}) {
 		throw httpError(400, `Provider is required when sharing with bare account handle "${cleanAccount}" (e.g. provider: "github" or "github:${cleanAccount}")`)
 	}
 	const userId = recipient ? recipient.id : null
-	const share = db.tokens.upsertShare({
+	const share = db.shares.upsert({
 		userId,
 		account: cleanAccount,
 		authProvider: effectiveProvider,
 		appId: targetApp.id,
-		provider: targetApp.provider,
 		policy: policyCheck.policy
 	})
-	const resolvedProvider = share.credentials?.authProvider || effectiveProvider
+	const resolvedProvider = share.authProvider || effectiveProvider
 	return {
 		shared: true,
 		shareId: share.id,
@@ -777,7 +840,7 @@ async function shareApp (token, opts = {}) {
 
 async function unshareApp (token, opts = {}) {
 	const { targetApp, cleanAccount, cleanProvider } = requireShareTarget(token, opts)
-	const unshared = db.tokens.removeShare({
+	const unshared = db.shares.removeByTarget({
 		appId: targetApp.id,
 		account: cleanAccount,
 		provider: cleanProvider
@@ -808,7 +871,7 @@ async function updateSession (token, opts = {}) {
 	const parsedAdmin = requireBoolean(admin, 'admin')
 	const shouldRotate = requireBoolean(rotateToken, 'rotateToken', false)
 	requireTargetSession(session.userId, targetId)
-	const updated = db.tokens.updateSession(targetId, {
+	const updated = db.sessions.update(targetId, {
 		name: cleanName,
 		admin: parsedAdmin,
 		rotateToken: shouldRotate

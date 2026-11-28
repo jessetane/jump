@@ -170,12 +170,10 @@ server.keepAliveTimeout = 125000
 
 function bootstrapLocalAdmin () {
 	if (listOauthProviders('auth').length > 0) return null
-	if (db.tokens.hasActiveAdmin()) return null
+	if (db.sessions.hasActiveAdmin()) return null
 	const user = db.users.create()
-	const session = db.tokens.create({
+	const session = db.sessions.create({
 		userId: user.id,
-		provider: 'self',
-		type: 'bearer',
 		name: 'Local Admin',
 		admin: 1
 	})

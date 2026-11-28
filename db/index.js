@@ -2,15 +2,19 @@ import { DatabaseSync } from 'node:sqlite'
 import { tightenFileMode } from '../util.js'
 import * as users from './users.js'
 import * as logins from './logins.js'
-import * as tokens from './tokens.js'
+import * as apps from './apps.js'
+import * as sessions from './sessions.js'
+import * as shares from './shares.js'
 import * as links from './links.js'
+import * as states from './states.js'
 import * as logs from './logs.js'
 
 const dbPath = process.env.DB_PATH || './data.db'
 const PRUNE_INTERVAL_MS = 15 * 60 * 1000
 
 function prune () {
-	tokens.prune()
+	sessions.prune()
+	states.prune()
 	logs.prune()
 }
 
@@ -32,8 +36,11 @@ function transaction (fn, targetDb = sqlite) {
 function init () {
 	users.init()
 	logins.init()
-	tokens.init()
+	apps.init()
+	sessions.init()
+	shares.init()
 	links.init()
+	states.init()
 	logs.init()
 }
 
@@ -67,7 +74,10 @@ export {
 	transaction,
 	users,
 	logins,
-	tokens,
+	apps,
+	sessions,
+	shares,
 	links,
+	states,
 	logs
 }

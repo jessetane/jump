@@ -442,7 +442,7 @@ function createProvider (config) {
 						accessToken: data.access_token,
 						refreshToken: data.refresh_token || creds.refreshToken
 					}
-					db.tokens.updateCredentials(appToken.id, {
+					db.apps.update(appToken.id, {
 						credentials: updatedCreds,
 						expiresAt,
 						scopes: data.scope || appToken.scopes
@@ -465,7 +465,7 @@ function createProvider (config) {
 		},
 		normalizeTargetUrl (targetUrl, appToken) {
 			if (!targetUrl || typeof targetUrl !== 'string') return ''
-			const appBase = appToken?.credentials?.baseUrl || null
+			const appBase = appToken?.baseUrl || null
 			if (!appBase && hasWildcardHost) {
 				const clean = targetUrl.trim()
 				if (clean && !hasUrlScheme(clean)) {
@@ -492,7 +492,7 @@ function createProvider (config) {
 			if (hasPathTraversal(urlString) || hasPathTraversal(parsed.pathname)) {
 				return { allowed: false, reason: 'Invalid target URL: path traversal is not permitted' }
 			}
-			const appBase = appToken?.credentials?.baseUrl
+			const appBase = appToken?.baseUrl
 			const pinnedToAppBase = Boolean(appBase || (!baseUrl && allowedHosts.length === 0))
 			let allowedBase = parsedProviderBase
 			if (pinnedToAppBase) {

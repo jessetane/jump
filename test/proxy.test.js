@@ -117,14 +117,14 @@ test('socket-pinned single-lookup DNS resolution blocks private answers and defe
 				const { user, session } = createTestSession({ account: 'dns-ssrf@example.com', admin: true, withApp: false })
 				for (const [idx, host] of Object.keys(dnsFixtures).filter(h => h !== 'public.example.test').entries()) {
 					const provider = `ssrf_${idx}`
-					const app = db.tokens.create({ userId: user.id, provider, type: 'static', credentials: { headers: { authorization: 'Bearer sk' }, baseUrl: `https://${host}:${tlsPort}` } })
+					const app = db.apps.create({ userId: user.id, provider, type: 'static', baseUrl: `https://${host}:${tlsPort}`, credentials: { headers: { authorization: 'Bearer sk' } } })
 					db.links.create({ sessionId: session.id, appId: app.id })
 					assert.equal((await mcp(session.token, `${provider}_api`, { url: '/v1/data' })).isError, true)
 					assert.equal((await req('GET', `/api/${provider}/v1/data`, { token: session.token })).status, 403)
 				}
 				assert.deepEqual(dialedIps, [], 'No TCP socket may dial on blocked DNS answers')
 				assert.deepEqual(tlsReceived, [])
-				const pubApp = db.tokens.create({ userId: user.id, provider: 'ssrf_pub', type: 'static', credentials: { headers: { authorization: 'Bearer sk_pub' }, baseUrl: `https://public.example.test:${tlsPort}` } })
+				const pubApp = db.apps.create({ userId: user.id, provider: 'ssrf_pub', type: 'static', baseUrl: `https://public.example.test:${tlsPort}`, credentials: { headers: { authorization: 'Bearer sk_pub' } } })
 				db.links.create({ sessionId: session.id, appId: pubApp.id })
 				lookupCounts.clear()
 				const okPubRes = await mcp(session.token, 'ssrf_pub_api', { url: '/v1/ok', headers: { host: 'evil.com', 'transfer-encoding': 'chunked' } })
@@ -132,12 +132,12 @@ test('socket-pinned single-lookup DNS resolution blocks private answers and defe
 				assert.deepEqual(JSON.parse(okPubRes.content[0].text), { ok: true, sni: 'public.example.test', host: `public.example.test:${tlsPort}`, te: null })
 				assert.equal(lookupCounts.get('public.example.test'), 1)
 				assert.equal((await mcp(session.token, 'ssrf_pub_api', { url: '/bounce-to-cgnat' })).isError, true)
-				const ip4App = db.tokens.create({ userId: user.id, provider: 'ssrf_ip4', type: 'static', credentials: { headers: { authorization: 'Bearer sk_ip4' }, baseUrl: `https://${VIRTUAL_UPSTREAM_IP}:${tlsPort}` } })
+				const ip4App = db.apps.create({ userId: user.id, provider: 'ssrf_ip4', type: 'static', baseUrl: `https://${VIRTUAL_UPSTREAM_IP}:${tlsPort}`, credentials: { headers: { authorization: 'Bearer sk_ip4' } } })
 				db.links.create({ sessionId: session.id, appId: ip4App.id })
 				dialedIps.length = 0
 				assert.equal((await mcp(session.token, 'ssrf_ip4_api', { url: '/v1/ip4' })).isError, undefined)
 				assert.deepEqual(dialedIps, [VIRTUAL_UPSTREAM_IP])
-				const rebindApp = db.tokens.create({ userId: user.id, provider: 'ssrf_rebind', type: 'static', credentials: { headers: { authorization: 'Bearer sk_rebind' }, baseUrl: `https://rebind.example.test:${tlsPort}` } })
+				const rebindApp = db.apps.create({ userId: user.id, provider: 'ssrf_rebind', type: 'static', baseUrl: `https://rebind.example.test:${tlsPort}`, credentials: { headers: { authorization: 'Bearer sk_rebind' } } })
 				db.links.create({ sessionId: session.id, appId: rebindApp.id })
 				dialedIps.length = 0
 				assert.equal((await mcp(session.token, 'ssrf_rebind_api', { url: '/v1/first' })).isError, undefined)
@@ -288,11 +288,12 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 		}, async ({ url: apiUrl, port }) => {
 			apiPort = port
 			const { user, session } = createTestSession({ account: 'redirects@example.com', admin: true, withApp: false })
-			const ghApp = db.tokens.create({
+			const ghApp = db.apps.create({
 				userId: user.id,
 				provider: 'github',
 				type: 'static',
-				credentials: { headers: { authorization: 'Bearer ghp_secret', 'x-tenant': 'acme', cookie: 'sid=gh_cookie_secret' }, baseUrl: apiUrl }
+				baseUrl: apiUrl,
+				credentials: { headers: { authorization: 'Bearer ghp_secret', 'x-tenant': 'acme', cookie: 'sid=gh_cookie_secret' } }
 			})
 			db.links.create({
 				sessionId: session.id,
@@ -303,11 +304,12 @@ test('upstream redirects validate targets, strip headers/query secrets cross-ori
 					{ action: 'allow', path: '/**' }
 				]
 			})
-			const qApp = db.tokens.create({
+			const qApp = db.apps.create({
 				userId: user.id,
 				provider: 'namecheap',
 				type: 'static',
-				credentials: { query: { ApiKey: qSecret }, baseUrl: apiUrl }
+				baseUrl: apiUrl,
+				credentials: { query: { ApiKey: qSecret } }
 			})
 			db.links.create({ sessionId: session.id, appId: qApp.id, policy: [{ action: 'allow', path: '/qauth/**' }] })
 			const okDl = await mcp(session.token, 'github_api', { url: '/repos/acme/tarball' })
@@ -518,7 +520,7 @@ test('MCP buffered decompression/limits vs HTTP streaming, body-inspection guard
 	}, async ({ url: upstreamUrl }) => {
 		await withEnv({ MAX_FILE_SIZE_MB: '1' }, async () => {
 			const { user, session } = createTestSession({ account: 'stream@example.com', admin: true, withApp: false })
-			const app = db.tokens.create({ userId: user.id, provider: 'comp', type: 'static', credentials: { headers: { authorization: 'Bearer sk_comp' }, baseUrl: upstreamUrl } })
+			const app = db.apps.create({ userId: user.id, provider: 'comp', type: 'static', baseUrl: upstreamUrl, credentials: { headers: { authorization: 'Bearer sk_comp' } } })
 			db.links.create({ sessionId: session.id, appId: app.id })
 			assert.deepEqual(JSON.parse((await mcp(session.token, 'comp_api', { url: '/gzip', headers: { 'accept-encoding': 'bogus' } })).content[0].text), { ok: 'gz' })
 			assert.equal(lastAcceptEnc, 'gzip, br, zstd')
@@ -595,7 +597,7 @@ test('MCP buffered decompression/limits vs HTTP streaming, body-inspection guard
 			assert.equal(lastUploadContentLength, null, 'Uninspected HTTP upload preserves chunked streaming without Content-Length')
 			const httpUp = await req('POST', '/api/comp/upload-stream', { token: session.token, headers: { 'content-type': 'application/octet-stream' }, body: Buffer.alloc(1536 * 1024, 0x42) })
 			assert.equal(httpUp.data.bytes, 1536 * 1024)
-			const inspectedSess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+			const inspectedSess = db.sessions.create({ userId: user.id, admin: 0 })
 			db.links.create({ sessionId: inspectedSess.id, appId: app.id, policy: [{ action: 'deny', methods: ['POST'], body: '*secret*' }, { action: 'allow', methods: ['POST'], path: '/upload-stream' }] })
 			const gzDenied = await req('POST', '/api/comp/upload-stream', {
 				token: inspectedSess.token,
@@ -624,7 +626,7 @@ test('MCP buffered decompression/limits vs HTTP streaming, body-inspection guard
 				headers: { 'content-type': 'application/octet-stream' },
 				body: Buffer.alloc(1024 * 1024 + 1, 0x61)
 			})).status, 413, 'Inspected HTTP request body enforces 1 MB getRawBody limit')
-			const jsonPolicySess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+			const jsonPolicySess = db.sessions.create({ userId: user.id, admin: 0 })
 			db.links.create({
 				sessionId: jsonPolicySess.id,
 				appId: app.id,
@@ -661,7 +663,7 @@ test('MCP buffered decompression/limits vs HTTP streaming, body-inspection guard
 				chunks: ['{"role":', '"admin"}']
 			})
 			assert.equal(chunkedDeny.status, 403, 'Chunked upload still enforces JSON body policy')
-			const formPolicySess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+			const formPolicySess = db.sessions.create({ userId: user.id, admin: 0 })
 			db.links.create({
 				sessionId: formPolicySess.id,
 				appId: app.id,
@@ -681,7 +683,7 @@ test('MCP buffered decompression/limits vs HTTP streaming, body-inspection guard
 				body: 'tag=evil'
 			})).status, 403)
 			assert.equal(uploadHits, hitsBefore + 4, 'Only allowed inspected requests reach upstream')
-			const uninspectedSess = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+			const uninspectedSess = db.sessions.create({ userId: user.id, admin: 0 })
 			db.links.create({ sessionId: uninspectedSess.id, appId: app.id, policy: [{ action: 'allow', methods: ['POST'], path: '/upload-stream' }] })
 			assert.equal((await req('POST', '/api/comp/upload-stream', {
 				token: uninspectedSess.token,
@@ -761,7 +763,7 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		})
 		assert.equal(captured.at(-1).headers.authorization, `Basic ${Buffer.from('api:key-mg').toString('base64')}`)
 		assert.equal(captured.at(-1).body, 'from=a%40b.com&tag=x&tag=y&vars=%7B%22plan%22%3A%22pro%22%7D')
-		const scopedCt = db.tokens.create({ userId: user.id, provider: 'self', admin: 0 })
+		const scopedCt = db.sessions.create({ userId: user.id, admin: 0 })
 		db.links.create({ sessionId: scopedCt.id, appId: basicApp.id, policy: [{ action: 'deny', methods: ['POST'], body: { tag: 'evil' }, bodyType: 'form' }, { action: 'allow', methods: ['POST'], path: '/v3/messages' }] })
 		const ctDiffBlocked = await mcp(scopedCt.token, 'mailgun_api', {
 			url: '/v3/messages',
@@ -811,8 +813,8 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		assert.equal(qUrl.searchParams.get('ApiKey'), 'k_1')
 		assert.equal(qUrl.searchParams.get('apikey'), null)
 		await mcp(session.token, 'admin', { action: 'update_app', appId: notionApp.id, credentials: { query: { api_key: 'replaced_only' } } })
-		assert.equal(db.tokens.get(notionApp.id).credentials.headers, undefined, 'Unit credential replacement removes stale headers')
-		assert.deepEqual(db.tokens.get(notionApp.id).credentials.query, { api_key: 'replaced_only' })
+		assert.equal(db.apps.get(notionApp.id).credentials.headers, undefined, 'Unit credential replacement removes stale headers')
+		assert.deepEqual(db.apps.get(notionApp.id).credentials.query, { api_key: 'replaced_only' })
 		const colonBearer = JSON.parse((await mcp(session.token, 'admin', { action: 'connect_app', provider: 'colon_b', credentials: 'part1:part2', baseUrl: upstreamUrl })).content[0].text).app
 		db.links.create({ sessionId: session.id, appId: colonBearer.id })
 		await mcp(session.token, 'colon_b_api', { url: '/c' })
@@ -824,9 +826,9 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		assert.equal((await req('GET', '/api/cookie_api/c', { token: session.token, headers: { cookie: 'caller=evil' } })).status, 200)
 		assert.equal(captured.at(-1).headers.cookie, 'session=cookie_secret_99; theme=dark')
 		assert.equal((await req('GET', '/api/colon_b/c', { token: session.token, headers: { 'x-upstream-app': 'colon_b' } })).status, 404, 'Non-ID selector rejected even on single-linked provider')
-		const m1 = db.tokens.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Personal', credentials: { account: 'p@example.com', headers: { authorization: 'Bearer sk_1' }, baseUrl: upstreamUrl } })
-		const m2 = db.tokens.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Work', credentials: { account: 'w@example.com', headers: { authorization: 'Bearer sk_2' }, baseUrl: upstreamUrl } })
-		const m3 = db.tokens.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Billing', credentials: { account: 'w@example.com', headers: { authorization: 'Bearer sk_3' }, baseUrl: upstreamUrl } })
+		const m1 = db.apps.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Personal', account: 'p@example.com', baseUrl: upstreamUrl, credentials: { headers: { authorization: 'Bearer sk_1' } } })
+		const m2 = db.apps.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Work', account: 'w@example.com', baseUrl: upstreamUrl, credentials: { headers: { authorization: 'Bearer sk_2' } } })
+		const m3 = db.apps.create({ userId: session.userId, provider: 'stripe', type: 'static', name: 'Billing', account: 'w@example.com', baseUrl: upstreamUrl, credentials: { headers: { authorization: 'Bearer sk_3' } } })
 		db.links.create({ sessionId: session.id, appId: m1.id, policy: [{ action: 'allow', path: '/p/**' }] })
 		db.links.create({ sessionId: session.id, appId: m2.id, policy: [{ action: 'allow', path: '/w/**' }] })
 		db.links.create({ sessionId: session.id, appId: m3.id, policy: [{ action: 'allow', path: '/b/**' }] })
@@ -860,9 +862,9 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 			assert.equal((await mcp(session.token, 'stripe_api', { url: '/b/1', app: m3.id })).isError, undefined)
 			assert.equal(captured.at(-1).headers['user-agent'], 'custom-agent/2.0')
 		})
-		const mixedSess = db.tokens.create({ userId: session.userId, provider: 'self', admin: 0 })
-		const ghPersonal = db.tokens.create({ userId: session.userId, provider: 'github', type: 'oauth', name: 'Personal', credentials: { accessToken: 'gho_personal', account: 'octo' } })
-		const ghEnterprise = db.tokens.create({ userId: session.userId, provider: 'github', type: 'static', name: 'GHE', credentials: { headers: { authorization: 'Bearer ghp_enterprise' }, baseUrl: upstreamUrl } })
+		const mixedSess = db.sessions.create({ userId: session.userId, admin: 0 })
+		const ghPersonal = db.apps.create({ userId: session.userId, provider: 'github', type: 'oauth', name: 'Personal', account: 'octo', credentials: { accessToken: 'gho_personal' } })
+		const ghEnterprise = db.apps.create({ userId: session.userId, provider: 'github', type: 'static', name: 'GHE', baseUrl: upstreamUrl, credentials: { headers: { authorization: 'Bearer ghp_enterprise' } } })
 		db.links.create({ sessionId: mixedSess.id, appId: ghPersonal.id })
 		db.links.create({ sessionId: mixedSess.id, appId: ghEnterprise.id })
 		assert.equal((await mcp(mixedSess.token, 'github_api', { url: '/user' })).isError, true, 'Mixed OAuth and static apps on same provider require explicit app selector')
@@ -870,9 +872,9 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		assert.equal(captured.at(-1).headers.authorization, 'Bearer ghp_enterprise')
 		assert.equal((await mcp(mixedSess.token, 'github_api', { url: 'https://api.github.com/user', app: ghEnterprise.id })).isError, true, 'Static GitHub app must stay pinned to its own baseUrl')
 		assert.equal((await mcp(mixedSess.token, 'github_api', { url: `${upstreamUrl}/user`, app: ghPersonal.id })).isError, true, 'OAuth GitHub app must stay pinned to https://api.github.com')
-		const gMixedSess = db.tokens.create({ userId: session.userId, provider: 'self', admin: 0 })
-		const gOauth = db.tokens.create({ userId: session.userId, provider: 'google', type: 'oauth', name: 'Work Google', credentials: { accessToken: 'ya29_work', account: 'alice@example.com' } })
-		const gStatic = db.tokens.create({ userId: session.userId, provider: 'google', type: 'static', name: 'Custom Proxy', credentials: { headers: { authorization: 'Bearer g_static' }, baseUrl: upstreamUrl } })
+		const gMixedSess = db.sessions.create({ userId: session.userId, admin: 0 })
+		const gOauth = db.apps.create({ userId: session.userId, provider: 'google', type: 'oauth', name: 'Work Google', account: 'alice@example.com', credentials: { accessToken: 'ya29_work' } })
+		const gStatic = db.apps.create({ userId: session.userId, provider: 'google', type: 'static', name: 'Custom Proxy', baseUrl: upstreamUrl, credentials: { headers: { authorization: 'Bearer g_static' } } })
 		db.links.create({ sessionId: gMixedSess.id, appId: gOauth.id })
 		db.links.create({ sessionId: gMixedSess.id, appId: gStatic.id })
 		assert.equal((await mcp(gMixedSess.token, 'google_api', { url: '/drive/v3/files' })).isError, true, 'Mixed OAuth and static Google apps require explicit app selector')
@@ -884,7 +886,7 @@ test('structured credentials attachment, header hygiene, unit replacement, and a
 		const gToolDesc = gTools.find(t => t.name === 'google_api').description
 		assert.match(gToolDesc, new RegExp(`Custom Proxy \\[id=${gStatic.id}, ${upstreamUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]`))
 		assert.deepEqual(
-			proxy.formatLinkedApps([{ app: { id: 'no-base-id', name: 'No Base', credentials: {} } }], providers.getProvider('stripe'), { includeBaseUrl: true }),
+			proxy.formatLinkedApps([{ targetId: 'no-base-id', app: { id: 'no-base-id', name: 'No Base' } }], providers.getProvider('stripe'), { includeBaseUrl: true }),
 			['No Base [id=no-base-id]']
 		)
 	})
@@ -903,7 +905,7 @@ test('aborted streams fail immediately when destroyed before sendUpstreamHop or 
 	await assert.rejects(() => utilMod.getRawBody(destroyedRaw), err => err.status === 400 && err.message === 'Request stream closed prematurely')
 	await withEnv({ GOOGLE_CLIENT_ID: 'gid', GOOGLE_CLIENT_SECRET: 'gsec', UPSTREAM_TIMEOUT_MS: '5000' }, async () => {
 		const { user, session } = createTestSession({ account: 'abort-refresh@example.com', admin: true, withApp: false })
-		const gApp = db.tokens.create({ userId: user.id, provider: 'google', type: 'oauth', expiresAt: Date.now() - 60000, credentials: { account: 'abort-refresh@example.com', accessToken: 'stale_tok', refreshToken: 'ref_tok' } })
+		const gApp = db.apps.create({ userId: user.id, provider: 'google', type: 'oauth', account: 'abort-refresh@example.com', expiresAt: Date.now() - 60000, credentials: { accessToken: 'stale_tok', refreshToken: 'ref_tok' } })
 		db.links.create({ sessionId: session.id, appId: gApp.id })
 		let releaseRefresh
 		const refreshGate = new Promise(r => { releaseRefresh = r })
@@ -959,21 +961,21 @@ test('upstream 4xx/5xx error echoes redact injected query and header secrets fro
 	}, async ({ url: upstreamUrl }) => {
 		const { session: ownerSess } = createTestSession({ account: 'leak-owner@example.com', admin: true, withApp: false })
 		const { user: recipient, session: recipientSess } = createTestSession({ account: 'leak-recipient@example.com', admin: true, withApp: false })
-		const app = db.tokens.create({
+		const app = db.apps.create({
 			userId: ownerSess.userId,
 			provider: 'secret_echo',
 			type: 'static',
 			name: 'Echo API',
+			baseUrl: upstreamUrl,
 			credentials: {
 				headers: { 'x-secret-hdr': 'hdr_secret_value_99', cookie: 'session="cookie_secret_value_77"; sig=s%3Asigned_cookie%2B88%3D%3D; ; theme=dark' },
-				query: { api_key: 'q_secret_leak_tok', v: '2' },
-				baseUrl: upstreamUrl
+				query: { api_key: 'q_secret_leak_tok', v: '2' }
 			}
 		})
 		const shareRes = await mcp(ownerSess.token, 'admin', { action: 'share_app', appId: app.id, account: 'leak-recipient@example.com' })
 		assert.equal(shareRes.isError, undefined, shareRes.content[0].text)
 		const shareId = JSON.parse(shareRes.content[0].text).shareId
-		db.links.create({ sessionId: recipientSess.id, appId: shareId })
+		db.links.create({ sessionId: recipientSess.id, appId: app.id, shareId })
 		const mcpErr = await mcp(recipientSess.token, 'secret_echo_api', { url: '/items?keep=yes' })
 		assert.equal(mcpErr.isError, true)
 		assert.equal(mcpErr.content[0].text.includes('q_secret_leak_tok'), false, 'MCP error must redact query secret')
