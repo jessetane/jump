@@ -12,9 +12,10 @@ if (isMain) {
 	}
 }
 
-const [{ server, bootstrapLocalAdmin }, db] = await Promise.all([
+const [{ server, bootstrapLocalAdmin }, db, { APP_NAME }] = await Promise.all([
 	import('./server.js'),
-	import('./db/index.js')
+	import('./db/index.js'),
+	import('./util.js')
 ])
 
 export { server, bootstrapLocalAdmin }
@@ -27,7 +28,7 @@ if (isMain) {
 		console.log(`[bootstrap] Admin session created for localhost: ${bootstrapped.token}`)
 	}
 	server.listen(port, host, () => {
-		console.log(`jump listening on ${host}:${port}`)
+		console.log(`${APP_NAME} listening on ${host}:${port}`)
 	})
 	let shuttingDown = false
 	function shutdown () {

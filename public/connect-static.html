@@ -3,7 +3,7 @@
 	<head>
 		<meta charset=utf-8>
 		<meta name="viewport" content="width=device-width,initial-scale=1">
-		<title>jump connect</title>
+		<title>{{APP_NAME}} connect</title>
 		<link rel="stylesheet" href="/style.css">
 		<style>
 			.hint {
@@ -63,7 +63,7 @@
 	</head>
 	<body class=column>
 		<div class="view column" id="connect-view">
-			<h1>jump</h1>
+			<h1>{{APP_NAME}}</h1>
 			<p class="subtitle" id="page-subtitle">Connect static API credentials</p>
 			<div class="error-msg" id="error-msg" role="alert"></div>
 			<form id="static-form" method="POST" action="/apps/connect">
@@ -200,18 +200,14 @@
 			function showSuccess (title, subtitle, detail) {
 				document.title = title
 				const viewEl = document.getElementById('connect-view')
-				viewEl.replaceChildren()
-				const h1 = document.createElement('h1')
-				h1.textContent = 'jump'
+				const h1 = viewEl.querySelector('h1')
 				const sub = document.createElement('p')
 				sub.className = 'subtitle'
 				sub.textContent = subtitle
 				const note = document.createElement('p')
 				note.className = 'subtitle'
 				note.textContent = detail
-				viewEl.appendChild(h1)
-				viewEl.appendChild(sub)
-				viewEl.appendChild(note)
+				viewEl.replaceChildren(h1, sub, note)
 			}
 
 			async function handleSubmit (evt) {

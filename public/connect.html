@@ -3,7 +3,7 @@
 	<head>
 		<meta charset=utf-8>
 		<meta name="viewport" content="width=device-width,initial-scale=1">
-		<title>jump connect</title>
+		<title>{{APP_NAME}} connect</title>
 		<link rel="stylesheet" href="/style.css">
 		<style>
 			.subtitle,
@@ -144,7 +144,7 @@
 	</head>
 	<body class=column>
 		<div class="view column" id="connect-view">
-			<h1>jump</h1>
+			<h1>{{APP_NAME}}</h1>
 			<p class="subtitle" id="page-subtitle">Configure API services access</p>
 			<form id="connect-form" method="POST" action="/providers/google/consent" class="column">
 				<div id="hidden-inputs"></div>
@@ -270,7 +270,6 @@
 					}
 				}
 				const syncWarning = () => updateAuthUrlWarning(warningConfig, scopeByToken, warningEl, provider.name, impliedScopes)
-				document.title = 'jump connect'
 				if (formEl) formEl.action = '/providers/' + provider.id + '/consent'
 				if (submitEl) submitEl.textContent = 'Authorize with ' + provider.name
 				if (params.reauth_app_id) {

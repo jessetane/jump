@@ -1,17 +1,14 @@
-import fs from 'node:fs'
 import RpcEngine from 'rpc-engine'
 import * as api from './api/index.js'
 import * as db from './db/index.js'
 import { getProvider, listOauthProviders, parseProviderTool } from './providers/index.js'
-import { assertKeys, getBody, getBaseUrl, httpError, isPlainObject, sendJson } from './util.js'
+import { APP_NAME, APP_VERSION, assertKeys, getBody, getBaseUrl, httpError, isPlainObject, sendJson } from './util.js'
 
 export {
 	executeTool,
 	formatError,
 	handleMcp
 }
-
-const PKG_VERSION = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 
 function formatProviderServices (provider) {
 	const entries = Object.values(provider.services || {})
@@ -136,7 +133,7 @@ function buildAdminTool () {
 				admin: { type: 'boolean', description: 'Grant or revoke admin permissions on a session (used for create_session and update_session).' },
 				ttl: { type: ['number', 'null'], description: 'Optional session lifetime in seconds for create_session (e.g. 300 for 5 minutes; omit or null for no expiry).' },
 				rotateToken: { type: 'boolean', description: 'When action is update_session, set to true to rotate and regenerate the session bearer token.' },
-				merge: { type: 'boolean', description: 'When action is link_login, set to true to merge an existing Jump account into the current user if that login is already registered.' },
+				merge: { type: 'boolean', description: 'When action is link_login, set to true to merge an existing account into the current user if that login is already registered.' },
 				revoke: { type: 'boolean', description: 'When action is disconnect_app, set to false to remove locally without upstream revocation (defaults to true).' },
 				allOthers: { type: 'boolean', description: 'When action is revoke_session, set to true to revoke all other sessions.' },
 				allowed: { type: 'boolean', description: 'When action is list_logs, filter logs by whether the request was allowed by policy.' },
@@ -329,7 +326,7 @@ const rpcMethods = Object.assign(Object.create(null), {
 		return {
 			protocolVersion,
 			capabilities: { tools: { listChanged: false } },
-			serverInfo: { name: 'jump', version: PKG_VERSION },
+			serverInfo: { name: APP_NAME, version: APP_VERSION },
 			instructions: buildServerInstructions(session, base)
 		}
 	},

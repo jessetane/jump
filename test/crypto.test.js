@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Worker } from 'node:worker_threads'
-import { useServer, testDbPath, createTestSession, withEnv, mcp, req, db, cryptoMod } from './helpers.js'
+import { useServer, testDbPath, createTestSession, withEnv, mcp, req, db, utilMod, cryptoMod } from './helpers.js'
 
 useServer()
 
@@ -170,10 +170,12 @@ test('encryption key sources, rotation across restarts, and VACUUM scrubbing of 
 		try {
 			tpmDb.exec('PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;')
 			tpmDb.exec(TOKEN_DDL)
+			const credFile = `${utilMod.APP_NAME}.key`
+			const oldCredFile = `${utilMod.APP_NAME}.key.old`
 			await withEnv({ CREDENTIALS_DIRECTORY: credDir, ENCRYPTION_KEY: undefined }, () => {
 				assert.throws(() => db.tokens.initKeys(tpmDb), /Missing systemd credential/)
 				assert.equal(fs.existsSync(`${tpmDbPath}.key`), false)
-				fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
+				fs.writeFileSync(path.join(credDir, credFile), `${k1}\n`, { mode: 0o600 })
 				db.tokens.initKeys(tpmDb)
 				assert.equal(fs.existsSync(`${tpmDbPath}.key`), false)
 				const ctx = cryptoMod.secretContext('tpm-1', 'stripe', 'static')
@@ -183,14 +185,14 @@ test('encryption key sources, rotation across restarts, and VACUUM scrubbing of 
 					now,
 					now
 				)
-				fs.renameSync(path.join(credDir, 'jump.key'), path.join(credDir, 'jump.key.old'))
-				fs.writeFileSync(path.join(credDir, 'jump.key'), `${k2}\n`, { mode: 0o600 })
+				fs.renameSync(path.join(credDir, credFile), path.join(credDir, oldCredFile))
+				fs.writeFileSync(path.join(credDir, credFile), `${k2}\n`, { mode: 0o600 })
 				db.tokens.initKeys(tpmDb)
-				fs.rmSync(path.join(credDir, 'jump.key.old'))
+				fs.rmSync(path.join(credDir, oldCredFile))
 				db.tokens.initKeys(tpmDb)
 				const ctNew = JSON.parse(tpmDb.prepare("SELECT credentials FROM tokens WHERE id = 'tpm-1'").get().credentials).secret
 				assert.deepEqual(JSON.parse(cryptoMod.decryptSecret(ctNew, ctx)), { headers: { authorization: 'Bearer sk_tpm' } })
-				fs.writeFileSync(path.join(credDir, 'jump.key'), `${k1}\n`, { mode: 0o600 })
+				fs.writeFileSync(path.join(credDir, credFile), `${k1}\n`, { mode: 0o600 })
 				assert.throws(() => db.tokens.initKeys(tpmDb), /unable to authenticate/i)
 			})
 		} finally {

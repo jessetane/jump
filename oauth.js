@@ -4,7 +4,7 @@ import * as api from './api/index.js'
 import * as db from './db/index.js'
 import { getProvider, isValidProviderId, isOauthProviderAllowed, listOauthProviders, requireOauthProvider, parseGrantedServices, summarizeScopes, normalizeServiceSelections } from './providers/index.js'
 import { assertSsoLogin, assertSsoLink, shouldClaimUnscoped } from './sso.js'
-import { getBody, getBaseUrl, getClientIp, httpError, isJsonMime, optionalString, parseJsonObject, redirect, searchParamsToObject, sendHtml, sendJson, sendText, isLoopbackHost } from './util.js'
+import { APP_NAME, escapeHtml, getBody, getBaseUrl, getClientIp, httpError, isJsonMime, optionalString, parseJsonObject, redirect, searchParamsToObject, sendHtml, sendJson, sendText, isLoopbackHost } from './util.js'
 
 export {
 	handleOauth,
@@ -95,14 +95,6 @@ function enforceSso (res, fn) {
 	}
 }
 
-function escapeHtml (str) {
-	return String(str || '')
-		.replace(/&/g, '&amp;')
-		.replace(/</g, '&lt;')
-		.replace(/>/g, '&gt;')
-		.replace(/"/g, '&quot;')
-}
-
 function renderCardPage (title, subtitle, bodyHtml) {
 	return `<!DOCTYPE html>
 <html>
@@ -114,7 +106,7 @@ function renderCardPage (title, subtitle, bodyHtml) {
 	</head>
 	<body class=column>
 		<div class="view column">
-			<h1>jump</h1>
+			<h1>${escapeHtml(APP_NAME)}</h1>
 			<p class="subtitle">${subtitle}</p>
 			${bodyHtml}
 		</div>
@@ -339,7 +331,10 @@ function consumeSetupContext (code, opts = {}, validate = null) {
 }
 
 function sendInitHtml (res, template, initData) {
-	sendHtml(res, template.replace('{{INIT_DATA}}', () => JSON.stringify(initData).replace(/</g, '\\u003c')))
+	const html = template
+		.replaceAll('{{APP_NAME}}', () => escapeHtml(APP_NAME))
+		.replace('{{INIT_DATA}}', () => JSON.stringify(initData).replace(/</g, '\\u003c'))
+	sendHtml(res, html)
 }
 
 async function handleAuthorize (req, res, query) {
@@ -665,7 +660,7 @@ async function handleVerify (req, res, query) {
 		const displayAccount = db.logins.getAccountByUserId(existingUser.id)
 		const actionVerb = targetSession ? 'Update' : 'Activate'
 		sendHtml(res, renderCardPage(
-			'jump verify',
+			`${APP_NAME} verify`,
 			`${actionVerb} session for <strong>${escapeHtml(displayAccount)}</strong>`,
 			`<form method="POST" action="/oauth/verify"><input type="hidden" name="code" value="${escapeHtml(code)}">${appsHtml}<button type="submit">${actionVerb} Session</button></form>`
 		))

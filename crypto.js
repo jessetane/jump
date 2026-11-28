@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { tightenFileMode } from './util.js'
+import { APP_NAME, tightenFileMode } from './util.js'
 
 export {
 	generateKey,
@@ -19,7 +19,7 @@ const SALT_BYTES = 16
 const IV_BYTES = 12
 const TAG_BYTES = 16
 const KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/
-const HKDF_INFO_PREFIX = 'jump:tokens:v1:'
+const HKDF_INFO_PREFIX = 'tokens:v1:'
 
 let activeKeys = null
 
@@ -90,8 +90,8 @@ function loadKeyPair (keyPath, oldKeyPath, { autoCreate = false, tighten = false
 function loadKeys ({ dbPath = process.env.DB_PATH || './data.db', encrypted = false } = {}) {
 	const credDir = process.env.CREDENTIALS_DIRECTORY?.trim()
 	if (credDir) {
-		const keyPath = path.join(credDir, 'jump.key')
-		activeKeys = loadKeyPair(keyPath, path.join(credDir, 'jump.key.old'), {
+		const keyPath = path.join(credDir, `${APP_NAME}.key`)
+		activeKeys = loadKeyPair(keyPath, path.join(credDir, `${APP_NAME}.key.old`), {
 			missingMessage: `Missing systemd credential: ${keyPath}`
 		})
 		return activeKeys

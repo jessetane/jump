@@ -6,7 +6,7 @@ import { handleRest } from './rest.js'
 import { listOauthProviders, parseOauthProviders } from './providers/index.js'
 import * as db from './db/index.js'
 import { parseSsoDomains } from './sso.js'
-import { getBaseUrl, getClientIp, getUserAgent, httpError, positiveNumberEnv, searchParamsToObject, sendJson, sendHtml } from './util.js'
+import { APP_NAME, escapeHtml, getBaseUrl, getClientIp, getUserAgent, httpError, positiveNumberEnv, searchParamsToObject, sendJson, sendHtml } from './util.js'
 
 export { server, bootstrapLocalAdmin }
 
@@ -108,7 +108,7 @@ const server = http.createServer(async (req, res) => {
 				return
 			}
 			if (req.method === 'GET' || req.method === 'HEAD') {
-				sendHtml(res, INDEX_HTML.replaceAll('{{APP_URL}}', () => getBaseUrl(req)))
+				sendHtml(res, INDEX_HTML.replaceAll('{{APP_NAME}}', () => escapeHtml(APP_NAME)).replaceAll('{{APP_URL}}', () => escapeHtml(getBaseUrl(req))))
 				return
 			}
 			throw httpError(405, 'Method Not Allowed')

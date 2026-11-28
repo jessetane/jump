@@ -3,6 +3,8 @@ import fs from 'node:fs'
 import net from 'node:net'
 
 export {
+	APP_NAME,
+	APP_VERSION,
 	HOP_BY_HOP_HEADERS,
 	getRawBody,
 	getBody,
@@ -16,6 +18,7 @@ export {
 	getBaseUrl,
 	getClientIp,
 	serializeFormBody,
+	escapeHtml,
 	sendJson,
 	sendText,
 	sendHtml,
@@ -39,6 +42,8 @@ export {
 	optionalString,
 	streamAbortError
 }
+
+const { name: APP_NAME, version: APP_VERSION } = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
 
 const HOP_BY_HOP_HEADERS = [
 	'connection',
@@ -511,6 +516,14 @@ function searchParamsToObject (searchParams) {
 		out[k] = v
 	}
 	return out
+}
+
+function escapeHtml (str) {
+	return String(str || '')
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
 }
 
 function parseJsonObject (rawBody, { allowedKeys = null, objectError = 'JSON body must be an object' } = {}) {

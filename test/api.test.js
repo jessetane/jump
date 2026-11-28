@@ -27,6 +27,8 @@ test('HTTP security headers, malformed URL 400, OPTIONS CORS, and 404 routing', 
 		assert.equal(res.headers.get('cache-control'), 'no-store')
 		assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
 		assert.equal(res.headers.get('content-security-policy'), "frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
+		assert.ok(res.text.includes(`<h1>${utilMod.APP_NAME}</h1>`))
+		assert.equal(res.text.includes('{{APP_NAME}}'), false)
 	}
 	assert.equal((await req('PUT', '/')).status, 405)
 	assert.equal((await req('OPTIONS', '/oauth/token')).status, 204)
@@ -72,7 +74,7 @@ test('MCP JSON-RPC framing, method guards, and internal error masking', async ()
 	assert.equal(initRes.data.id, 10)
 	assert.equal(initRes.data.result.protocolVersion, '2025-03-26')
 	assert.deepEqual(initRes.data.result.capabilities, { tools: { listChanged: false } })
-	assert.equal(initRes.data.result.serverInfo.name, 'jump')
+	assert.equal(initRes.data.result.serverInfo.name, utilMod.APP_NAME)
 	assert.ok(initRes.data.result.serverInfo.version)
 	assert.match(initRes.data.result.instructions, new RegExp(`${baseUrl().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/api/<provider>/\\*`))
 	assert.match(initRes.data.result.instructions, /create_session/)
@@ -405,7 +407,7 @@ test('getBaseUrl / getClientIp fail-closed proxy trust, OAuth rate limiting, and
 	try {
 		await new Promise((resolve, reject) => {
 			let out = ''
-			child.stdout.on('data', c => { out += c.toString('utf8'); if (out.includes('jump listening on')) resolve() })
+			child.stdout.on('data', c => { out += c.toString('utf8'); if (out.includes(`${utilMod.APP_NAME} listening on`)) resolve() })
 			child.once('exit', code => reject(new Error(`Exited early: ${code}`)))
 		})
 		const body = JSON.stringify({ redirect_uris: ['http://127.0.0.1:9999/cb'] })
