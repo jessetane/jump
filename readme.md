@@ -11,7 +11,7 @@ Giving agents access to APIs usually means installing or writing bespoke scripts
 	* **OAuth** - Ships with [`google`](providers/google.js) and [`github`](providers/github.js); adding a new config in [`providers/`](providers) is trivial (patches welcome).
 	* **Static credentials** - Any HTTPS API at runtime using `Bearer`, `Basic`, custom HTTP `headers`, or `query` parameters.
 * **Linking & sharing** - Link multiple apps to one session, fan one app across many sessions, or share apps with other users without exposing secrets.
-* **Request policies** - Attach ordered `allow`/`deny` rules matching HTTP method, origin, path, query and body to any link or share.
+* **Request policies** - Attach ordered `allow`/`deny` rules matching HTTP method, origin, path, query and body to any app, share or session link.
 
 ## Install
 ```sh
@@ -119,8 +119,8 @@ For headless or embedded installations, pass a bearer token (from `create_sessio
 	* `update_session` - Rename a session, toggle `admin`, or rotate its token.
 	* `revoke_session` - Revoke the current session, a specific session, or `allOthers`.
 	* `list_apps` - List connected and shared apps.
-	* `connect_app` - Connect an OAuth or static-credential upstream app (returns a browser setup URL when `credentials` are omitted, or re-authenticates / rotates credentials for `appId`).
-	* `update_app` - Update an app's name, `baseUrl`, or static credentials.
+	* `connect_app` - Connect an OAuth or static-credential upstream app with an optional app policy (returns a browser setup URL when `credentials` are omitted, or re-authenticates / rotates credentials for `appId`).
+	* `update_app` - Update an app's name, `baseUrl`, static credentials, or policy.
 	* `disconnect_app` - Remove an app (and revoke its upstream OAuth token).
 	* `share_app` - Share an owned app with another user under an optional ceiling policy.
 	* `unshare_app` - Revoke an app share from a user.
@@ -188,13 +188,13 @@ For `ALL /api/:provider/*`, authenticate with your session `Authorization: Beare
 ## Security
 
 ### Storage at rest
-Jump-issued tokens and codes are stored as `SHA-256` digests, and upstream credentials are encrypted with `AES-256-GCM` + per-write `HKDF-SHA256` ([`crypto.js`](crypto.js), [`db/tokens.js`](db/tokens.js)). Keys load from systemd `$CREDENTIALS_DIRECTORY/jump.key`, `ENCRYPTION_KEY`, or `<DB_PATH>.key` (`0600`), with rotation via `.old` or `<new>,<old>`.
+Jump-issued tokens and codes are stored as `SHA-256` digests, and upstream credentials are encrypted with `AES-256-GCM` + per-write `HKDF-SHA256` ([`crypto.js`](crypto.js), [`db/apps.js`](db/apps.js), [`db/sessions.js`](db/sessions.js), [`db/states.js`](db/states.js)). Keys load from systemd `$CREDENTIALS_DIRECTORY/jump.key`, `ENCRYPTION_KEY`, or `<DB_PATH>.key` (`0600`), with rotation via `.old` or `<new>,<old>`.
 
 ### Authentication & sessions
-Client sign-in uses OAuth 2.1 with `S256` PKCE, `ALLOWED_REDIRECT_DOMAINS`, optional `OAUTH_PROVIDERS` role filtering (`auth` / `app`), and optional `SSO_DOMAINS` IdP pinning ([`oauth.js`](oauth.js), [`sso.js`](sso.js)). Non-admin sessions only see their linked `<provider>_api` tools and cannot inspect apps, policies, or other sessions ([`api/auth.js`](api/auth.js)).
+Client sign-in uses OAuth 2.1 with `S256` PKCE, `ALLOWED_REDIRECT_DOMAINS`, optional `OAUTH_PROVIDERS` role filtering (`auth` / `app`), and optional `SSO_DOMAINS` IdP pinning ([`oauth.js`](oauth.js), [`sso.js`](sso.js)). Non-admin sessions only see their linked `<provider>_api` tools in MCP and cannot inspect other sessions or unlinked apps, or manage apps and policies ([`api/auth.js`](api/auth.js)).
 
 ### Upstream isolation & policies
-Secrets never appear in tool schemas, API responses, or logs, and are stripped across cross-origin redirects ([`api/proxy.js`](api/proxy.js), [`mcp.js`](mcp.js)). Every hop resolves DNS against a private/metadata IP blocklist ([`util.js`](util.js)) and evaluates ordered `allow`/`deny` rules, with owner share policies enforced as an immutable ceiling ([`policy.js`](policy.js)).
+Secrets never appear in tool schemas, API responses, or logs, and are stripped across cross-origin redirects ([`api/proxy.js`](api/proxy.js), [`mcp.js`](mcp.js)). Every hop resolves DNS against a private/metadata IP blocklist ([`util.js`](util.js)) and evaluates ordered `allow`/`deny` rules independently across the app policy, owner share ceiling, and session link policy ([`policy.js`](policy.js)).
 
 ### Network & reverse proxy
 `jump` binds to `127.0.0.1` by default and resolves public URLs from `APP_URL` if set, or from `Host` (plus `X-Forwarded-*` on loopback connections). In production, set `APP_URL` or run behind a local reverse proxy that overwrites `Host` and `X-Forwarded-*`.
